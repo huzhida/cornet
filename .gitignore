@@ -39,3 +39,6 @@
 
 # debug information files
 *.dwo
+
+# cmake build
+cmake-build*
