@@ -3,82 +3,165 @@
 
 #include <coroutine>
 #include <utility>
+#include <variant>
+#include <exception>
+#include <iterator>
+#include "task.h"
 
 namespace cornet {
 
-/**
- *      @tparam C for coroutine type
- *      @tparam I for initial_suspend return type
- *      @tparam F for final_suspend return type
- */
-template<typename I = std::suspend_always, typename F = std::suspend_always>
+template<typename V>
 struct base_promise_t {
-  auto initial_suspend() {return I{};}
-  auto final_suspend() noexcept {return F{};}
+  std::variant<std::monostate, V, std::exception_ptr> value;
+  void return_value(V v) {
+    value.template emplace<1>(std::move(v));
+  }
+  void unhandled_exception() {
+    value.template emplace<2>(std::current_exception());
+  }
 };
 
-/**
- *      @tparam C for coroutine type
- *      @tparam I for initial_suspend return type
- *      @tparam F for final_suspend return type
- */
-template<typename C, typename I = std::suspend_always, typename F = std::suspend_always>
-struct void_promise_t : public base_promise_t<I,F> {
-  C get_return_object() {
-    return C{std::coroutine_handle<void_promise_t>::from_promise(*this)};
-  }
+template<>
+struct base_promise_t<void> {
+  std::variant<std::monostate, std::exception_ptr> value;
   void return_void() {}
-  void unhandled_exception() {}
-};
-
-/**
- *      @tparam C for coroutine type
- *      @tparam V for return value type
- *      @tparam I for initial_suspend return type
- *      @tparam F for final_suspend return type
- */
-template<typename C, typename V, typename I = std::suspend_always, typename F = std::suspend_always>
-struct value_promise_t : public base_promise_t<I,F> {
-  V value;
-  C get_return_object() {
-    return C{std::coroutine_handle<value_promise_t>::from_promise(*this)};
+  void unhandled_exception() {
+    value.template emplace<1>(std::current_exception());
   }
-  void return_value(V v) {value = v;}
-  void unhandled_exception() {}
 };
 
-/**
- *      @tparam V for return value type
- *      @tparam I for initial_suspend return type
- *      @tparam F for final_suspend return type
- */
-template<typename V = void, typename I = std::suspend_always, typename F = std::suspend_always>
-struct coro {
-  using promise_type = std::conditional_t<std::is_void_v<V>, void_promise_t<coro, I, F>, value_promise_t<coro, V, I, F>>;
+template<typename V>
+struct coro_t {
+  struct promise_type : base_promise_t<V> {
+    std::coroutine_handle<> continuation;
+    coro_t get_return_object() {
+      return { std::coroutine_handle<promise_type>::from_promise(*this) };
+    }
+    struct final_awaiter {
+      bool await_ready() noexcept { return false; }
+      std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_type> h) noexcept {
+        if (h.promise().continuation) {
+          return h.promise().continuation;
+        }
+        return std::noop_coroutine();
+      }
+      void await_resume() noexcept {}
+    };
+    std::suspend_always initial_suspend() { return {}; }
+    final_awaiter final_suspend() noexcept { return {}; }
+
+  };
+
   std::coroutine_handle<promise_type> handle;
 
-  explicit coro(std::coroutine_handle<promise_type> h): handle(h) {}
-  virtual ~coro() { if(handle) handle.destroy();}
-  coro(const coro&) = delete;
-  coro& operator=(const coro&) = delete;
-  coro(coro&& other) noexcept : handle(std::exchange(other.handle, nullptr)) {}
-  coro& operator=(coro&& other) noexcept {
-    if (this == &other) return *this;
+  coro_t(std::coroutine_handle<promise_type> h) : handle(h) {}
+  ~coro_t() {
     if (handle) handle.destroy();
-    handle = std::exchange(other.handle, nullptr);
-    return *this;
   }
+  coro_t(const coro_t&) = delete;
+  coro_t(coro_t&& c) noexcept {
+    if (this != &c) {
+      if (this->handle) this->handle.destroy();
+      this->handle = std::exchange(c.handle, nullptr);
+    }
+  }
+  coro_t& operator=(const coro_t&) = delete;
+  coro_t& operator=(coro_t&& c)  noexcept {
+    if (this != &c) {
+      if (this->handle) this->handle.destroy();
+      this->handle = std::exchange(c.handle, nullptr);
+    }
+  }
+  auto operator co_await() {
+    struct coro_awaiter {
+      std::coroutine_handle<promise_type> handle;
+      bool await_ready() {
+        return !handle || handle.done();
+      }
+      std::coroutine_handle<> await_suspend(std::coroutine_handle<> parent) {
+        handle.promise().continuation = parent;
+        return handle;
+      }
+      V await_resume() {
+        if (handle.promise().value.index() == 2) {
+          std::rethrow_exception(std::get<2>(handle.promise().value));
+        }
+        return std::get<1>(handle.promise().value);
+      }
+    };
+    return coro_awaiter{handle};
+  }
+
   void resume() {
     if (!handle || handle.done()) return;
     handle.resume();
   }
-  void destroy() {
-    if (!handle) return;
-    handle.destroy();
-  }
-  bool done() const noexcept {
+  bool done() {
     return handle && handle.done();
   }
+};
+
+template<typename V>
+struct generator_t {
+  struct promise_type : base_promise_t<void> {
+    V current_value;
+    generator_t get_return_object() {
+      return {std::coroutine_handle<promise_type>::from_promise(*this)};
+    }
+    std::suspend_always initial_suspend() { return {}; }
+    std::suspend_always final_suspend() noexcept { return {}; }
+    std::suspend_always yield_value(V value) {
+      current_value = std::move(value);
+      return {};
+    }
+  };
+  std::coroutine_handle<promise_type> handle;
+
+  generator_t(std::coroutine_handle<promise_type> h): handle(h) {}
+  ~generator_t() {
+    if (handle) {
+      handle.destroy();
+    }
+  }
+  generator_t(const generator_t&) = delete;
+  generator_t(generator_t&& g) noexcept {
+    if (this != &g) {
+      if (this->handle) this->handle.destroy();
+      this->handle = std::exchange(g.handle, nullptr);
+    }
+  }
+  generator_t& operator=(const generator_t&) = delete;
+  generator_t& operator=(generator_t&& g)  noexcept {
+    if (this != &g) {
+      if (this->handle) this->handle.destroy();
+      this->handle = std::exchange(g.handle, nullptr);
+    }
+  }
+
+  struct iterator {
+    std::coroutine_handle<promise_type> handle;
+
+    using iterator_category = std::input_iterator_tag;
+    using value_type = V;
+    using difference_type = std::ptrdiff_t;
+    using pointer = V*;
+    using reference = V&;
+
+    V& operator*() {
+      return handle.promise().current_value;
+    }
+    bool operator!=(std::default_sentinel_t) { return !handle.done(); }
+    void operator++() { handle.resume(); }
+  };
+
+  iterator begin() {
+    if(handle) handle.resume();
+    return {handle};
+  }
+  std::default_sentinel_t end() {
+    return {};
+  }
+
 };
 
 } // cornet
