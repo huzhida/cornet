@@ -1,62 +1,52 @@
 #ifndef CORNET_CONTEXT_H
 #define CORNET_CONTEXT_H
 
-#include <coroutine>
 #include <queue>
 #include "uring.h"
+#include "task.h"
+#include "coro.h"
+
 namespace cornet {
 
-struct uring_task_t {
-  int32_t value;
+struct context_t {
+  uring_t uring;
 
-  std::coroutine_handle<> handle;
-  virtual void return_value(int32_t v) {
-    value = v;
-    handle.resume();
+  template<typename C>
+  void spawn(C&& c) {
+    resume(std::forward<C>(c));
   }
-};
-
-
-class context {
-  uring r;
-  std::mutex m;
- public:
-  void submit_async_read(uring_task_t* task, int fd, void* buf, uint32_t size, uint64_t offset) {
-    std::lock_guard<std::mutex> guard(m);
-    auto sqe = r.get_sqe();
-    sqe.with_data(task).prep_read(fd, buf, size, offset);
-    r.submit();
-  }
-
-  void submit_async_write(uring_task_t* task, int fd, void* buf, uint32_t size, uint64_t offset) {
-    std::lock_guard<std::mutex> guard(m);
-    auto sqe = r.get_sqe();
-    sqe.with_data(task).prep_write(fd, buf, size, offset);
-    r.submit();
-  }
-
-  void submit_async_send(uring_task_t* task, int sockfd, void* buf, uint32_t size, int flags) {
-    std::lock_guard<std::mutex> guard(m);
-    auto sqe = r.get_sqe();
-    sqe.with_data(task).prep_send(sockfd, buf, size, flags);
-    r.submit();
-  }
-
-  void submit_async_recv(uring_task_t* task, int sockfd, void* buf, uint32_t size, int flags) {
-    std::lock_guard<std::mutex> guard(m);
-    auto sqe = r.get_sqe();
-    sqe.with_data(task).prep_recv(sockfd, buf, size, flags);
-    r.submit();
-  }
-
-  void loop() {
-    while(true) {
-      auto cqes = r.wait_cqes(1);
-      for (auto cqe : cqes) {
-        ((uring_task_t*)cqe->user_data)->return_value(cqe->res);
-      }
+  template<typename C>
+  void resume(C&& c) {
+    using T = std::decay_t<C>;
+    if constexpr (std::is_same_v<T, std::coroutine_handle<>>) {
+      ready_tasks.push(std::forward<C>(c));
+    } else if constexpr(std::is_pointer_v<T>) {
+      ready_tasks.push(c->handle);
+    } else {
+      ready_tasks.push(c.handle);
     }
   }
+  void run() {
+    need_stop = true;
+    while(!need_stop) {
+      while(!ready_tasks.empty()) {
+        auto handle = ready_tasks.front();
+        ready_tasks.pop();
+        handle.resume();
+      }
+
+      uring.wait_and_process_cqes([](cqe_t cqe) {
+        auto task = reinterpret_cast<task_t*>(cqe->user_data);
+        task->complete(task,cqe->res);
+      }, 1, 1);
+    }
+  }
+  void stop() {
+    need_stop = true;
+  }
+ private:
+  std::queue<std::coroutine_handle<>> ready_tasks;
+  bool need_stop{false};
 };
 
 } // cornet
