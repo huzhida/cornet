@@ -3,19 +3,22 @@
 
 #include <atomic>
 #include <memory>
+#include "utils.h"
+
+namespace cornet {
+template<typename T, size_t N>
+struct buffer_t {
+  alignas(T) std::byte a[N * sizeof(T)];
+
+  T* at(size_t index) {
+    return reinterpret_cast<T*>(a + index * sizeof(T));
+  }
+};
 
 template<typename T, size_t N>
 struct ringbuffer_t {
   static_assert(N > 0 && !(N&(N-1)), "ringbuffer_t need size N must be power of 2");
-
-  struct buffer {
-    alignas(T) std::byte a[N * sizeof(T)];
-
-    T* at(size_t index) {
-      return reinterpret_cast<T*>(a + index * sizeof(T));
-    }
-  };
-  using container_t = std::conditional_t<std::is_trivial_v<T>, std::array<T, N>, buffer>;
+  using container_t = std::conditional_t<std::is_trivial_v<T>, std::array<T, N>, buffer_t<T, N>>;
   ringbuffer_t() : read(0), write(0), read_cache(0), write_cache(0) {}
   ~ringbuffer_t() {
     size_t w = write.load(std::memory_order_relaxed);
@@ -93,13 +96,15 @@ struct ringbuffer_t {
     return true;
   }
  private:
-  alignas(64) std::atomic<size_t> read;
+  alignas(CORNET_CACHE_LINE) std::atomic<size_t> read;
   size_t write_cache;
 
-  alignas(64) std::atomic<size_t> write;
+  alignas(CORNET_CACHE_LINE) std::atomic<size_t> write;
   size_t read_cache;
 
-  alignas(64) container_t container;
+  alignas(CORNET_CACHE_LINE) container_t container;
 };
+}
+
 
 #endif //CORNET_RINGBUFFER_H
