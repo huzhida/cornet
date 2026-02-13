@@ -35,7 +35,7 @@ struct coro_t {
   struct promise_type : base_promise_t<V> {
     std::coroutine_handle<> continuation;
     coro_t get_return_object() {
-      return { std::coroutine_handle<promise_type>::from_promise(*this) };
+      return coro_t<V>{ std::coroutine_handle<promise_type>::from_promise(*this) };
     }
     struct final_awaiter {
       bool await_ready() noexcept { return false; }
@@ -54,7 +54,7 @@ struct coro_t {
 
   std::coroutine_handle<promise_type> handle;
 
-  coro_t(std::coroutine_handle<promise_type> h) : handle(h) {}
+  explicit coro_t(std::coroutine_handle<promise_type> h) : handle(h) {}
   ~coro_t() {
     if (handle) handle.destroy();
   }
@@ -106,7 +106,7 @@ struct generator_t {
   struct promise_type : base_promise_t<void> {
     V current_value;
     generator_t get_return_object() {
-      return {std::coroutine_handle<promise_type>::from_promise(*this)};
+      return generator_t<V>{std::coroutine_handle<promise_type>::from_promise(*this)};
     }
     std::suspend_always initial_suspend() { return {}; }
     std::suspend_always final_suspend() noexcept { return {}; }
@@ -117,7 +117,7 @@ struct generator_t {
   };
   std::coroutine_handle<promise_type> handle;
 
-  generator_t(std::coroutine_handle<promise_type> h): handle(h) {}
+  explicit generator_t(std::coroutine_handle<promise_type> h): handle(h) {}
   ~generator_t() {
     if (handle) {
       handle.destroy();
