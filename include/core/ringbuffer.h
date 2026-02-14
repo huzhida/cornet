@@ -13,6 +13,11 @@ struct buffer_t {
   T* at(size_t index) {
     return reinterpret_cast<T*>(a + index * sizeof(T));
   }
+
+  template<typename... Args>
+  void placement_new(size_t index, Args&&... args) {
+    new (at(index)) T(std::forward<Args>(args)...);
+  }
 };
 
 template<typename T, size_t N>
@@ -45,8 +50,7 @@ struct ringbuffer_t {
     if constexpr (std::is_trivially_copyable<T>::value && std::is_trivially_destructible_v<T>) {
       container[w] = std::forward<U>(t);
     } else {
-      auto c = container.at(w);
-      new (c) T(std::forward<U>(t));
+      container.placement_new(w, std::forward<U>(t));
     }
 
     write.store(next_w, std::memory_order_release);
@@ -66,8 +70,7 @@ struct ringbuffer_t {
     if constexpr (std::is_trivially_copyable<T>::value && std::is_trivially_destructible_v<T>) {
       container[w] = T(std::forward<Args>(args)...);
     } else {
-      auto c = container.at(w);
-      new (c) T(std::forward<Args>(args)...);
+      container.placement_new(w, std::forward<Args>(args)...);
     }
 
     write.store(next_w, std::memory_order_release);

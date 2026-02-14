@@ -52,6 +52,10 @@ struct sqe_t {
     io_uring_prep_close(sqe, fd);
     return *this;
   }
+  CORNET_MAYBE_UNUSED inline sqe_t& prep_cancel(void* user_data, int flags) {
+    io_uring_prep_cancel(sqe, user_data, flags);
+    return *this;
+  }
 
   io_uring_sqe* sqe;
 };
@@ -65,20 +69,30 @@ class uring_t {
   uring_t& operator=(const uring_t&) = delete;
   uring_t& operator=(uring_t&& r) noexcept;
   inline bool submit() {
-    if(io_uring_submit(uring.get()) < 0) {
+    int submit_nr = io_uring_submit(uring.get());
+    if (submit_nr < 0) {
       SPDLOG_ERROR("io_uring submit sqe failed with error: {}", strerror(errno));
       return false;
     }
+    task_nr += submit_nr;
     return true;
   }
-  uint32_t wait_and_process_cqes(void (*process_fn)(cqe_t), int wait_nr = 1, int timeout_s = -1,
-                                 int timeout_ns = -1, sigset_t* mask  = nullptr);
+  uint32_t wait_and_process_cqes(int (*process_fn)(cqe_t), uint32_t wait_nr = 1, int timeout_s = -1,int timeout_ns = -1,
+                                 sigset_t* mask  = nullptr);
+  inline bool idle() const {
+    return task_nr == 0;
+  }
+  inline size_t running_task_nr() const {
+    return task_nr;
+  }
   CORNET_MAYBE_UNUSED bool register_buffers(iovec* buffers, size_t buffer_nr);
   CORNET_MAYBE_UNUSED bool register_files(int* files, size_t file_nr);
   inline sqe_t new_sqe() {
     return {io_uring_get_sqe(uring.get())};
   }
+
  private:
+  uint32_t task_nr{0};
   std::unique_ptr<io_uring> uring;
   std::unique_ptr<iovec[]> registered_buffers{};
   std::unique_ptr<int[]> registered_files{};
