@@ -63,7 +63,7 @@ uint32_t uring_t::wait_and_process_cqes(void (*process_fn)(cqe_t), int wait_nr, 
   }
   return count;
 }
-bool uring_t::register_buffers(iovec *buffers, size_t buffer_nr) {
+CORNET_MAYBE_UNUSED bool uring_t::register_buffers(iovec *buffers, size_t buffer_nr) {
   for (size_t index = 0; index < buffer_nr; ++index) {
     iovec& buffer = buffers[index];
     posix_memalign(&buffer.iov_base, 4 * 1024, buffer.iov_len);
@@ -78,7 +78,7 @@ bool uring_t::register_buffers(iovec *buffers, size_t buffer_nr) {
   }
   return true;
 }
-bool uring_t::register_files(int *files, size_t file_nr)  {
+CORNET_MAYBE_UNUSED bool uring_t::register_files(int *files, size_t file_nr)  {
   if (io_uring_register_files(uring.get(), files, file_nr) < 0) {
     SPDLOG_ERROR("failed to register files on io_uring with error: {}", strerror(errno));
   }

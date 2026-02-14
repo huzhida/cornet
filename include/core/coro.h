@@ -32,7 +32,7 @@ struct base_promise_t<void> {
 };
 
 template<typename V>
-struct coro_t {
+struct coro_t : task_t {
   struct promise_type : base_promise_t<V> {
     std::coroutine_handle<> continuation;
     coro_t get_return_object() {
@@ -53,24 +53,26 @@ struct coro_t {
 
   };
 
-  std::coroutine_handle<promise_type> handle;
+  std::coroutine_handle<promise_type> promised_handle;
 
-  explicit coro_t(std::coroutine_handle<promise_type> h) : handle(h) {}
+  explicit coro_t(std::coroutine_handle<promise_type> h) : promised_handle(h) {
+    this->handle = h;
+  }
   ~coro_t() {
-    if (handle) handle.destroy();
+    if (promised_handle) promised_handle.destroy();
   }
   coro_t(const coro_t&) = delete;
   coro_t(coro_t&& c) noexcept {
     if (this != &c) {
-      if (this->handle) this->handle.destroy();
-      this->handle = std::exchange(c.handle, nullptr);
+      if (this->promised_handle) this->promised_handle.destroy();
+      this->promised_handle = std::exchange(c.promised_handle, nullptr);
     }
   }
   coro_t& operator=(const coro_t&) = delete;
   coro_t& operator=(coro_t&& c)  noexcept {
     if (this != &c) {
-      if (this->handle) this->handle.destroy();
-      this->handle = std::exchange(c.handle, nullptr);
+      if (this->promised_handle) this->promised_handle.destroy();
+      this->promised_handle = std::exchange(c.promised_handle, nullptr);
     }
   }
   auto operator co_await() {
@@ -90,20 +92,20 @@ struct coro_t {
         return std::get<1>(handle.promise().value);
       }
     };
-    return coro_awaiter{handle};
+    return coro_awaiter{promised_handle};
   }
 
   CORNET_MAYBE_UNUSED void resume() {
-    if (!handle || handle.done()) return;
-    handle.resume();
+    if (!promised_handle || promised_handle.done()) return;
+    promised_handle.resume();
   }
   bool done() {
-    return handle && handle.done();
+    return promised_handle && promised_handle.done();
   }
 };
 
 template<typename V>
-struct generator_t {
+struct generator_t : task_t {
   struct promise_type : base_promise_t<void> {
     V current_value;
     generator_t get_return_object() {
@@ -116,26 +118,28 @@ struct generator_t {
       return {};
     }
   };
-  std::coroutine_handle<promise_type> handle;
+  std::coroutine_handle<promise_type> promised_handle;
 
-  explicit generator_t(std::coroutine_handle<promise_type> h): handle(h) {}
+  explicit generator_t(std::coroutine_handle<promise_type> h): promised_handle(h) {
+    this->handle = handle;
+  }
   ~generator_t() {
-    if (handle) {
-      handle.destroy();
+    if (promised_handle) {
+      promised_handle.destroy();
     }
   }
   generator_t(const generator_t&) = delete;
   generator_t(generator_t&& g) noexcept {
     if (this != &g) {
-      if (this->handle) this->handle.destroy();
-      this->handle = std::exchange(g.handle, nullptr);
+      if (this->promised_handle) this->promised_handle.destroy();
+      this->promised_handle = std::exchange(g.promised_handle, nullptr);
     }
   }
   generator_t& operator=(const generator_t&) = delete;
   generator_t& operator=(generator_t&& g)  noexcept {
     if (this != &g) {
-      if (this->handle) this->handle.destroy();
-      this->handle = std::exchange(g.handle, nullptr);
+      if (this->promised_handle) this->promised_handle.destroy();
+      this->promised_handle = std::exchange(g.promised_handle, nullptr);
     }
   }
 
@@ -156,8 +160,8 @@ struct generator_t {
   };
 
   iterator begin() {
-    if(handle) handle.resume();
-    return {handle};
+    if(promised_handle) promised_handle.resume();
+    return {promised_handle};
   }
   std::default_sentinel_t end() {
     return {};
