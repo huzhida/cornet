@@ -12,22 +12,9 @@ namespace cornet {
 struct context_t {
   context_t() = default;
   context_t(const context_t&) = delete;
-  context_t(context_t&& ctx) noexcept {
-    if (this != &ctx) {
-      this->uring = std::move(ctx.uring);
-      this->need_stop = ctx.need_stop;
-      this->ready_tasks = std::move(ctx.ready_tasks);
-    }
-  }
+  context_t(context_t&& ctx) noexcept;
   context_t& operator=(const context_t&) = delete;
-  context_t& operator=(context_t&& ctx)  noexcept {
-    if (this != &ctx) {
-      this->uring = std::move(ctx.uring);
-      this->need_stop = ctx.need_stop;
-      this->ready_tasks = std::move(ctx.ready_tasks);
-    }
-    return *this;
-  }
+  context_t& operator=(context_t&& ctx)  noexcept;
   template<typename C> void spawn(C&& c) {
     sched(std::forward<C>(c));
   }
@@ -41,26 +28,9 @@ struct context_t {
       ready_tasks.push(c.handle);
     }
   }
-  void run() {
-    need_stop = false;
-    while(!need_stop) {
-      while(!ready_tasks.empty()) {
-        auto handle = ready_tasks.front();
-        ready_tasks.pop();
-        handle.resume();
-      }
-      uring.wait_and_process_cqes([](cqe_t cqe) {
-        auto task = reinterpret_cast<task_t*>(cqe->user_data);
-        task->complete(task,cqe->res);
-      }, 1, 1);
-    }
-  }
-  void stop() {
-    need_stop = true;
-  }
-  uring_t& io_uring() {
-    return uring;
-  }
+  void run();
+  void stop();
+  uring_t& io_uring();
 
  private:
   uring_t uring;

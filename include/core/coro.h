@@ -7,6 +7,7 @@
 #include <exception>
 #include <iterator>
 #include "task.h"
+#include "utils.h"
 
 namespace cornet {
 
@@ -38,14 +39,14 @@ struct coro_t {
       return coro_t<V>{ std::coroutine_handle<promise_type>::from_promise(*this) };
     }
     struct final_awaiter {
-      bool await_ready() noexcept { return false; }
-      std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_type> h) noexcept {
+      CORNET_MAYBE_UNUSED bool await_ready() noexcept { return false; }
+      CORNET_MAYBE_UNUSED std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_type> h) noexcept {
         if (h.promise().continuation) {
           return h.promise().continuation;
         }
         return std::noop_coroutine();
       }
-      void await_resume() noexcept {}
+      CORNET_MAYBE_UNUSED void await_resume() noexcept {}
     };
     std::suspend_always initial_suspend() { return {}; }
     final_awaiter final_suspend() noexcept { return {}; }
@@ -75,14 +76,14 @@ struct coro_t {
   auto operator co_await() {
     struct coro_awaiter {
       std::coroutine_handle<promise_type> handle;
-      bool await_ready() {
+      CORNET_MAYBE_UNUSED bool await_ready() {
         return !handle || handle.done();
       }
-      std::coroutine_handle<> await_suspend(std::coroutine_handle<> parent) {
+      CORNET_MAYBE_UNUSED std::coroutine_handle<> await_suspend(std::coroutine_handle<> parent) {
         handle.promise().continuation = parent;
         return handle;
       }
-      V await_resume() {
+      CORNET_MAYBE_UNUSED V await_resume() {
         if (handle.promise().value.index() == 2) {
           std::rethrow_exception(std::get<2>(handle.promise().value));
         }
@@ -92,7 +93,7 @@ struct coro_t {
     return coro_awaiter{handle};
   }
 
-  void resume() {
+  CORNET_MAYBE_UNUSED void resume() {
     if (!handle || handle.done()) return;
     handle.resume();
   }
