@@ -59,6 +59,7 @@ uint32_t uring_t::wait_and_process_cqes(void (*process_fn)(cqe_t), int wait_nr, 
   io_uring_for_each_cqe(uring.get(), head, cqe) {
     process_fn(cqe);
     ++count;
+    --task_nr;
     io_uring_cqe_seen(uring.get(), cqe);
   }
   return count;
@@ -68,8 +69,9 @@ CORNET_MAYBE_UNUSED bool uring_t::register_buffers(iovec *buffers, size_t buffer
     iovec& buffer = buffers[index];
     posix_memalign(&buffer.iov_base, 4 * 1024, buffer.iov_len);
   }
-  if (io_uring_register_buffers(uring.get(), buffers, buffer_nr) < 0) {
-    SPDLOG_ERROR("failed to register buffer on io_uring with error: {}", strerror(errno));
+  int x = io_uring_register_buffers(uring.get(), buffers, buffer_nr);
+  if (x < 0) {
+    SPDLOG_ERROR("failed to register buffer on io_uring with error: {}", strerror(-x));
     return false;
   }
   this->registered_buffers = std::make_unique<iovec[]>(buffer_nr);

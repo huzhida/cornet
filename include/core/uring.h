@@ -52,6 +52,10 @@ struct sqe_t {
     io_uring_prep_close(sqe, fd);
     return *this;
   }
+  CORNET_MAYBE_UNUSED inline sqe_t& prep_cancel(void* user_data, int flags) {
+    io_uring_prep_cancel(sqe, user_data, flags);
+    return *this;
+  }
 
   io_uring_sqe* sqe;
 };
@@ -76,8 +80,11 @@ class uring_t {
   CORNET_MAYBE_UNUSED bool register_buffers(iovec* buffers, size_t buffer_nr);
   CORNET_MAYBE_UNUSED bool register_files(int* files, size_t file_nr);
   inline sqe_t new_sqe() {
+    ++task_nr;
     return {io_uring_get_sqe(uring.get())};
   }
+
+  int task_nr{0};
  private:
   std::unique_ptr<io_uring> uring;
   std::unique_ptr<iovec[]> registered_buffers{};
