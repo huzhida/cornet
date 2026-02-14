@@ -32,3 +32,15 @@ file(GLOB_RECURSE CORNET_SRC CONFIGURE_DEPENDS src/*.cc src/*.hpp)
 add_executable(${CORNET} main.cc ${CORNET_SRC})
 target_link_libraries(${CORNET} uring spdlog::spdlog)
 target_include_directories(${CORNET} PUBLIC include)
+
+
+add_executable(bench test.cc ${CORNET_SRC})
+
+target_link_libraries(bench PRIVATE uring spdlog::spdlog)
+find_package(benchmark CONFIG REQUIRED)
+target_link_libraries(bench PRIVATE benchmark::benchmark benchmark::benchmark_main)
+find_package(asio CONFIG REQUIRED)
+target_link_libraries(bench PRIVATE asio::asio)
+find_package(libuv CONFIG REQUIRED)
+target_link_libraries(bench PRIVATE $<IF:$<TARGET_EXISTS:libuv::uv_a>,libuv::uv_a,libuv::uv>)
+target_include_directories(bench PUBLIC include)

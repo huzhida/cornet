@@ -3,20 +3,18 @@
 
 using namespace cornet;
 
-generator_t<int> gen() {
-  std::vector<int> nums{1,2,3,4,5};
-  for (auto i : nums) {
-    co_yield i;
-  }
-}
-
 coro_t<int> server(context_t& ctx) {
   SPDLOG_INFO("server start");
   auto s = tcp::v4::socket_t();
   SPDLOG_INFO("server listen");
-  s.listen("127.0.0.1", 12345);
+  bool ok = s.listen("127.0.0.1", 12345);
   SPDLOG_INFO("server accept");
-  auto c = co_await s.accept(ctx, 0);
+  int fd = co_await s.accept(ctx, 0);
+  if (fd < 0) {
+    SPDLOG_ERROR("server accept failed with error {}", strerror(errno));
+    co_return -1;
+  }
+  auto c = tcp::v4::socket_t(fd);
   char buff[2048] = {0};
   SPDLOG_INFO("server recv");
   auto n = co_await c.recv(ctx, buff, 2048);
@@ -57,11 +55,11 @@ int main(int argc, char* argv[]) {
   auto& ctx = context_t::context();
   if (argc > 1) {
     auto c = client(ctx);
-    ctx.spawn(c);
+    ctx.sched(c);
     ctx.run();
   } else {
     auto c = server(ctx);
-    ctx.spawn(c);
+    ctx.sched(c);
     ctx.run();
   }
 }
