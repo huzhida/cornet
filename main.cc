@@ -34,7 +34,9 @@ coro_t<int> client(context_t& ctx) {
   auto s = tcp::v4::socket_t();
   SPDLOG_INFO("client connect");
   int ok;
+  auto start = std::chrono::steady_clock::now();
   ok = co_await s.connect(ctx, "127.0.0.1", 12345);
+  SPDLOG_INFO("connect elapsed: {}", std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
   if (ok < 0) {
     SPDLOG_ERROR("failed to connect with error: {}", strerror(-ok));
     co_return -1;
@@ -52,8 +54,7 @@ coro_t<int> client(context_t& ctx) {
 }
 
 int main(int argc, char* argv[]) {
-  context_t ctx;
-
+  auto& ctx = context_t::context();
   if (argc > 1) {
     auto c = client(ctx);
     ctx.spawn(c);

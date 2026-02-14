@@ -44,8 +44,8 @@ socket_t::accept_awaiter socket_t::accept(context_t &ctx, int flag) const {
   return accept_awaiter{ctx, fd, flag};
 }
 
-socket_t::connect_awaiter socket_t::connect(context_t &ctx, const std::string &ip, unsigned int port, int flag) const {
-  return connect_awaiter{ctx, fd, ip, port, flag};
+socket_t::connect_awaiter socket_t::connect(context_t &ctx, const std::string &ip, unsigned int port) const {
+  return connect_awaiter{ctx, fd, ip, port};
 }
 
 socket_t::recv_awaiter socket_t::recv(context_t &ctx, void *buf, uint32_t nbytes, int flag) const {

@@ -37,9 +37,9 @@ class socket_t {
     CORNET_MAYBE_UNUSED inline socket_t await_resume() {
       return {fd, &addr};
     }
-    static inline void complete(task_t* self, int ret) {
+    static inline void complete(task_t* self, cqe_t cqe) {
       auto* awaiter = reinterpret_cast<accept_awaiter*>(self);
-      awaiter->fd = ret;
+      awaiter->fd = cqe->res;
       awaiter->ctx.sched(awaiter);
     }
     int fd{-1};
@@ -48,7 +48,7 @@ class socket_t {
   };
   accept_awaiter accept(context_t& ctx, int flag = 0) const;
   struct connect_awaiter : uring_task_t {
-    connect_awaiter(context_t& ctx, int fd, const std::string& ip, unsigned port, int flag) : uring_task_t(ctx, complete) {
+    connect_awaiter(context_t& ctx, int fd, const std::string& ip, unsigned port) : uring_task_t(ctx, complete) {
       addr = to_address(ip, port);
       ctx.io_uring().new_sqe().prep_connect(fd, (sockaddr*)&addr, sizeof(addr)).with_data(this);
     }
@@ -56,25 +56,25 @@ class socket_t {
       return ret;
     }
 
-    static inline void complete(task_t* self, int ret) {
+    static inline void complete(task_t* self, cqe_t cqe) {
       auto* awaiter = reinterpret_cast<connect_awaiter*>(self);
-      awaiter->ret = ret;
+      awaiter->ret = cqe->res;
       awaiter->ctx.sched(awaiter);
     }
     int ret{0};
     sockaddr_in addr{};
   };
-  connect_awaiter connect(context_t& ctx, const std::string& ip, unsigned port, int flag = 0) const;
+  connect_awaiter connect(context_t& ctx, const std::string& ip, unsigned port) const;
   struct recv_awaiter : uring_task_t {
     recv_awaiter(context_t& ctx, int fd, void* buf, uint32_t nbytes, int flag) : uring_task_t(ctx, complete) {
       ctx.io_uring().new_sqe().prep_recv(fd, buf, nbytes, flag).with_data(this);
     }
-    CORNET_MAYBE_UNUSED inline int await_resume() {
+    CORNET_MAYBE_UNUSED inline int await_resume() const {
       return value;
     }
-    static inline void complete(task_t* self, int ret) {
+    static inline void complete(task_t* self, cqe_t cqe) {
       auto* awaiter = reinterpret_cast<recv_awaiter*>(self);
-      awaiter->value = ret;
+      awaiter->value = cqe->res;
       awaiter->ctx.sched(awaiter);
     }
     int value{};
@@ -87,9 +87,9 @@ class socket_t {
     CORNET_MAYBE_UNUSED inline int await_resume() const {
       return value;
     }
-    static inline void complete(task_t* self, int ret) {
+    static inline void complete(task_t* self, cqe_t cqe) {
       auto* awaiter = reinterpret_cast<send_awaiter*>(self);
-      awaiter->value = ret;
+      awaiter->value = cqe->res;
       awaiter->ctx.sched(awaiter);
     }
     int value{};
@@ -99,12 +99,12 @@ class socket_t {
     close_awaiter(context_t& ctx, int fd) : uring_task_t(ctx, complete) {
       ctx.io_uring().new_sqe().prep_close(fd).with_data(this);
     }
-    CORNET_MAYBE_UNUSED inline int await_resume() {
+    CORNET_MAYBE_UNUSED inline int await_resume() const {
       return value;
     }
-    static inline void complete(task_t* self, int ret) {
+    static inline void complete(task_t* self, cqe_t cqe) {
       auto awaiter = reinterpret_cast<close_awaiter*>(self);
-      awaiter->value = ret;
+      awaiter->value = cqe->res;
       awaiter->ctx.sched(awaiter);
     }
     int value{};
