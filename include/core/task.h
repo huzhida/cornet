@@ -16,7 +16,9 @@ struct task_t {
 struct context_t;
 struct uring_task_t : task_t {
   explicit uring_task_t(context_t& ctx, callback_t complete) : ctx(ctx), task_t(complete) {}
-  CORNET_MAYBE_UNUSED bool await_ready();
+  CORNET_MAYBE_UNUSED inline bool await_ready() {
+    return false;
+  }
   CORNET_MAYBE_UNUSED void await_suspend(std::coroutine_handle<> handle);
 
   context_t& ctx;
