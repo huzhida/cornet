@@ -33,16 +33,28 @@ uring_t &uring_t::operator=(uring_t &&r) noexcept  {
   }
   return *this;
 }
-uint32_t uring_t::wait_and_process_cqes(void (*process_fn)(cqe_t), int wait_nr, int timeout_s,
+uint32_t uring_t::wait_and_process_cqes(int (*process_fn)(cqe_t), uint32_t wait_nr, int timeout_s,
                                         int timeout_ns, sigset_t *mask)  {
-  cqe_t cqe;
+  uint32_t count{};
+
   if (timeout_s == 0 && timeout_ns == 0) {
-    uint32_t ret = io_uring_peek_batch_cqe(uring.get(), &cqe, wait_nr);
+    std::vector<cqe_t> cqes(wait_nr);
+    uint32_t ret = io_uring_peek_batch_cqe(uring.get(), cqes.data(), wait_nr);
     if (ret == 0) {
       SPDLOG_DEBUG("Uring peek batch cqe return empty");
       return 0;
     }
-  } else if (timeout_s > 0 || timeout_ns > 0) {
+    for (unsigned i = 0; i < ret; i++) {
+      process_fn(cqes[i]);
+      count++;
+    }
+    io_uring_cq_advance(uring.get(), count);
+    task_nr -= count;
+    return count;
+  }
+  cqe_t cqe;
+  uint32_t head;
+  if (timeout_s > 0 || timeout_ns > 0) {
     __kernel_timespec ts{timeout_s, timeout_ns};
     int ret = io_uring_wait_cqes(uring.get(), &cqe,wait_nr, &ts, mask);
     if (ret == -ETIME) {
@@ -55,12 +67,13 @@ uint32_t uring_t::wait_and_process_cqes(void (*process_fn)(cqe_t), int wait_nr, 
       return 0;
     }
   }
-  uint32_t head, count;
+
   io_uring_for_each_cqe(uring.get(), head, cqe) {
     process_fn(cqe);
     ++count;
     io_uring_cqe_seen(uring.get(), cqe);
   }
+  task_nr -= count;
   return count;
 }
 CORNET_MAYBE_UNUSED bool uring_t::register_buffers(iovec *buffers, size_t buffer_nr) {
@@ -68,8 +81,9 @@ CORNET_MAYBE_UNUSED bool uring_t::register_buffers(iovec *buffers, size_t buffer
     iovec& buffer = buffers[index];
     posix_memalign(&buffer.iov_base, 4 * 1024, buffer.iov_len);
   }
-  if (io_uring_register_buffers(uring.get(), buffers, buffer_nr) < 0) {
-    SPDLOG_ERROR("failed to register buffer on io_uring with error: {}", strerror(errno));
+  int x = io_uring_register_buffers(uring.get(), buffers, buffer_nr);
+  if (x < 0) {
+    SPDLOG_ERROR("failed to register buffer on io_uring with error: {}", strerror(-x));
     return false;
   }
   this->registered_buffers = std::make_unique<iovec[]>(buffer_nr);

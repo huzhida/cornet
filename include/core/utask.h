@@ -7,17 +7,21 @@
 namespace cornet {
 
 struct context_t;
-struct uring_task_t : task_t {
-  using callback_t = void (*) (task_t*, cqe_t);
-  explicit uring_task_t(context_t& ctx, callback_t complete) : ctx(ctx), complete(complete) {}
+struct utask_t : task_t {
+  explicit utask_t(context_t& ctx) : ctx(ctx) {}
   CORNET_MAYBE_UNUSED inline bool await_ready() {
     return false;
   }
   CORNET_MAYBE_UNUSED void await_suspend(std::coroutine_handle<> handle);
+  CORNET_NODISCARD CORNET_MAYBE_UNUSED inline int await_resume() const {
+    return value;
+  }
+  void complete(cqe_t cqe);
 
+  int value{0};
   context_t& ctx;
-  callback_t complete;
 };
+
 
 }
 
