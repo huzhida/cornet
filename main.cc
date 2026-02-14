@@ -34,7 +34,7 @@ coro_t<int> client(context_t& ctx) {
   auto s = tcp::v4::socket_t();
   SPDLOG_INFO("client connect");
   int ok;
-  ok = co_await s.connect(ctx, "127.0.0.1", 12346);
+  ok = co_await s.connect(ctx, "127.0.0.1", 12345);
   if (ok < 0) {
     SPDLOG_ERROR("failed to connect with error: {}", strerror(-ok));
     co_return -1;
