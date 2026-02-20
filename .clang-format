@@ -1,0 +1,120 @@
+# 基于你的代码风格生成的配置
+BasedOnStyle: LLVM
+Language: Cpp
+
+# 列宽（根据你的代码，似乎没有严格限制，设为120）
+ColumnLimit: 120
+
+# 缩进配置
+IndentWidth: 2
+ContinuationIndentWidth: 2
+TabWidth: 2
+UseTab: Never
+
+# 大括号风格
+BreakBeforeBraces: Attach
+# 更精细的控制
+BraceWrapping:
+  AfterClass: false
+  AfterControlStatement: false
+  AfterEnum: false
+  AfterFunction: false
+  AfterNamespace: false
+  AfterStruct: false
+  AfterUnion: false
+  BeforeCatch: false
+  BeforeElse: false
+  IndentBraces: false
+  SplitEmptyFunction: false
+  SplitEmptyRecord: false
+  SplitEmptyNamespace: false
+
+# 指针/引用对齐
+PointerAlignment: Left
+ReferenceAlignment: Left
+
+# 访问修饰符缩进
+AccessModifierOffset: -2  # public: 不缩进
+IndentAccessModifiers: false
+
+# 命名空间
+NamespaceIndentation: None  # 命名空间内容不缩进
+CompactNamespaces: false
+
+# 函数声明/定义
+AlwaysBreakAfterDefinitionReturnType: None
+AlwaysBreakAfterReturnType: None
+AlwaysBreakTemplateDeclarations: Yes  # template 单独一行
+
+# 空格
+SpaceAfterCStyleCast: false
+SpaceAfterLogicalNot: false
+SpaceAfterTemplateKeyword: true
+SpaceBeforeAssignmentOperators: true
+SpaceBeforeCpp11BracedList: false
+SpaceBeforeCtorInitializerColon: true
+SpaceBeforeInheritanceColon: true
+SpaceBeforeParens: ControlStatements  # if/for/while 后加空格
+SpaceBeforeRangeBasedForLoopColon: true
+SpaceInEmptyBlock: false
+SpaceInEmptyParentheses: false
+SpacesBeforeTrailingComments: 1
+SpacesInAngles: false
+SpacesInCStyleCastParentheses: false
+SpacesInConditionalStatement: false
+SpacesInContainerLiterals: false
+SpacesInParentheses: false
+SpacesInSquareBrackets: false
+
+# 换行
+AllowShortBlocksOnASingleLine: Always
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: Inline  # 短函数可以在一行
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLambdasOnASingleLine: All
+AllowShortLoopsOnASingleLine: false
+
+# 对齐
+AlignAfterOpenBracket: Align
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+AlignConsecutiveMacros: false
+AlignEscapedNewlines: Left
+AlignOperands: Align
+AlignTrailingComments: true
+
+# 构造函数初始化列表
+BreakConstructorInitializers: BeforeColon
+ConstructorInitializerAllOnOneLineOrOnePerLine: false
+ConstructorInitializerIndentWidth: 2
+
+# include 排序
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^<.*\.h>'
+    Priority: 1
+  - Regex: '^<.*'
+    Priority: 2
+  - Regex: '^".*"'
+    Priority: 0
+IncludeIsMainRegex: '(Test)?$'
+IncludeIsMainSourceRegex: ''
+
+# 其他
+FixNamespaceComments: true  # 在命名空间结束时添加注释
+ReflowComments: true
+SortIncludes: true
+SortUsingDeclarations: true
+
+# 你的代码中用了 CORNET_MAYBE_UNUSED 等宏
+MacroBlockBegin: ''
+MacroBlockEnd: ''
+
+# 允许的换行符
+PenaltyBreakAssignment: 2
+PenaltyBreakBeforeFirstCallParameter: 19
+PenaltyBreakComment: 300
+PenaltyBreakFirstLessLess: 120
+PenaltyBreakString: 1000
+PenaltyExcessCharacter: 1000000
+PenaltyReturnTypeOnItsOwnLine: 60
