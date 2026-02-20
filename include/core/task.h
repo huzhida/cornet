@@ -11,8 +11,12 @@ enum class task_priority_t {
 };
 
 struct task_t {
-  explicit task_t(task_priority_t priority = task_priority_t::IO): priority(priority) {}
-  task_priority_t priority;
+  explicit task_t(task_priority_t priority = task_priority_t::IO);
+
+  union {
+    task_priority_t priority;
+  } metadata{};
+
   std::coroutine_handle<> handle;
 };
 

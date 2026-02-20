@@ -1,18 +1,20 @@
-
 #include "core/uring.h"
 
 namespace cornet {
 
-uring_t::uring_t(uint32_t entries_nr, uint32_t flags) : uring(std::make_unique<io_uring>()) {
+uring_t::uring_t(uint32_t entries_nr, uint32_t flags)
+  : uring(std::make_unique<io_uring>()) {
   if (io_uring_queue_init(entries_nr, uring.get(), flags) < 0) {
     SPDLOG_ERROR("failed to init io_uring queue with error: {}", strerror(errno));
     throw std::runtime_error("io_uring_queue_init failed");
   }
 }
-uring_t::~uring_t()  {
+
+uring_t::~uring_t() {
   io_uring_queue_exit(uring.get());
 }
-uring_t::uring_t(uring_t &&r) noexcept  {
+
+uring_t::uring_t(uring_t&& r) noexcept {
   if (this != &r) {
     this->uring = std::move(r.uring);
     this->registered_buffers = std::move(r.registered_buffers);
@@ -22,7 +24,8 @@ uring_t::uring_t(uring_t &&r) noexcept  {
     r.registered_files = nullptr;
   }
 }
-uring_t &uring_t::operator=(uring_t &&r) noexcept  {
+
+uring_t& uring_t::operator=(uring_t&& r) noexcept {
   if (this != &r) {
     this->uring = std::move(r.uring);
     this->registered_buffers = std::move(r.registered_buffers);
@@ -33,8 +36,9 @@ uring_t &uring_t::operator=(uring_t &&r) noexcept  {
   }
   return *this;
 }
+
 uint32_t uring_t::wait_and_process_cqes(int (*process_fn)(cqe_t), uint32_t wait_nr, int timeout_s,
-                                        int timeout_ns, sigset_t *mask)  {
+                                        int timeout_ns, sigset_t* mask) {
   uint32_t count{};
 
   if (timeout_s == 0 && timeout_ns == 0) {
@@ -56,13 +60,13 @@ uint32_t uring_t::wait_and_process_cqes(int (*process_fn)(cqe_t), uint32_t wait_
   uint32_t head;
   if (timeout_s > 0 || timeout_ns > 0) {
     __kernel_timespec ts{timeout_s, timeout_ns};
-    int ret = io_uring_wait_cqes(uring.get(), &cqe,wait_nr, &ts, mask);
+    int ret = io_uring_wait_cqes(uring.get(), &cqe, wait_nr, &ts, mask);
     if (ret == -ETIME) {
       SPDLOG_DEBUG("Uring wait_and_process_cqes timeout.");
       return 0;
     }
   } else {
-    if(io_uring_wait_cqes(uring.get(), &cqe, wait_nr, nullptr, mask) < 0) {
+    if (io_uring_wait_cqes(uring.get(), &cqe, wait_nr, nullptr, mask) < 0) {
       SPDLOG_ERROR("failed to wait io_uring cqes with error: {}", strerror(errno));
       return 0;
     }
@@ -71,15 +75,16 @@ uint32_t uring_t::wait_and_process_cqes(int (*process_fn)(cqe_t), uint32_t wait_
   io_uring_for_each_cqe(uring.get(), head, cqe) {
     process_fn(cqe);
     ++count;
-    io_uring_cqe_seen(uring.get(), cqe);
   }
+  io_uring_cq_advance(uring.get(), count);
   task_nr -= count;
   return count;
 }
-CORNET_MAYBE_UNUSED bool uring_t::register_buffers(iovec *buffers, size_t buffer_nr) {
+
+CORNET_MAYBE_UNUSED bool uring_t::register_buffers(iovec* buffers, size_t buffer_nr) {
   for (size_t index = 0; index < buffer_nr; ++index) {
     iovec& buffer = buffers[index];
-    posix_memalign(&buffer.iov_base, 4 * 1024, buffer.iov_len);
+    buffer.iov_len = posix_memalign(&buffer.iov_base, 4 * 1024, buffer.iov_len);
   }
   int x = io_uring_register_buffers(uring.get(), buffers, buffer_nr);
   if (x < 0) {
@@ -92,7 +97,8 @@ CORNET_MAYBE_UNUSED bool uring_t::register_buffers(iovec *buffers, size_t buffer
   }
   return true;
 }
-CORNET_MAYBE_UNUSED bool uring_t::register_files(int *files, size_t file_nr)  {
+
+CORNET_MAYBE_UNUSED bool uring_t::register_files(int* files, size_t file_nr) {
   if (io_uring_register_files(uring.get(), files, file_nr) < 0) {
     SPDLOG_ERROR("failed to register files on io_uring with error: {}", strerror(errno));
   }
