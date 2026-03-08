@@ -5,10 +5,14 @@ namespace cornet {
 std::mutex context_t::contexts_mutex;
 std::unordered_map<std::thread::id, context_t*> context_t::contexts;
 
-context_t::context_t() {
+context_t::context_t(): uring(config::get()["cornet"]["context"]["uring"]["capacity"].value_or(32)) {
+  if (auto scheduler_name = config::get()["cornet"]["context"]["scheduler"]["name"]) {
+    scheduler_type = scheduler_t::to_scheduler_type(scheduler_name.as_string()->value_or(""));
+  }
   scheduler = scheduler_t::scheduler(scheduler_type);
   std::lock_guard<std::mutex> guard(contexts_mutex);
   contexts[std::this_thread::get_id()] = this;
+
 }
 
 context_t::~context_t() {
@@ -20,10 +24,6 @@ void context_t::run() {
   if (owner != std::this_thread::get_id()) {
     SPDLOG_ERROR("never run context in other thread");
     return;
-  }
-
-  if (!scheduler) {
-    scheduler = scheduler_t::scheduler(scheduler_type_t::RoundRobin);
   }
 
   state.store(state_t::Running, std::memory_order_release);

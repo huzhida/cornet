@@ -7,7 +7,7 @@
 #include <exception>
 #include <iterator>
 #include "task.h"
-#include "utils.h"
+#include "utils/utils.h"
 
 namespace cornet {
 
@@ -90,6 +90,7 @@ struct coro_t : task_t {
         this->handle.destroy();
       this->handle = std::exchange(c.handle, nullptr);
     }
+    return *this;
   }
 
   auto operator co_await() {
@@ -144,7 +145,7 @@ struct generator_t : task_t {
   };
 
   explicit generator_t(std::coroutine_handle<promise_type> h) {
-    this->handle = handle;
+    this->handle = h;
   }
 
   ~generator_t() {
@@ -171,6 +172,7 @@ struct generator_t : task_t {
         this->handle.destroy();
       this->handle = std::exchange(g.handle, nullptr);
     }
+    return *this;
   }
 
   struct iterator {
