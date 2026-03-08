@@ -3,7 +3,7 @@
 
 #include <atomic>
 #include <memory>
-#include "utils.h"
+#include "utils/defines.h"
 
 namespace cornet {
 template <typename T, size_t N>
@@ -91,7 +91,7 @@ struct ringbuffer_t {
         return false;
     }
 
-    if constexpr (std::is_trivially_copyable<T>::value && std::is_trivially_destructible_v<T>) {
+    if constexpr (std::is_trivially_copyable_v<T> && std::is_trivially_destructible_v<T>) {
       t = container[r];
     } else {
       auto slot = container.at(r);

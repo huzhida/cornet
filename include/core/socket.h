@@ -2,7 +2,6 @@
 #define CORNET_SOCKET_H
 
 #include "context.h"
-#include <coroutine>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
@@ -36,6 +35,7 @@ public:
     return ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
   }
 
+  CORNET_MAYBE_UNUSED int native_fd() const;
   CORNET_MAYBE_UNUSED void address_reuse(bool on) const;
 
   CORNET_MAYBE_UNUSED void port_reuse(bool on) const;

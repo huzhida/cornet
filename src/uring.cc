@@ -3,7 +3,7 @@
 namespace cornet {
 
 uring_t::uring_t(uint32_t entries_nr, uint32_t flags)
-  : uring(std::make_unique<io_uring>()) {
+  : uring(std::make_unique<io_uring>()), entries_nr(entries_nr) {
   if (io_uring_queue_init(entries_nr, uring.get(), flags) < 0) {
     SPDLOG_ERROR("failed to init io_uring queue with error: {}", strerror(errno));
     throw std::runtime_error("io_uring_queue_init failed");
@@ -37,9 +37,9 @@ uring_t& uring_t::operator=(uring_t&& r) noexcept {
   return *this;
 }
 
-uint32_t uring_t::wait_and_process_cqes(int (*process_fn)(cqe_t), uint32_t wait_nr, int timeout_s,
+uint32_t uring_t::wait_cqes(int (*process_fn)(cqe_t), uint32_t wait_nr, int timeout_s,
                                         int timeout_ns, sigset_t* mask) {
-  uint32_t count{};
+  uint32_t count{0};
 
   if (timeout_s == 0 && timeout_ns == 0) {
     std::vector<cqe_t> cqes(wait_nr);
@@ -50,11 +50,10 @@ uint32_t uring_t::wait_and_process_cqes(int (*process_fn)(cqe_t), uint32_t wait_
     }
     for (unsigned i = 0; i < ret; i++) {
       process_fn(cqes[i]);
-      count++;
     }
-    io_uring_cq_advance(uring.get(), count);
-    task_nr -= count;
-    return count;
+    io_uring_cq_advance(uring.get(), ret);
+    task_nr -= ret;
+    return ret;
   }
   cqe_t cqe;
   uint32_t head;
@@ -79,6 +78,10 @@ uint32_t uring_t::wait_and_process_cqes(int (*process_fn)(cqe_t), uint32_t wait_
   io_uring_cq_advance(uring.get(), count);
   task_nr -= count;
   return count;
+}
+
+uint32_t uring_t::peek_cqes(int(* process_fn)(cqe_t), uint32_t peek_nr, sigset_t* mask) {
+  return wait_cqes(process_fn, peek_nr, 0, 0, mask);
 }
 
 CORNET_MAYBE_UNUSED bool uring_t::register_buffers(iovec* buffers, size_t buffer_nr) {

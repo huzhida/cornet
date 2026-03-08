@@ -2,7 +2,7 @@
 #define CORNET_URING_H
 
 #include <liburing.h>
-#include "utils.h"
+#include "utils/utils.h"
 
 namespace cornet {
 
@@ -92,13 +92,20 @@ public:
       SPDLOG_ERROR("io_uring submit sqe failed with error: {}", strerror(errno));
       return false;
     }
+    entries_nr += submit_nr;
     task_nr += submit_nr;
     return true;
   }
 
-  uint32_t wait_and_process_cqes(int (*process_fn)(cqe_t), uint32_t wait_nr = 1, int timeout_s = -1,
+  uint32_t wait_cqes(int (*process_fn)(cqe_t), uint32_t wait_nr = 1, int timeout_s = -1,
                                  int timeout_ns = -1,
                                  sigset_t* mask = nullptr);
+
+  uint32_t peek_cqes(int (*process_fn)(cqe_t), uint32_t peek_nr = 1, sigset_t* mask = nullptr);
+
+  inline bool full() const {
+    return entries_nr == 0;
+  }
 
   inline bool idle() const {
     return task_nr == 0;
@@ -113,11 +120,13 @@ public:
   CORNET_MAYBE_UNUSED bool register_files(int* files, size_t file_nr);
 
   inline sqe_t new_sqe() {
+    --entries_nr;
     return {io_uring_get_sqe(uring.get())};
   }
 
 private:
   uint32_t task_nr{0};
+  uint32_t entries_nr{0};
   std::unique_ptr<io_uring> uring;
   std::unique_ptr<iovec[]> registered_buffers{};
   std::unique_ptr<int[]> registered_files{};

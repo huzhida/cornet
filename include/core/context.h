@@ -60,10 +60,13 @@ struct context_t {
     return ctx;
   }
 
-  static inline context_t& from_thread(const std::thread& t) {
+  static inline std::optional<context_t*> from_thread(const std::thread& t) {
     std::lock_guard<std::mutex> guard(contexts_mutex);
-    auto iter = contexts.at(t.get_id());
-    return *iter;
+    auto iter = contexts.find(t.get_id());
+    if (iter == contexts.end()) {
+      return nullptr;
+    }
+    return iter->second;
   }
 
   static int process_utask(cqe_t cqe);

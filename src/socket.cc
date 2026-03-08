@@ -32,6 +32,10 @@ socket_t& socket_t::operator=(socket_t&& s) noexcept {
   return *this;
 }
 
+int socket_t::native_fd() const {
+  return fd;
+}
+
 void socket_t::address_reuse(bool on) const {
   int reuse = on ? 1 : 0;
   setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (void*)&reuse, sizeof(reuse));
@@ -44,12 +48,14 @@ void socket_t::port_reuse(bool on) const {
 
 bool socket_t::listen(const std::string& ip, unsigned int port) const {
   sockaddr_in addr = to_address(ip, port);
+  address_reuse(true);
+  port_reuse(true);
   if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-    SPDLOG_ERROR("bind to {}:{} failed with error:{}", ip, port, strerror(errno));
+    SPDLOG_ERROR("bind to {}:{} failed with error: {}", ip, port, strerror(errno));
     return false;
   }
   if (::listen(fd, 2048) < 0) {
-    SPDLOG_ERROR("listen to {}:{} failed with error:{}", ip, port, strerror(errno));
+    SPDLOG_ERROR("listen to {}:{} failed with error: {}", ip, port, strerror(errno));
     return false;
   }
   return true;

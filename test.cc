@@ -21,6 +21,13 @@ using namespace cornet;
 
 // ==================== 基准测试配置 ====================
 struct BenchmarkConfig {
+  BenchmarkConfig() {
+    if (auto bench_config = config::get()["cornet"]["benchmark"]) {
+      num_connections = bench_config["num_connections"].value_or(1024);
+      message_size = bench_config["message_size"].value_or(1024);
+      total_messages = bench_config["total_messages"].value_or(10000);
+    }
+  }
   int num_connections = 1024;  // 并发连接数
   int message_size = 1024;     // 消息大小（字节）
   int total_messages = 100000; // 总消息数
@@ -48,18 +55,6 @@ struct BenchmarkResult {
   double max_latency_us;      // 最大延迟
   double p95_latency_us;      // 95%延迟
   double p99_latency_us;      // 99%延迟
-
-  void print() const {
-    std::cout << "\n-------- " << library_name << " 结果 --------\n";
-    std::cout << "测试时间: " << std::fixed << std::setprecision(2) << duration_seconds << " 秒\n";
-    std::cout << "请求/秒: " << std::fixed << std::setprecision(2) << requests_per_second << "\n";
-    std::cout << "吞吐量: " << std::fixed << std::setprecision(2) << throughput_mbps << " MB/s\n";
-    std::cout << "平均延迟: " << std::fixed << std::setprecision(2) << avg_latency_us << " μs\n";
-    std::cout << "最小延迟: " << min_latency_us << " μs\n";
-    std::cout << "最大延迟: " << max_latency_us << " μs\n";
-    std::cout << "P95延迟: " << p95_latency_us << " μs\n";
-    std::cout << "P99延迟: " << p99_latency_us << " μs\n";
-  }
 };
 
 // ==================== 性能监控器 ====================
@@ -162,8 +157,6 @@ public:
       co_return;
     }
 
-    std::cout << "Cornet服务器已启动，监听端口 12345\n";
-
     while (server_running) {
       int client_fd = co_await listener.accept(ctx, 0);
       if (client_fd < 0)
@@ -228,8 +221,6 @@ public:
   }
 
   BenchmarkResult run(const BenchmarkConfig& config) {
-    std::cout << "启动 Cornet 测试...\n";
-
     monitor->start();
     server_running = true;
 
@@ -253,10 +244,14 @@ public:
     }
     ctx.run();
 
-    auto& sctx = context_t::from_thread(server_thread);
-    sctx.stop();
+    auto sctx = context_t::from_thread(server_thread);
+    if (sctx.value() != nullptr) {
+      sctx.value()->stop();
+    }
 
-    server_thread.join();
+    if (server_thread.joinable()) {
+      server_thread.join();
+    }
 
     monitor->stop();
     return monitor->get_result("Cornet");
@@ -284,7 +279,6 @@ private:
       : acceptor_(io_context, asio::ip::tcp::endpoint(asio::ip::tcp::v4(), 8889))
         , monitor_(monitor)
         , server_running_(server_running) {
-      std::cout << "ASIO服务器已启动，监听端口 8889\n";
     }
 
     void start() {
@@ -495,116 +489,92 @@ private:
   }
 };
 
+std::string format_cell(double value, double asio_value, int width) {
+  std::ostringstream ss;
+  using namespace std;
+  ss << fixed << setprecision(2) << value << " / " << setprecision(1) << (value / asio_value * 100) << "%";
+
+  auto result = ss.str();
+  int padding = width - static_cast<int>(result.length());
+  if (padding > 0) {
+    result += std::string(padding, ' ');
+  }
+  return result;
+}
+
 // ==================== 主测试程序 ====================
 int main(int argc, char* argv[]) {
   try {
-    // 解析命令行参数
+    config::load("conf/default.toml");
+    logging::init();
+
     BenchmarkConfig config;
-
-    if (argc > 1)
-      config.num_connections = std::stoi(argv[1]);
-    if (argc > 2)
-      config.message_size = std::stoi(argv[2]);
-    if (argc > 3)
-      config.total_messages = std::stoi(argv[3]);
-
     config.print();
 
-    std::vector<BenchmarkResult> results;
+    std::unordered_map<std::string, BenchmarkResult> results;
 
     {
       CornetBenchmark cornet_bench(scheduler_type_t::RoundRobin);
+      std::cout << "Cornet RoundRobin Warming..." << std::endl;
       auto result = cornet_bench.run(config);
     }
     {
       CornetBenchmark cornet_bench(scheduler_type_t::TimeSlice);
+      std::cout << "Cornet TimeSlice Warming..." << std::endl;
+      auto result = cornet_bench.run(config);
+    }
+    {
+      CornetBenchmark cornet_bench(scheduler_type_t::Batch);
+      std::cout << "Cornet Batch Warming..." << std::endl;
       auto result = cornet_bench.run(config);
     }
 
     // 测试 Cornet
     {
-      CornetBenchmark cornet_bench(scheduler_type_t::RoundRobin);
+      CornetBenchmark cornet_bench(scheduler_type_t::Batch);
+      std::cout << "Cornet Batch Running..." << std::endl;
       auto result = cornet_bench.run(config);
-      results.push_back(result);
-      result.print();
+      results["Batch"] = result;
+    }
+
+    {
+      CornetBenchmark cornet_bench(scheduler_type_t::RoundRobin);
+      std::cout << "Cornet RoundRobin Running..." << std::endl;
+      auto result = cornet_bench.run(config);
+      results["RoundRobin"] = result;
     }
 
     {
       CornetBenchmark cornet_bench(scheduler_type_t::TimeSlice);
+      std::cout << "Cornet TimeSlice Running..." << std::endl;
       auto result = cornet_bench.run(config);
-      results.push_back(result);
-      result.print();
+      results["TimeSlice"] = result;
     }
 
     // 测试 ASIO
+    auto asio_result = BenchmarkResult();
     {
       AsioBenchmark asio_bench;
-      auto result = asio_bench.run(config);
-      results.push_back(result);
-      result.print();
+      std::cout << "Asio Running..." << std::endl;
+      asio_result = asio_bench.run(config);
+      results["Asio"] = asio_result;
     }
-    
-    std::cout << "\n\n ==================== 性能对比 ========================\n";
-    std::cout << std::left << std::setw(16) << "指标" 
-    << std::right << std::setw(16) << "RoundRobin"
-    << std::right << std::setw(16) << "TimeSlice"
-    << std::right << std::setw(16) << "ASIO"
-    << std::right << std::setw(16) << "RoundRobin/ASIO"
-    << std::right << std::setw(16) << "TimeSlice/ASIO"
-    << std::right << std::setw(20) << "TimeSlice/RoundRobin"
-    << std::right << "\n-----------------------------------------------------------------\n";
-    
-    auto& rr = results[0];
-    auto& ts = results[1];
-    auto& asio = results[2];
-    
-
-      std::cout << std::left << std::setw(16) << "RPS"
-        << std::right << std::setw(16) << std::fixed << std::setprecision(2)
-        << rr.requests_per_second
-        << std::right << std::setw(16) << std::fixed << std::setprecision(2)
-        << ts.requests_per_second
-        << std::right << std::setw(16) << std::fixed << std::setprecision(2)
-        << asio.requests_per_second
-        << std::right << std::setw(16)
-        << (rr.requests_per_second / asio.requests_per_second * 100) << "%"
-        << std::right << std::setw(16)
-        << (ts.requests_per_second / asio.requests_per_second * 100) << "%"
-        << std::right << std::setw(16)
-        << (ts.requests_per_second / rr.requests_per_second * 100) << "%\n";
-
-      std::cout << std::left << std::setw(16) << "吞吐量(MB/s)"
-        << std::right << std::setw(16) << rr.throughput_mbps
-        << std::right << std::setw(16) << ts.throughput_mbps
-        << std::right << std::setw(16) << asio.throughput_mbps
-        << std::right << std::setw(16)
-        << (rr.throughput_mbps / asio.throughput_mbps * 100) << "%"
-        << std::right << std::setw(16)
-        << (ts.throughput_mbps / asio.throughput_mbps * 100) << "%"
-        << std::right << std::setw(16)
-        << (ts.throughput_mbps / rr.throughput_mbps * 100) << "%\n";
-
-      std::cout << std::left << std::setw(16) << "平均延迟(μs)"
-        << std::right << std::setw(16) << rr.avg_latency_us
-        << std::right << std::setw(16) << ts.avg_latency_us
-        << std::right << std::setw(16) << asio.avg_latency_us
-        << std::right << std::setw(16)
-        << (asio.avg_latency_us / rr.avg_latency_us * 100) << "%"
-        << std::right << std::setw(16)
-        << (asio.avg_latency_us / ts.avg_latency_us * 100) << "%"
-        << std::right << std::setw(16)
-        << (rr.avg_latency_us / ts.avg_latency_us * 100) << "%\n";
-
-      std::cout << std::left << std::setw(16) << "P95延迟(μs)"
-        << std::right << std::setw(16) << rr.p95_latency_us
-        << std::right << std::setw(16) << ts.p95_latency_us
-        << std::right << std::setw(16) << asio.p95_latency_us
-        << std::right << std::setw(16)
-        << (asio.p95_latency_us / rr.p95_latency_us * 100) << "%"
-        << std::right << std::setw(16)
-        << (asio.p95_latency_us / ts.p95_latency_us * 100) << "%"
-        << std::right << std::setw(16)
-        << (rr.p95_latency_us / ts.p95_latency_us * 100) << "%\n";
+  using namespace std;
+    cout << "\n\n ==================== 性能对比 ========================\n";
+    cout << left << setw(24) << fixed << "metrics"
+    << left << setw(24) << fixed << "RPS(/asio)"
+    << left << setw(24) << fixed << "throughout(MB/s)(/asio)"
+    << left << setw(24) << fixed << "latency(us)(/asio)"
+    << left << setw(24) << fixed << "P95 latency(us)(/asio)" << endl;
+    std::cout << std::right << "------------------------------------------------------------------------------\n";
+    for (const auto& result : results) {
+      std::cout << std::left << std::setw(24) << fixed << result.first
+      << left << setw(24) << format_cell(result.second.requests_per_second, asio_result.requests_per_second, 24)
+      << left << setw(24) << format_cell(result.second.throughput_mbps, asio_result.throughput_mbps, 24)
+      << left << setw(24) << format_cell(result.second.avg_latency_us, asio_result.avg_latency_us, 24)
+      << left << setw(24) << format_cell(result.second.p95_latency_us, asio_result.p95_latency_us, 24)
+      << endl;
+    }
 
   } catch (const std::exception& e) {
     std::cerr << "错误: " << e.what() << std::endl;
