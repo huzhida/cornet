@@ -245,8 +245,8 @@ public:
     ctx.run();
 
     auto sctx = context_t::from_thread(server_thread);
-    if (sctx.value() != nullptr) {
-      sctx.value()->stop();
+    if (sctx != nullptr) {
+      sctx->stop();
     }
 
     if (server_thread.joinable()) {

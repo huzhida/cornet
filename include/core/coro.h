@@ -11,14 +11,26 @@
 
 namespace cornet {
 
+/**
+ * @brief base promise_type
+ * @tparam V return value type
+ */
 template <typename V>
 struct base_promise_t {
+  // variant return value
   std::variant<std::monostate, V, std::exception_ptr> value;
 
+  /**
+   * @brief promise_type.return_value constraint
+   * @param v return value
+   */
   void return_value(V v) {
     value.template emplace<1>(std::move(v));
   }
 
+  /**
+   * @brief promise_type.unhandled_exception constraint
+   */
   void unhandled_exception() {
     value.template emplace<2>(std::current_exception());
   }
@@ -26,37 +38,78 @@ struct base_promise_t {
 
 template <>
 struct base_promise_t<void> {
+  // variant return value
   std::variant<std::monostate, std::exception_ptr> value;
+
+  /**
+   * @brief promise_type.return_void constraint
+   */
   void return_void() {}
 
+  /**
+   * @brief promise_type.unhandled_exception constraint
+   */
   void unhandled_exception() {
     value.template emplace<1>(std::current_exception());
   }
 };
 
+/**
+ * @brief coroutine wrapper
+ * @tparam V return value type
+ */
 template <typename V>
 struct coro_t : task_t {
+  /**
+   * @brief coroutine constraint promise_type
+   */
   struct promise_type : base_promise_t<V> {
+    // for co_await invoke
     std::coroutine_handle<> continuation;
 
+    /**
+     * @return coroutine implementation coro_t
+     */
     coro_t get_return_object() {
       return coro_t<V>{std::coroutine_handle<promise_type>::from_promise(*this)};
     }
 
+    /**
+     * @brief final_awaiter used for co_await, resume coroutine who invoke this coro_t
+     */
     struct final_awaiter {
+      /**
+       * @brief await.await_ready constraint
+       * @return whether need suspend
+       */
       CORNET_MAYBE_UNUSED bool await_ready() noexcept { return false; }
+      /**
+       * @brief close to suspend, do something.
+       * @param h std::coroutine_handle that who invoke co_await current coroutine
+       * @return the coroutine need resume
+       */
       CORNET_MAYBE_UNUSED std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_type> h) noexcept {
         if (h.promise().continuation) {
           return h.promise().continuation;
         }
         return std::noop_coroutine();
       }
-
+      /**
+       * @brief close to resume, do something.
+       */
       CORNET_MAYBE_UNUSED void await_resume() noexcept {}
     };
 
+    /**
+     * @brief whether need suspend on initial
+     * @return awaitable
+     */
     std::suspend_always initial_suspend() { return {}; }
 
+    /**
+     * @brief whether need suspend on final
+     * @return awaitable
+     */
     final_awaiter final_suspend() noexcept {
       return {};
     }
@@ -93,6 +146,9 @@ struct coro_t : task_t {
     return *this;
   }
 
+  /**
+   * @brief implement co_await operator, for co_await.
+   */
   auto operator co_await() {
     struct coro_awaiter {
       std::coroutine_handle<promise_type> handle;
@@ -115,29 +171,56 @@ struct coro_t : task_t {
     return coro_awaiter{handle};
   }
 
+  /**
+   * @brief resume current coroutine
+   */
   CORNET_MAYBE_UNUSED void resume() {
     if (!handle || handle.done())
       return;
     handle.resume();
   }
 
+  /**
+   * @brief whether current coroutine done
+   * @return true for done / false ...
+   */
   bool done() {
     return handle && handle.done();
   }
 };
 
+
+/**
+ * @brief yield-able wrapper
+ * @tparam V return value type
+ */
 template <typename V>
 struct generator_t : task_t {
   struct promise_type : base_promise_t<void> {
+    // current value
     V current_value;
 
+    /**
+     * @return generator implementation generator_t
+     */
     generator_t get_return_object() {
       return generator_t<V>{std::coroutine_handle<promise_type>::from_promise(*this)};
     }
-
+    /**
+     * @brief whether need suspend on initial
+     * @return awaitable
+     */
     std::suspend_always initial_suspend() { return {}; }
+    /**
+     * @brief whether need suspend on final
+     * @return awaitable
+     */
     std::suspend_always final_suspend() noexcept { return {}; }
-
+    /**
+     * @brief for co_yield return value
+     * @param value yield value
+     * @return awaitable
+     */
     std::suspend_always yield_value(V value) {
       current_value = std::move(value);
       return {};
@@ -175,6 +258,9 @@ struct generator_t : task_t {
     return *this;
   }
 
+  /**
+   * @brief iterator used for range.
+   */
   struct iterator {
     std::coroutine_handle<promise_type> handle;
 

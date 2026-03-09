@@ -37,6 +37,17 @@ uring_t& uring_t::operator=(uring_t&& r) noexcept {
   return *this;
 }
 
+bool uring_t::submit() {
+  int submit_nr = io_uring_submit(uring.get());
+  if (submit_nr < 0) {
+    SPDLOG_ERROR("io_uring submit sqe failed with error: {}", strerror(errno));
+    return false;
+  }
+  entries_nr += submit_nr;
+  task_nr += submit_nr;
+  return true;
+}
+
 uint32_t uring_t::wait_cqes(int (*process_fn)(cqe_t), uint32_t wait_nr, int timeout_s,
                                         int timeout_ns, sigset_t* mask) {
   uint32_t count{0};

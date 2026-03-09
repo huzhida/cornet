@@ -16,10 +16,17 @@ cornet::scheduler_t::register_scheduler(name, cls::create);\
 
 
 struct context_t;
-
+/**
+ * @brief scheduler type
+ */
 enum class scheduler_type_t {
   UnKnown, RoundRobin, TimeSlice, Batch
 };
+/**
+ * @brief get name from scheduler type
+ * @param type scheduler type
+ * @return scheduler name in const char*
+ */
 inline const char* scheduler_name(scheduler_type_t type) {
   switch (type) {
     case scheduler_type_t::RoundRobin: return "RoundRobin";
@@ -29,18 +36,32 @@ inline const char* scheduler_name(scheduler_type_t type) {
   }
 }
 
-
+/**
+ * @brief context scheduler, schedule and process task
+ */
 struct scheduler_t {
   using queue_t = std::queue<std::coroutine_handle<>>;
 
   virtual ~scheduler_t() = default;
 
-  virtual uint32_t sched(context_t& ctx) = 0;
+  /**
+   * @brief schedule interface
+   * @param ctx owner context
+   */
+  virtual void sched(context_t& ctx) = 0;
 
+  /**
+   * @brief push coroutine handle to ready queue.
+   * @param h coroutine handle
+   */
   inline void schedule(std::coroutine_handle<> h) {
     ready_tasks.push(h);
   }
-
+  /**
+   * @brief push task-like to ready queue, will maintain r-value
+   * @tparam T task-like type
+   * @param task task-like object
+   */
   template <typename T>
   CORNET_MAYBE_UNUSED inline void schedule(T&& task) {
     using R = std::decay_t<T>;
@@ -58,21 +79,41 @@ struct scheduler_t {
     }
   }
 
+  /**
+   * @brief whether scheduler has tasks to resume.
+   * @return true for yes / false for no.
+   */
   inline bool idle() const {
     return ready_tasks.empty();
   }
 
-  void transfer_to(scheduler_t& scheduler) {
-    scheduler.active_tasks = std::move(active_tasks);
-    scheduler.ready_tasks = std::move(ready_tasks);
-  }
+  /**
+   * @brief transfer tasks ownership to another scheduler
+   * @param scheduler destination scheduler
+   */
+  void transfer_to(scheduler_t& scheduler);
 
+  /**
+   * @brief create scheduler by type
+   * @param scheduler_type scheduler's type
+   * @return scheduler instance
+   */
   static std::unique_ptr<scheduler_t> scheduler(scheduler_type_t scheduler_type);
 
+  /**
+   * @brief register scheduler type
+   * @param type scheduler type
+   * @param create create factory function
+   */
   static inline void register_scheduler(scheduler_type_t type, std::unique_ptr<scheduler_t> (*create)()) {
     registry[type] = {scheduler_name(type), create};
   }
 
+  /**
+   * @brief from name to scheduler type
+   * @param name scheduler name
+   * @return scheduler name correspond to name
+   */
   static inline scheduler_type_t to_scheduler_type(std::string_view name) {
     for (const auto& kv : registry) {
       if (kv.second.first == name) {
@@ -83,23 +124,22 @@ struct scheduler_t {
   }
 
 protected:
+  // ready to resume queue
   queue_t ready_tasks;
+  // r-value task storage
   std::unordered_map<void*, std::unique_ptr<task_t> > active_tasks;
-
-  inline void process_ready_task() {
-    auto handle = ready_tasks.front();
-    ready_tasks.pop();
-    if (!handle.done())
-      handle.resume();
-    if (handle.done()) {
-      active_tasks.erase(handle.address());
-    }
-  }
+  // resume task and maintain r-value task life-span
+  void process_ready_task();
 
 private:
+  // scheduler registry
   static std::unordered_map<scheduler_type_t, std::pair<std::string, std::unique_ptr<scheduler_t>(*)()>> registry;
 };
 
+/**
+ * @brief time-slice scheduler implementation
+ * cpu / io has their own budget
+ */
 struct time_slice_scheduler_t : scheduler_t {
   static inline std::unique_ptr<scheduler_t> create() {
     return std::make_unique<time_slice_scheduler_t>();
@@ -107,21 +147,36 @@ struct time_slice_scheduler_t : scheduler_t {
 
   time_slice_scheduler_t();
 
-  uint32_t sched(context_t& ctx) final;
+  void sched(context_t& ctx) final;
+  /**
+   * @brief whether cpu timeout
+   * @param start start time
+   * @return true for yes/ false for no.
+   */
   bool cpu_timeout(std::chrono::steady_clock::time_point& start) const;
 private:
+  // cpu budget in ns
   std::chrono::nanoseconds cpu_budget{10000000};
+  // io budget in ns
   std::chrono::nanoseconds io_budget{1000000};
 };
 
+/**
+ * @brief round-robin scheduler implementation
+ * process all cpu tasks until io_uring full or ready tasks empty, then wait io.
+ */
 struct round_robin_scheduler_t : scheduler_t {
   static inline std::unique_ptr<scheduler_t> create() {
     return std::make_unique<round_robin_scheduler_t>();
   }
 
-  uint32_t sched(context_t& ctx) final;
+  void sched(context_t& ctx) final;
 };
 
+/**
+ * @brief batch scheduler implementation
+ * try best to make batch then submit, then wait io.
+ */
 struct batch_scheduler_t : scheduler_t {
   batch_scheduler_t();
 
@@ -129,8 +184,9 @@ struct batch_scheduler_t : scheduler_t {
     return std::make_unique<batch_scheduler_t>();
   }
 
-  uint32_t sched(context_t& ctx) final;
+  void sched(context_t& ctx) final;
 private:
+  // batch size
   uint32_t batch_nr{32};
 };
 
