@@ -6,17 +6,11 @@
 
 namespace cornet {
 
-enum class task_priority_t {
-  IO, Low, Normal, High
-};
-
+/**
+ * @brief coroutine wrapper, minimum schedule unit
+ */
 struct task_t {
-  explicit task_t(task_priority_t priority = task_priority_t::IO);
-
-  union {
-    task_priority_t priority;
-  } metadata{};
-
+  // coroutine handle
   std::coroutine_handle<> handle;
 };
 
