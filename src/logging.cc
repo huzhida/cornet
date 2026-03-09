@@ -43,6 +43,11 @@ static void logging_init() {
     }
   }
 
+  if (sinks.empty()) {
+    spdlog::set_level(spdlog::level::off);
+    return;
+  }
+
   auto logger = std::make_shared<spdlog::logger>("cornet", sinks.begin(), sinks.end());
   spdlog::set_default_logger(logger);
 }

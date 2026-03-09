@@ -6,7 +6,7 @@
 #include "utask.h"
 #include "coro.h"
 #include "scheduler.h"
-#include "ringbuffer.h"
+#include "utils/ringbuffer.h"
 
 namespace cornet {
 
@@ -57,12 +57,6 @@ struct context_t {
   void stop(bool cancel = true);
 
   /**
-   * @brief set cancel task to context.
-   * @param task cancel task handle, it will be used by process cancel result.
-   */
-  void set_cancel_task(utask_t* task);
-
-  /**
    * @brief set context scheduler type, new scheduler will take over schedule.
    * @param type new scheduler type.
    */
@@ -80,11 +74,6 @@ struct context_t {
    */
   CORNET_NODISCARD std::thread::id owner_thread() const;
 
-  /**
-   * @brief get cancel task handle
-   * @return cancel task ptr.
-   */
-  CORNET_NODISCARD utask_t* get_cancel_task() const;
 
   /**
    * @brief cancel awaiter, used for cancel io_uring async tasks.
@@ -96,31 +85,42 @@ struct context_t {
   /**
    * @brief cancel io_uring async tasks.
    * @param user_data
-   * -------------------------------------------------------------------------------------------
+   * -------------------------------------------------------------------------------------------\n
    * flag                          user_data               comment
-   * -------------------------------------------------------------------------------------------
+   * -------------------------------------------------------------------------------------------\n
    * IORING_ASYNC_CANCEL_ALL      | ptr                  | cancel all tasks match `user_data`.\n
    * IORING_ASYNC_CANCEL_FD       | fd                   | will cancel the first match fd task.\n
    * IORING_ASYNC_CANCEL_ANY      | nullptr              | will cancel all tasks.\n
    * IORING_ASYNC_CANCEL_FD_FIXED | registered fd index  | will cancel correspond fd.\n
-   * -------------------------------------------------------------------------------------------
+   * -------------------------------------------------------------------------------------------\n
    * @param flags
-   * IORING_ASYNC_CANCEL_ALL      Cancel all requests that match the given key
-   * IORING_ASYNC_CANCEL_FD       Key off 'fd' for cancelation rather than the request 'user_data'
-   * IORING_ASYNC_CANCEL_ANY      Match any request
-   * IORING_ASYNC_CANCEL_FD_FIXED 'fd' passed in is a fixed descriptor
+   * IORING_ASYNC_CANCEL_ALL      Cancel all requests that match the given key\n
+   * IORING_ASYNC_CANCEL_FD       Key off 'fd' for cancelation rather than the request 'user_data'\n
+   * IORING_ASYNC_CANCEL_ANY      Match any request\n
+   * IORING_ASYNC_CANCEL_FD_FIXED 'fd' passed in is a fixed descriptor\n
    * @return
-   * -------------------------------------------------------------------------------------------
-   * flag                          return
-   * -------------------------------------------------------------------------------------------
+   * -------------------------------------------------------------------------------------------\n
+   * flag                          return\n
+   * -------------------------------------------------------------------------------------------\n
    * IORING_ASYNC_CANCEL_ALL      | canceled task count \n
    * IORING_ASYNC_CANCEL_FD       | 0 for success / < 0 for failed \n
    * IORING_ASYNC_CANCEL_ANY      | 0 for success / < 0 for failed \n
    * IORING_ASYNC_CANCEL_FD_FIXED | 0 for success / < 0 for failed \n
-   * -------------------------------------------------------------------------------------------
+   * -------------------------------------------------------------------------------------------\n
    */
   inline coro_t<int> cancel_io_tasks(void* user_data = nullptr, int flags = IORING_ASYNC_CANCEL_ANY) {
-    co_return co_await cancel_awaiter{*this, user_data, flags};
+    int canceled_nr = 0;
+    while(true) {
+      auto ret = co_await cancel_awaiter{*this, user_data, flags};
+      if (ret > 0) {
+        canceled_nr += ret;
+      }else if(ret == -ENOENT || ret == 0) {
+          co_return canceled_nr;
+      } else {
+        SPDLOG_ERROR("cancel tasks encountered error: {}", strerror(-ret));
+        co_return ret;
+      }
+    }
   }
 
   /**
@@ -171,8 +171,6 @@ private:
   scheduler_type_t scheduler_type{scheduler_type_t::RoundRobin};
   // context owned io_uring wrapper
   uring_t uring;
-  // context cancel task handle
-  utask_t* cancel_task{nullptr};
   // context owner thread id
   std::thread::id owner{std::this_thread::get_id()};
   // context scheduler
