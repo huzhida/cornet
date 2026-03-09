@@ -15,21 +15,9 @@ if(NOT UNIX)
     message(FATAL_ERROR "only support to be build on Unix system")
 endif()
 
-include(FetchContent)
-
-FetchContent_Declare(
-        spdlog
-        GIT_REPOSITORY https://github.com/gabime/spdlog.git
-        GIT_TAG v1.13.0
-)
-FetchContent_MakeAvailable(spdlog)
-
-FetchContent_Declare(
-        tomlplusplus
-        GIT_REPOSITORY https://github.com/marzer/tomlplusplus.git
-        GIT_TAG v3.4.0 # 建议使用最新稳定版
-)
-FetchContent_MakeAvailable(tomlplusplus)
+find_package(spdlog CONFIG REQUIRED)
+find_package(tomlplusplus CONFIG REQUIRED)
+find_package(asio CONFIG REQUIRED)
 
 file(GLOB_RECURSE CORNET_SRC CONFIGURE_DEPENDS src/*.cc src/*.hpp)
 
@@ -43,7 +31,5 @@ target_include_directories(${CORNET} PUBLIC include)
 
 add_executable(bench test.cc ${CORNET_SRC})
 
-target_link_libraries(bench PRIVATE uring spdlog::spdlog tomlplusplus::tomlplusplus)
-find_package(asio CONFIG REQUIRED)
-target_link_libraries(bench PRIVATE asio::asio)
+target_link_libraries(bench PRIVATE uring spdlog::spdlog tomlplusplus::tomlplusplus asio::asio)
 target_include_directories(bench PUBLIC include)
