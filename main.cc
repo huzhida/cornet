@@ -54,7 +54,7 @@ coro_t<int> client(context_t& ctx) {
 }
 
 int main(int argc, char* argv[]) {
-  cornet::config::load("conf/default.toml");
+  cornet::config_t::load("conf/default.toml");
   cornet::logging::init();
   auto& ctx = context_t::context();
   std::thread client_thread([] {

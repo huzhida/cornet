@@ -7,7 +7,7 @@
 #include <toml++/toml.h>
 
 namespace cornet {
-struct config {
+struct config_t {
 
   inline void load_from_path(std::string_view path) {
     root = toml::parse_file(path);
@@ -27,8 +27,8 @@ struct config {
     return root[key];
   }
 
-  static config& get() {
-    static config s;
+  static config_t& get() {
+    static config_t s;
     return s;
   }
 
