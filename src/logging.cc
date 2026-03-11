@@ -8,7 +8,7 @@ namespace cornet::logging {
 std::once_flag init_flag;
 
 static void logging_init() {
-  auto logging_conf = config::get()["cornet"]["logging"];
+  auto logging_conf = config_t::get()["cornet"]["logging"];
   if (!logging_conf) return;
 
   std::vector<spdlog::sink_ptr> sinks;

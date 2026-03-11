@@ -65,6 +65,7 @@ struct coro_t : task_t {
    */
   struct promise_type : base_promise_t<V> {
     // for co_await invoke
+    bool detached{false};
     std::coroutine_handle<> continuation;
 
     /**
@@ -91,6 +92,9 @@ struct coro_t : task_t {
       CORNET_MAYBE_UNUSED std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_type> h) noexcept {
         if (h.promise().continuation) {
           return h.promise().continuation;
+        }
+        if (h.promise().detached) {
+          h.destroy();
         }
         return std::noop_coroutine();
       }
@@ -121,8 +125,9 @@ struct coro_t : task_t {
   }
 
   ~coro_t() {
-    if (handle)
+    if (handle && !(std::coroutine_handle<promise_type>::from_address(handle.address()).promise().detached)){
       handle.destroy();
+    }
   }
 
   coro_t(const coro_t&) = delete;
@@ -186,6 +191,15 @@ struct coro_t : task_t {
    */
   bool done() {
     return handle && handle.done();
+  }
+
+  /**
+   * @brief let coroutine take own their own lifecycle, coro_t destruct don't destroy coroutine_handle
+   */
+  void detach() {
+    if (!handle || handle.done())
+      return;
+    std::coroutine_handle<promise_type>::from_address(handle.address()).promise().detached = true;
   }
 };
 

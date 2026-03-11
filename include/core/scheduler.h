@@ -72,10 +72,10 @@ struct scheduler_t {
     } else {
       static_assert(std::is_base_of_v<task_t, R>,
                     "T must be derived from task_t");
-      ready_tasks.push(task.handle);
       if constexpr (std::is_rvalue_reference_v<decltype(task)>) {
-        active_tasks[task.handle.address()] = std::make_unique<R>(std::forward<T>(task));
+        task.detach();
       }
+      ready_tasks.push(task.handle);
     }
   }
 
@@ -126,8 +126,6 @@ struct scheduler_t {
 protected:
   // ready to resume queue
   queue_t ready_tasks;
-  // r-value task storage
-  std::unordered_map<void*, std::unique_ptr<task_t> > active_tasks;
   // resume task and maintain r-value task life-span
   void process_ready_task();
 

@@ -22,7 +22,7 @@ using namespace cornet;
 // ==================== 基准测试配置 ====================
 struct BenchmarkConfig {
   BenchmarkConfig() {
-    if (auto bench_config = config::get()["cornet"]["benchmark"]) {
+    if (auto bench_config = config_t::get()["cornet"]["benchmark"]) {
       num_connections = bench_config["num_connections"].value_or(1024);
       message_size = bench_config["message_size"].value_or(1024);
       total_messages = bench_config["total_messages"].value_or(10000);
@@ -505,7 +505,7 @@ std::string format_cell(double value, double asio_value, int width) {
 // ==================== 主测试程序 ====================
 int main(int argc, char* argv[]) {
   try {
-    config::load("conf/default.toml");
+    config_t::load("conf/default.toml");
     logging::init();
 
     BenchmarkConfig config;

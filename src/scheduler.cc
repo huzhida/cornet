@@ -21,7 +21,6 @@ std::unique_ptr<scheduler_t> scheduler_t::scheduler(scheduler_type_t scheduler_t
   return iter->second.second();
 }
 void scheduler_t::transfer_to(scheduler_t &scheduler) {
-  scheduler.active_tasks = std::move(active_tasks);
   scheduler.ready_tasks = std::move(ready_tasks);
 }
 void scheduler_t::process_ready_task() {
@@ -29,17 +28,14 @@ void scheduler_t::process_ready_task() {
   ready_tasks.pop();
   if (!handle.done())
     handle.resume();
-  if (handle.done()) {
-    active_tasks.erase(handle.address());
-  }
 }
 
 CORNET_REGISTER_SCHEDULER(scheduler_type_t::TimeSlice, time_slice_scheduler_t);
 time_slice_scheduler_t::time_slice_scheduler_t() {
-  auto conf = config::get()["cornet"]["context"]["scheduler"];
+  auto conf = config_t::get()["cornet"]["context"]["scheduler"];
 
-  cpu_budget = config::to_nanoseconds(conf["cpu_budget"].value_or("10ms"));
-  io_budget = config::to_nanoseconds(conf["io_budget"].value_or("1ms"));
+  cpu_budget = config_t::to_nanoseconds(conf["cpu_budget"].value_or("10ms"));
+  io_budget = config_t::to_nanoseconds(conf["io_budget"].value_or("1ms"));
 }
 void time_slice_scheduler_t::sched(context_t& ctx) {
   auto start = std::chrono::steady_clock::now();
@@ -78,7 +74,7 @@ void round_robin_scheduler_t::sched(context_t& ctx) {
 
 CORNET_REGISTER_SCHEDULER(scheduler_type_t::Batch, batch_scheduler_t);
 batch_scheduler_t::batch_scheduler_t() {
-  if (auto batch_num = config::get()["cornet"]["context"]["scheduler"]["batch"]) {
+  if (auto batch_num = config_t::get()["cornet"]["context"]["scheduler"]["batch"]) {
     batch_nr = batch_num.value_or(32);
   }
 }
