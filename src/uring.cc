@@ -3,7 +3,7 @@
 namespace cornet {
 
 uring_t::uring_t(uint32_t entries_nr, uint32_t flags)
-  : uring(std::make_unique<io_uring>()), entries_nr(entries_nr) {
+  : uring(std::make_unique<io_uring>()), remain_sqe_nr(entries_nr) {
   if (io_uring_queue_init(entries_nr, uring.get(), flags) < 0) {
     SPDLOG_ERROR("failed to init io_uring queue with error: {}", strerror(errno));
     throw std::runtime_error("io_uring_queue_init failed");
@@ -43,7 +43,7 @@ bool uring_t::submit() {
     SPDLOG_ERROR("io_uring submit sqe failed with error: {}", strerror(errno));
     return false;
   }
-  entries_nr += submit_nr;
+  remain_sqe_nr += submit_nr;
   task_nr += submit_nr;
   return true;
 }
@@ -66,6 +66,7 @@ uint32_t uring_t::wait_cqes(int (*process_fn)(cqe_t), uint32_t wait_nr, int time
     task_nr -= ret;
     return ret;
   }
+
   cqe_t cqe;
   uint32_t head;
   if (timeout_s > 0 || timeout_ns > 0) {

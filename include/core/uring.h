@@ -215,7 +215,7 @@ class uring_t {
    * @return true if no more SQEs can be allocated before submit
    */
   inline bool full() const {
-    return entries_nr == 0;
+    return remain_sqe_nr == 0;
   }
 
   /**
@@ -255,15 +255,20 @@ class uring_t {
    * @return sqe_t wrapper
    */
   inline sqe_t new_sqe() {
-    --entries_nr;
+    --remain_sqe_nr;
     return {io_uring_get_sqe(uring.get())};
   }
 
  private:
+  // submitted task count
   uint32_t task_nr{0};
-  uint32_t entries_nr{0};
+  // remain sqe count
+  uint32_t remain_sqe_nr{0};
+  // io_uring handle
   std::unique_ptr<io_uring> uring;
+  // registered buffers
   std::unique_ptr<iovec[]> registered_buffers{};
+  // registered file descriptors
   std::unique_ptr<int[]> registered_files{};
 };
 

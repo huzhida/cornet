@@ -5,7 +5,7 @@ namespace cornet {
 std::mutex context_t::contexts_mutex;
 std::unordered_map<std::thread::id, context_t*> context_t::contexts;
 
-context_t::context_t(): uring(config_t::get()["cornet"]["context"]["uring"]["capacity"].value_or(32)) {
+context_t::context_t() : uring(config_t::get()["cornet"]["context"]["uring"]["capacity"].value_or(32)) {
   if (auto scheduler_name = config_t::get()["cornet"]["context"]["scheduler"]["name"]) {
     scheduler_type = scheduler_t::to_scheduler_type(scheduler_name.as_string()->value_or(""));
   }
@@ -26,27 +26,27 @@ void context_t::run() {
     return;
   }
 
-  state.store(state_t::Running, std::memory_order_release);
-  auto current_state = state_t::Running;
+  switch_to(state_t::Running);
+  state_t current_state;
   while ((current_state = state.load(std::memory_order_acquire)) != state_t::Terminated) {
 
     if (current_state == state_t::Canceling) {
       sched(cancel_io_tasks());
-      state.store(state_t::Terminating);
+      switch_to(state_t::Terminating);
     }
 
     scheduler->sched(*this);
 
-    if (scheduler->idle() && uring.idle()) {
-      state.store(state_t::Terminated);
+    if (!scheduler->idle()) {
+      continue;
+    } else if (!uring.idle()) {
+      uring.wait_cqes(process_utask, uring.running_task_nr());
+    } else {
+      switch_to(state_t::Terminated);
     }
 
   }
 
-}
-
-uring_t& context_t::io_uring() {
-  return uring;
 }
 
 void context_t::set_scheduler_type(scheduler_type_t type) {
