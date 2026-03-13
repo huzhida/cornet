@@ -190,6 +190,19 @@ class uring_t {
   bool submit();
 
   /**
+   * @brief submit a persistent stop event read task
+   */
+  void arm();
+
+  /**
+   * @brief notify stop event
+   */
+  inline void notify() const {
+    uint64_t v = 1;
+    write(stop_event, &v, sizeof(v));
+  }
+
+  /**
    * @brief wait for CQEs and process them
    * @param process_fn callback function for each CQE
    * @param wait_nr minimum number of CQEs to wait for
@@ -259,11 +272,18 @@ class uring_t {
     return {io_uring_get_sqe(uring.get())};
   }
 
+  // stop token use for stop event user_data.
+  static constexpr int stop_token = 0xABCDEF;
+
  private:
   // submitted task count
   uint32_t task_nr{0};
   // remain sqe count
   uint32_t remain_sqe_nr{0};
+  // stop event fd toggle
+  int stop_event{-1};
+  // event val buffer
+  uint64_t event_val;
   // io_uring handle
   std::unique_ptr<io_uring> uring;
   // registered buffers
