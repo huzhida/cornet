@@ -137,7 +137,7 @@ struct context_t {
    */
   inline coro_t<int> cancel_io_tasks(void* user_data = nullptr, int flags = IORING_ASYNC_CANCEL_ANY) {
     int canceled_nr = 0;
-    while(true) {
+    while(!uring.idle()) {
       auto ret = co_await cancel_awaiter{*this, user_data, flags};
       if (ret > 0) {
         canceled_nr += ret;

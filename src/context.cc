@@ -63,6 +63,7 @@ void context_t::stop(bool cancel) {
   } else {
     state.store(state_t::Terminated);
   }
+  uring.notify();
 }
 
 std::thread::id context_t::owner_thread() const {
@@ -73,6 +74,9 @@ int context_t::process_utask(cqe_t cqe) {
   if (!cqe->user_data) {
     SPDLOG_ERROR("cqe user_data is nullptr, already set sqe->user_data ?");
     return -1;
+  } else if (cqe->user_data == uring_t::stop_token) {
+    SPDLOG_DEBUG("context uring stop triggered.");
+    return uring_t::stop_token;
   }
   reinterpret_cast<utask_t*>(cqe->user_data)->complete(cqe);
   return 0;

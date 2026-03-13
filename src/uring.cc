@@ -1,25 +1,40 @@
 #include "core/uring.h"
+#include <sys/eventfd.h>
 
 namespace cornet {
 
 uring_t::uring_t(uint32_t entries_nr, uint32_t flags)
-  : uring(std::make_unique<io_uring>()), remain_sqe_nr(entries_nr) {
+  : uring(std::make_unique<io_uring>()), remain_sqe_nr(entries_nr-1) {
   if (io_uring_queue_init(entries_nr, uring.get(), flags) < 0) {
     SPDLOG_ERROR("failed to init io_uring queue with error: {}", strerror(errno));
     throw std::runtime_error("io_uring_queue_init failed");
   }
+  if ((stop_event = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC) < 0)) {
+    SPDLOG_ERROR("failed to init event fd for uring stop event with error: {}", strerror(errno));
+    throw std::runtime_error("event fd init failed");
+  }
+
+  arm();
+  submit();
+}
+
+void uring_t::arm() {
+  new_sqe().prep_read(stop_event, &event_val, sizeof(event_val), 0).with_data((void*)0xABCDEF);
 }
 
 uring_t::~uring_t() {
   io_uring_queue_exit(uring.get());
+  close(stop_event);
 }
 
 uring_t::uring_t(uring_t&& r) noexcept {
   if (this != &r) {
     this->uring = std::move(r.uring);
+    this->stop_event = r.stop_event;
     this->registered_buffers = std::move(r.registered_buffers);
     this->registered_files = std::move(r.registered_files);
     r.uring = nullptr;
+    r.stop_event = -1;
     r.registered_buffers = nullptr;
     r.registered_files = nullptr;
   }
@@ -28,9 +43,11 @@ uring_t::uring_t(uring_t&& r) noexcept {
 uring_t& uring_t::operator=(uring_t&& r) noexcept {
   if (this != &r) {
     this->uring = std::move(r.uring);
+    this->stop_event = r.stop_event;
     this->registered_buffers = std::move(r.registered_buffers);
     this->registered_files = std::move(r.registered_files);
     r.uring = nullptr;
+    r.stop_event = -1;
     r.registered_buffers = nullptr;
     r.registered_files = nullptr;
   }
@@ -60,7 +77,9 @@ uint32_t uring_t::wait_cqes(int (*process_fn)(cqe_t), uint32_t wait_nr, int time
       return 0;
     }
     for (unsigned i = 0; i < ret; i++) {
-      process_fn(cqes[i]);
+      if(process_fn(cqes[i]) == uring_t::stop_token) {
+        arm();
+      }
     }
     io_uring_cq_advance(uring.get(), ret);
     task_nr -= ret;
@@ -84,7 +103,9 @@ uint32_t uring_t::wait_cqes(int (*process_fn)(cqe_t), uint32_t wait_nr, int time
   }
 
   io_uring_for_each_cqe(uring.get(), head, cqe) {
-    process_fn(cqe);
+    if(process_fn(cqe) == uring_t::stop_event) {
+      arm();
+    }
     ++count;
   }
   io_uring_cq_advance(uring.get(), count);
