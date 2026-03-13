@@ -20,14 +20,14 @@ std::unique_ptr<scheduler_t> scheduler_t::scheduler(scheduler_type_t scheduler_t
   }
   return iter->second.second();
 }
+
 void scheduler_t::transfer_to(scheduler_t &scheduler) {
   scheduler.ready_tasks = std::move(ready_tasks);
 }
-void scheduler_t::process_ready_task() {
-  auto handle = ready_tasks.front();
+void scheduler_t::resume_one_task() {
+  auto task = ready_tasks.front();
   ready_tasks.pop();
-  if (!handle.done())
-    handle.resume();
+  if (task && !task.done()) task.resume();
 }
 
 CORNET_REGISTER_SCHEDULER(scheduler_type_t::TimeSlice, time_slice_scheduler_t);
@@ -41,9 +41,8 @@ void time_slice_scheduler_t::sched(context_t& ctx) {
   auto start = std::chrono::steady_clock::now();
   auto& uring = ctx.io_uring();
   while (!ready_tasks.empty() && !cpu_timeout(start) && !uring.full()) {
-    process_ready_task();
+    resume_one_task();
   }
-
   uring.submit();
 
   uring.wait_cqes(context_t::process_utask, uring.running_task_nr()
@@ -60,16 +59,11 @@ CORNET_REGISTER_SCHEDULER(scheduler_type_t::RoundRobin, round_robin_scheduler_t)
 void round_robin_scheduler_t::sched(context_t& ctx) {
   auto& uring = ctx.io_uring();
   while (!ready_tasks.empty() && !uring.full()) {
-    process_ready_task();
+    resume_one_task();
   }
-
   uring.submit();
 
   uring.peek_cqes(context_t::process_utask, uring.running_task_nr());
-
-  if (ready_tasks.empty() && !uring.idle()) {
-    uring.wait_cqes(context_t::process_utask, uring.running_task_nr(), 0 , 1000000);
-  }
 }
 
 CORNET_REGISTER_SCHEDULER(scheduler_type_t::Batch, batch_scheduler_t);
@@ -81,19 +75,12 @@ batch_scheduler_t::batch_scheduler_t() {
 void batch_scheduler_t::sched(context_t& ctx) {
   size_t processed = 0;
   auto& uring = ctx.io_uring();
-  while (!ready_tasks.empty() && !uring.full()) {
-    process_ready_task();
-    if (++processed >= batch_nr) {
-      break;
-    }
+  while (!ready_tasks.empty() && !uring.full() && ++processed < batch_nr) {
+    resume_one_task();
   }
   uring.submit();
 
   uring.peek_cqes(context_t::process_utask, batch_nr);
-
-  if (ready_tasks.empty() && !uring.idle()) {
-    uring.wait_cqes(context_t::process_utask, uring.running_task_nr(), 0, 100000);
-  }
 }
 
 } // cornet

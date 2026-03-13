@@ -57,33 +57,12 @@ struct scheduler_t {
   inline void schedule(std::coroutine_handle<> h) {
     ready_tasks.push(h);
   }
-  /**
-   * @brief push task-like to ready queue, will maintain r-value
-   * @tparam T task-like type
-   * @param task task-like object
-   */
-  template <typename T>
-  CORNET_MAYBE_UNUSED inline void schedule(T&& task) {
-    using R = std::decay_t<T>;
-    if constexpr (std::is_pointer_v<R>) {
-      static_assert(std::is_base_of_v<task_t, std::remove_pointer_t<R> >,
-                    "T must be derived from task_t");
-      ready_tasks.push(task->handle);
-    } else {
-      static_assert(std::is_base_of_v<task_t, R>,
-                    "T must be derived from task_t");
-      if constexpr (std::is_rvalue_reference_v<decltype(task)>) {
-        task.detach();
-      }
-      ready_tasks.push(task.handle);
-    }
-  }
 
   /**
-   * @brief whether scheduler has tasks to resume.
-   * @return true for yes / false for no.
+   * @brief whether scheduler idle
+   * @return true for idle / false for busy
    */
-  inline bool idle() const {
+  CORNET_NODISCARD inline bool idle() const {
     return ready_tasks.empty();
   }
 
@@ -127,7 +106,7 @@ protected:
   // ready to resume queue
   queue_t ready_tasks;
   // resume task and maintain r-value task life-span
-  void process_ready_task();
+  void resume_one_task();
 
 private:
   // scheduler registry

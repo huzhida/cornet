@@ -36,13 +36,25 @@ struct context_t {
   context_t& operator=(context_t&& ctx) = delete;
 
   /**
-   * @brief push task to scheduler queue.
-   * @tparam C task_t-like object, with C.handle (std::coroutine_handle) or is raw std::coroutine_handle
-   * @param c task will be push
+   * @brief push task-like to ready queue, will maintain r-value
+   * @tparam T task-like type
+   * @param task task-like object
    */
-  template <typename C>
-  void sched(C&& c) {
-    scheduler->schedule(std::forward<C>(c));
+  template <typename T>
+  CORNET_MAYBE_UNUSED inline void sched(T&& task) {
+    using R = std::decay_t<T>;
+    if constexpr (std::is_pointer_v<R>) {
+      static_assert(std::is_base_of_v<task_t, std::remove_pointer_t<R> >,
+                    "T must be derived from task_t");
+      scheduler->schedule(task->handle);
+    } else {
+      static_assert(std::is_base_of_v<task_t, R>,
+                    "T must be derived from task_t");
+      if constexpr (std::is_rvalue_reference_v<decltype(task)>) {
+        task.detach();
+      }
+      scheduler->schedule(task.handle);
+    }
   }
 
   /**
@@ -66,7 +78,22 @@ struct context_t {
    * @brief return context_t owned io_uring wrapper.
    * @return context_t owned io_uring wrapper reference
    */
-  CORNET_NODISCARD uring_t& io_uring();
+  CORNET_NODISCARD inline uring_t& io_uring() {
+    return uring;
+  }
+
+  /**
+   * @brief context idle or not
+   * @return true for idle / false for busy
+   */
+  CORNET_NODISCARD inline bool idle() {
+    return scheduler->idle() && uring.idle();
+  }
+
+  inline void switch_to(state_t s) {
+    state.store(s, std::memory_order_release);
+    SPDLOG_DEBUG("context switch to state:{}", to_string(s));
+  }
 
   /**
    * @brief return context_t owner thread id
@@ -162,15 +189,29 @@ struct context_t {
    */
   static int process_utask(cqe_t cqe);
 
+  /**
+   * @brief context state to string
+   * @param s state
+   * @return state string
+   */
+  static inline const char* to_string(state_t s) {
+    switch (s) {
+      case state_t::Running: return "Running";
+      case state_t::Canceling: return "Canceling";
+      case state_t::Terminating: return "Terminating";
+      case state_t::Terminated: return "Terminated";
+    }
+  }
+
 private:
   context_t();
 
+  // context owned io_uring wrapper
+  uring_t uring;
   // context current state
   std::atomic<state_t> state;
   // context current scheduler type
   scheduler_type_t scheduler_type{scheduler_type_t::RoundRobin};
-  // context owned io_uring wrapper
-  uring_t uring;
   // context owner thread id
   std::thread::id owner{std::this_thread::get_id()};
   // context scheduler
