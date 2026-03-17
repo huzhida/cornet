@@ -201,6 +201,7 @@ struct context_t {
       case state_t::Terminating: return "Terminating";
       case state_t::Terminated: return "Terminated";
     }
+    return "Unknown";
   }
 
 private:
