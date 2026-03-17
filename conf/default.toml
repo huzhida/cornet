@@ -12,7 +12,7 @@ batch=32
 # cornet.logging.stdout
 [cornet.logging.stdout]
 level="info"
-pattern="%^%L%$ [%Y-%m-%d %T] %v"
+pattern="%^%L%$ [%Y-%m-%d %T %t] %v"
 
 # cornet.logging.files
 #[[cornet.logging.files]]
