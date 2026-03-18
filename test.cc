@@ -131,19 +131,26 @@ public:
   }
 
   // 服务器协程 - 处理单个客户端连接
-  coro_t<void> server_session(context_t& ctx, int client_fd) {
+  coro_t<void> server_session(context_t& ctx, const BenchmarkConfig& config, int client_fd) {
     active_connections++;
     auto socket = tcp::v4::socket_t(client_fd);
     // 使用动态分配的缓冲区，避免栈溢出
     auto buffer = std::make_shared<std::vector<char> >(4096);
 
     while (server_running) {
-      auto n = co_await socket.recv(ctx, buffer->data(), buffer->size());
-      if (n <= 0)
+      auto [r, w] = co_await chain(
+          socket.recv(ctx, buffer->data(), config.message_size),
+          socket.send(ctx, buffer->data(), config.message_size)
+      );
+      if (r <=0 || w <=0) {
         break;
-      auto send_n = co_await socket.send(ctx, buffer->data(), n);
-      if (send_n <= 0)
-        break;
+      }
+//      auto n = co_await socket.recv(ctx, buffer->data(), buffer->size());
+//      if (n <= 0)
+//        break;
+//      auto send_n = co_await socket.send(ctx, buffer->data(), n);
+//      if (send_n <= 0)
+//        break;
     }
 
     active_connections--;
@@ -151,7 +158,7 @@ public:
   }
 
   // 服务器主协程
-  coro_t<void> server_main(context_t& ctx) {
+  coro_t<void> server_main(context_t& ctx, const BenchmarkConfig& config) {
     auto listener = tcp::v4::socket_t();
     if (!listener.listen("127.0.0.1", 12345)) {
       std::cerr << "服务器监听失败\n";
@@ -164,7 +171,7 @@ public:
         break;
 
       // 为每个客户端创建一个会话协程
-      ctx.sched(server_session(ctx, client_fd));
+      ctx.sched(server_session(ctx, config, client_fd));
     }
 
     co_return;
@@ -193,9 +200,9 @@ public:
 
       auto send_start = std::chrono::steady_clock::now();
 
-      auto [sent, received] = co_await all(
+      auto [sent, received] = co_await chain(
           socket->send(ctx, send_buf->data(), send_buf->size()),
-          socket->recv(ctx, recv_buf->data(), recv_buf->size(), MSG_WAITALL)
+          socket->recv(ctx, recv_buf->data(), send_buf->size(), MSG_WAITALL)
       );
       if (sent <=0 || received <= 0) {
         break;
@@ -233,10 +240,10 @@ public:
     server_running = true;
 
     // 启动服务器
-    std::thread server_thread([this] {
+    std::thread server_thread([this, &config] {
       auto& ctx = context_t::context();
       ctx.set_scheduler_type(type);
-      auto server = server_main(ctx);
+      auto server = server_main(ctx, config);
       ctx.sched(server);
       ctx.run();
     });

@@ -47,6 +47,8 @@ struct context_t {
       static_assert(std::is_base_of_v<task_t, std::remove_pointer_t<R> >,
                     "T must be derived from task_t");
       scheduler->schedule(task->handle);
+    } else if constexpr (std::is_same_v<R, std::coroutine_handle<>>) {
+      scheduler->schedule(task);
     } else {
       static_assert(std::is_base_of_v<task_t, R>,
                     "T must be derived from task_t");
