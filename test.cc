@@ -16,6 +16,7 @@
 
 #include "core/socket.h"
 #include "core/context.h"
+#include "core/tools.h"
 
 using namespace cornet;
 
@@ -192,7 +193,7 @@ public:
 
       auto send_start = std::chrono::steady_clock::now();
 
-      auto [sent, received] = co_await chain(
+      auto [sent, received] = co_await all(
           socket->send(ctx, send_buf->data(), send_buf->size()),
           socket->recv(ctx, recv_buf->data(), recv_buf->size(), MSG_WAITALL)
       );

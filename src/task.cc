@@ -11,7 +11,14 @@ CORNET_MAYBE_UNUSED void utask_t::await_suspend(std::coroutine_handle<> handle) 
 void utask_t::complete(context_t& ctx, cqe_t cqe) {
   value = cqe->res;
   completed = true;
-  if (this->handle) {
+
+  if (callback && handle) {
+    auto a = (action*)handle.address();
+    a->callback(ctx, a->data);
+    return;
+  }
+
+  if (handle) {
     ctx.sched(this);
   }
 }

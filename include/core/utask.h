@@ -8,6 +8,12 @@ namespace cornet {
 
 struct context_t;
 
+struct action {
+  using callback_t = void(*)(context_t&, void*);
+  void* data;
+  callback_t callback;
+};
+
 /**
  * @brief io_uring specific task/awaiter base struct.
  * * This struct implements the C++ coroutine Awaiter interface,
@@ -55,6 +61,11 @@ struct utask_t : task_t {
   bool completed{false};
 
   /**
+   * @brief callback flag, when flag = true, it's represent handle is a void (*callback)
+   */
+  bool callback{false};
+
+  /**
    * @brief the return value of the async system call.
    */
   int value{0};
@@ -64,41 +75,6 @@ struct utask_t : task_t {
    */
   sqe_t sqe{nullptr};
 };
-
-template<typename... UTasks>
-struct chain_awaiter {
-  std::tuple<UTasks...> tasks;
-
-  template<size_t I>
-  void apply_task(std::coroutine_handle<> h) {
-    constexpr size_t N = sizeof...(UTasks);
-    auto& task = std::get<I>(tasks);
-    if constexpr(I < N-1) {
-      task.sqe.with_flags(IOSQE_IO_LINK);
-    } else {
-      task.handle = h;
-    }
-  }
-
-  bool await_ready() const { return false; }
-  void await_suspend(std::coroutine_handle<> h) {
-    constexpr size_t N = sizeof...(UTasks);
-    [this, &h]<size_t... Is>(std::index_sequence<Is...>) {
-      (this->apply_task<Is>(h), ...);
-    }(std::make_index_sequence<N>{});
-  }
-  auto await_resume() {
-    constexpr size_t N = sizeof...(UTasks);
-    return [this]<size_t... Is>(std::index_sequence<Is...>) {
-      return std::make_tuple(std::move(std::get<Is>(tasks).value)...);
-    }(std::make_index_sequence<N>{});
-  }
-};
-
-template<typename... UTasks>
-auto chain(UTasks... tasks) {
-  return chain_awaiter{std::make_tuple(std::move(tasks)...)};
-}
 
 } // namespace cornet
 
