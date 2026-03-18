@@ -62,8 +62,8 @@ bool socket_t::listen(const std::string& ip, unsigned int port) const {
 }
 
 socket_t::accept_awaiter::accept_awaiter(context_t& ctx, int fd, sockaddr_in* addr, int flag)
-  : utask_t(ctx) {
-  ctx.io_uring().new_sqe().prep_accept(fd, reinterpret_cast<sockaddr*>(&addr), &addr_len, flag).with_data(this);
+: utask_t(ctx.io_uring().new_sqe()) {
+  sqe.prep_accept(fd, reinterpret_cast<sockaddr*>(&addr), &addr_len, flag).with_data(this);
 }
 
 socket_t::accept_awaiter socket_t::accept(context_t& ctx, sockaddr_in* addr, int flag) const {
@@ -71,9 +71,9 @@ socket_t::accept_awaiter socket_t::accept(context_t& ctx, sockaddr_in* addr, int
 }
 
 socket_t::connect_awaiter::connect_awaiter(context_t& ctx, int fd, const std::string& ip, unsigned int port)
-  : utask_t(ctx) {
+: utask_t(ctx.io_uring().new_sqe()) {
   addr = to_address(ip, port);
-  ctx.io_uring().new_sqe().prep_connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)).with_data(this);
+  sqe.prep_connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)).with_data(this);
 }
 
 socket_t::connect_awaiter socket_t::connect(context_t& ctx, const std::string& ip, unsigned int port) const {
@@ -81,8 +81,8 @@ socket_t::connect_awaiter socket_t::connect(context_t& ctx, const std::string& i
 }
 
 socket_t::recv_awaiter::recv_awaiter(context_t& ctx, int fd, void* buf, uint32_t nbytes, int flag)
-  : utask_t(ctx) {
-  ctx.io_uring().new_sqe().prep_recv(fd, buf, nbytes, flag).with_data(this);
+: utask_t(ctx.io_uring().new_sqe()) {
+  sqe.prep_recv(fd, buf, nbytes, flag).with_data(this);
 }
 
 socket_t::recv_awaiter socket_t::recv(context_t& ctx, void* buf, uint32_t nbytes, int flag) const {
@@ -90,8 +90,8 @@ socket_t::recv_awaiter socket_t::recv(context_t& ctx, void* buf, uint32_t nbytes
 }
 
 socket_t::send_awaiter::send_awaiter(context_t& ctx, int fd, void* buf, uint32_t nbytes, int flag)
-  : utask_t(ctx) {
-  ctx.io_uring().new_sqe().prep_send(fd, buf, nbytes, flag).with_data(this);
+: utask_t(ctx.io_uring().new_sqe()) {
+  sqe.prep_send(fd, buf, nbytes, flag).with_data(this);
 }
 
 socket_t::send_awaiter socket_t::send(context_t& ctx, void* buf, uint32_t nbytes, int flag) const {
@@ -99,8 +99,8 @@ socket_t::send_awaiter socket_t::send(context_t& ctx, void* buf, uint32_t nbytes
 }
 
 socket_t::close_awaiter::close_awaiter(context_t& ctx, int fd)
-  : utask_t(ctx) {
-  ctx.io_uring().new_sqe().prep_close(fd).with_data(this);
+: utask_t(ctx.io_uring().new_sqe()) {
+  sqe.prep_close(fd).with_data(this);
 }
 
 socket_t::close_awaiter socket_t::close(context_t& ctx) const {

@@ -40,7 +40,7 @@ void context_t::run() {
     if (idle()) {
       switch_to(state_t::Terminated);
     }else if (scheduler->idle() && !uring.idle()) {
-      uring.wait_cqes(process_utask, 1);
+      uring.wait_cqes(process_utask,*this, 1);
     }
 
   }
@@ -67,22 +67,18 @@ std::thread::id context_t::owner_thread() const {
   return owner;
 }
 
-int context_t::process_utask(cqe_t cqe) {
+int context_t::process_utask(context_t& ctx, cqe_t cqe) {
   if (!cqe->user_data) {
     SPDLOG_ERROR("cqe user_data is nullptr, already set sqe->user_data ?");
     return -1;
   }
-  if (cqe->user_data == uring_t::stop_token) {
-    SPDLOG_DEBUG("context uring stop triggered.");
-    return uring_t::stop_token;
-  }
-  reinterpret_cast<utask_t*>(cqe->user_data)->complete(cqe);
+  reinterpret_cast<utask_t*>(cqe->user_data)->complete(ctx, cqe);
   return 0;
 }
 
 context_t::cancel_awaiter::cancel_awaiter(context_t& ctx, void* user_data, int flags)
-  : utask_t(ctx) {
-  ctx.io_uring().new_sqe().prep_cancel(user_data, flags).with_data(this);
+  : utask_t(ctx.io_uring().new_sqe()) {
+  sqe.prep_cancel(user_data, flags).with_data(this);
 }
 
 } // cornet
