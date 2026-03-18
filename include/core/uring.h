@@ -161,6 +161,8 @@ struct sqe_t {
   io_uring_sqe* sqe;
 };
 
+struct context_t;
+
 /**
  * @brief io_uring context wrapper
  */
@@ -192,23 +194,26 @@ class uring_t {
   /**
    * @brief wait for CQEs and process them
    * @param process_fn callback function for each CQE
+   * @param ctx context reference
    * @param wait_nr minimum number of CQEs to wait for
    * @param timeout_s timeout seconds
    * @param timeout_ns timeout nanoseconds
    * @param mask signal mask
    * @return number of processed CQEs
    */
-  uint32_t wait_cqes(int (*process_fn)(cqe_t), uint32_t wait_nr = 1,
+  uint32_t wait_cqes(int (*process_fn)(context_t&, cqe_t), context_t& ctx, uint32_t wait_nr = 1,
                      int timeout_s = -1, int timeout_ns = -1, sigset_t* mask = nullptr);
 
   /**
    * @brief peek available CQEs without blocking
    * @param process_fn callback function for each CQE
+   * @param ctx context reference
    * @param peek_nr maximum number of CQEs to peek
    * @param mask signal mask
    * @return number of processed CQEs
    */
-  uint32_t peek_cqes(int (*process_fn)(cqe_t), uint32_t peek_nr = 1, sigset_t* mask = nullptr);
+  uint32_t peek_cqes(int (*process_fn)(context_t&, cqe_t), context_t& ctx,
+                     uint32_t peek_nr = 1, sigset_t* mask = nullptr);
 
   /**
    * @brief check if the SQE ring is full
@@ -258,9 +263,6 @@ class uring_t {
     --remain_sqe_nr;
     return {io_uring_get_sqe(uring.get())};
   }
-
-  // stop token use for stop event user_data.
-  static constexpr int stop_token = 0xABCDEF;
 
  private:
   // submitted task count

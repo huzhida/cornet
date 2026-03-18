@@ -8,9 +8,12 @@ CORNET_MAYBE_UNUSED void utask_t::await_suspend(std::coroutine_handle<> handle) 
   this->handle = handle;
 }
 
-void utask_t::complete(cqe_t cqe) {
+void utask_t::complete(context_t& ctx, cqe_t cqe) {
   value = cqe->res;
-  ctx.sched(this);
+  completed = true;
+  if (this->handle) {
+    ctx.sched(this);
+  }
 }
 
 }

@@ -45,7 +45,7 @@ void time_slice_scheduler_t::sched(context_t& ctx) {
   }
   uring.submit();
 
-  uring.wait_cqes(context_t::process_utask, uring.running_task_nr()
+  uring.wait_cqes(context_t::process_utask, ctx, uring.running_task_nr()
                                        , 0, ready_tasks.empty() ? io_budget.count() : 0);
 }
 
@@ -63,7 +63,7 @@ void round_robin_scheduler_t::sched(context_t& ctx) {
   }
   uring.submit();
 
-  uring.peek_cqes(context_t::process_utask, uring.running_task_nr());
+  uring.peek_cqes(context_t::process_utask, ctx, uring.running_task_nr());
 }
 
 CORNET_REGISTER_SCHEDULER(scheduler_type_t::Batch, batch_scheduler_t);
@@ -80,7 +80,7 @@ void batch_scheduler_t::sched(context_t& ctx) {
   }
   uring.submit();
 
-  uring.peek_cqes(context_t::process_utask, batch_nr);
+  uring.peek_cqes(context_t::process_utask, ctx, batch_nr);
 }
 
 } // cornet

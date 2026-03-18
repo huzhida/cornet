@@ -11,7 +11,7 @@ namespace cornet {
  */
 struct task_t {
   // coroutine handle
-  std::coroutine_handle<> handle;
+  std::coroutine_handle<> handle{nullptr};
 };
 
 }

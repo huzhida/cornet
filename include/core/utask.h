@@ -17,15 +17,15 @@ struct utask_t : task_t {
   /**
    * @param ctx the owner context (io_uring manager)
    */
-  explicit utask_t(context_t& ctx)
-      : ctx(ctx) {}
+  explicit utask_t(sqe_t sqe)
+      : sqe(sqe) {}
 
   /**
    * @brief checks if the result is already available.
    * @return always false to ensure the coroutine suspends and waits for CQE.
    */
   CORNET_MAYBE_UNUSED inline bool await_ready() {
-    return false;
+    return completed;
   }
 
   /**
@@ -44,9 +44,15 @@ struct utask_t : task_t {
 
   /**
    * @brief completes the task by processing the CQE and storing the result.
+   * @param ctx context reference
    * @param cqe the completion queue entry from io_uring.
    */
-  void complete(cqe_t cqe);
+  void complete(context_t& ctx,cqe_t cqe);
+
+  /**
+   * @brief completed flag
+   */
+  bool completed{false};
 
   /**
    * @brief the return value of the async system call.
@@ -54,10 +60,45 @@ struct utask_t : task_t {
   int value{0};
 
   /**
-   * @brief reference to the execution context.
+   * @brief io_uring_sqe wrapper for this task
    */
-  context_t& ctx;
+  sqe_t sqe{nullptr};
 };
+
+template<typename... UTasks>
+struct chain_awaiter {
+  std::tuple<UTasks...> tasks;
+
+  template<size_t I>
+  void apply_task(std::coroutine_handle<> h) {
+    constexpr size_t N = sizeof...(UTasks);
+    auto& task = std::get<I>(tasks);
+    if constexpr(I < N-1) {
+      task.sqe.with_flags(IOSQE_IO_LINK);
+    } else {
+      task.handle = h;
+    }
+  }
+
+  bool await_ready() const { return false; }
+  void await_suspend(std::coroutine_handle<> h) {
+    constexpr size_t N = sizeof...(UTasks);
+    [this, &h]<size_t... Is>(std::index_sequence<Is...>) {
+      (this->apply_task<Is>(h), ...);
+    }(std::make_index_sequence<N>{});
+  }
+  auto await_resume() {
+    constexpr size_t N = sizeof...(UTasks);
+    return [this]<size_t... Is>(std::index_sequence<Is...>) {
+      return std::make_tuple(std::move(std::get<Is>(tasks).value)...);
+    }(std::make_index_sequence<N>{});
+  }
+};
+
+template<typename... UTasks>
+auto chain(UTasks... tasks) {
+  return chain_awaiter{std::make_tuple(std::move(tasks)...)};
+}
 
 } // namespace cornet
 

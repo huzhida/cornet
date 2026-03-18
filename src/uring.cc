@@ -50,7 +50,7 @@ bool uring_t::submit() {
   return true;
 }
 
-uint32_t uring_t::wait_cqes(int (*process_fn)(cqe_t), uint32_t wait_nr, int timeout_s,
+uint32_t uring_t::wait_cqes(int (*process_fn)(context_t&, cqe_t), context_t& ctx, uint32_t wait_nr, int timeout_s,
                                         int timeout_ns, sigset_t* mask) {
   uint32_t count{0};
 
@@ -62,7 +62,7 @@ uint32_t uring_t::wait_cqes(int (*process_fn)(cqe_t), uint32_t wait_nr, int time
       return 0;
     }
     for (unsigned i = 0; i < ret; i++) {
-      process_fn(cqes[i]);
+      process_fn(ctx, cqes[i]);
     }
     io_uring_cq_advance(uring.get(), ret);
     task_nr -= ret;
@@ -86,7 +86,7 @@ uint32_t uring_t::wait_cqes(int (*process_fn)(cqe_t), uint32_t wait_nr, int time
   }
 
   io_uring_for_each_cqe(uring.get(), head, cqe) {
-    process_fn(cqe);
+    process_fn(ctx, cqe);
     ++count;
   }
   io_uring_cq_advance(uring.get(), count);
@@ -94,8 +94,8 @@ uint32_t uring_t::wait_cqes(int (*process_fn)(cqe_t), uint32_t wait_nr, int time
   return count;
 }
 
-uint32_t uring_t::peek_cqes(int(* process_fn)(cqe_t), uint32_t peek_nr, sigset_t* mask) {
-  return wait_cqes(process_fn, peek_nr, 0, 0, mask);
+uint32_t uring_t::peek_cqes(int(* process_fn)(context_t&, cqe_t), context_t& ctx, uint32_t peek_nr, sigset_t* mask) {
+  return wait_cqes(process_fn, ctx, peek_nr, 0, 0, mask);
 }
 
 CORNET_MAYBE_UNUSED bool uring_t::register_buffers(iovec* buffers, size_t buffer_nr) {
