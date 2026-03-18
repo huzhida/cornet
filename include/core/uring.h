@@ -260,8 +260,15 @@ class uring_t {
    * @return sqe_t wrapper
    */
   inline sqe_t new_sqe() {
+    auto sqe = io_uring_get_sqe(uring.get());
+    if (!sqe) {
+      if (!submit() || (sqe = io_uring_get_sqe(uring.get()))) {
+        SPDLOG_ERROR("io_uring sqe exhausted or try submit failed.");
+        return {nullptr};
+      }
+    }
     --remain_sqe_nr;
-    return {io_uring_get_sqe(uring.get())};
+    return {sqe};
   }
 
  private:

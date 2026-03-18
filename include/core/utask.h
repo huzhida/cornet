@@ -31,6 +31,10 @@ struct utask_t : task_t {
    * @return always false to ensure the coroutine suspends and waits for CQE.
    */
   CORNET_MAYBE_UNUSED inline bool await_ready() {
+    if (!sqe.sqe) {
+      value = ENOBUFS;
+      return true;
+    }
     return completed;
   }
 
