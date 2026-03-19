@@ -23,12 +23,17 @@ struct utask_t : task_t {
   /**
    * @param ctx the owner context (io_uring manager)
    */
-  explicit utask_t(sqe_t sqe)
-      : sqe(sqe) {}
+  explicit utask_t(context_t& ctx);
+
+  utask_t(const utask_t&) = delete;
+  utask_t& operator=(const utask_t&) = delete;
+
+  utask_t(utask_t&&) noexcept;
+  utask_t& operator=(utask_t&&) noexcept;
 
   /**
    * @brief checks if the result is already available.
-   * @return always false to ensure the coroutine suspends and waits for CQE.
+   * @return if sqe exhausted, return ENOBUFS, else return coroutine completed or not.
    */
   CORNET_MAYBE_UNUSED inline bool await_ready() {
     if (!sqe.sqe) {

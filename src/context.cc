@@ -77,7 +77,7 @@ int context_t::process_utask(context_t& ctx, cqe_t cqe) {
 }
 
 context_t::cancel_awaiter::cancel_awaiter(context_t& ctx, void* user_data, int flags)
-  : utask_t(ctx.io_uring().new_sqe()) {
+  : utask_t(ctx) {
   sqe.prep_cancel(user_data, flags).with_data(this);
 }
 

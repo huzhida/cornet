@@ -20,6 +20,7 @@ struct sqe_t {
    * @param user_data pointer to user-defined data (usually awaiter or task)
    */
   CORNET_MAYBE_UNUSED inline void with_data(void* user_data) const {
+    if(!sqe) return;
     io_uring_sqe_set_data(sqe, user_data);
   }
 
@@ -29,6 +30,7 @@ struct sqe_t {
    * @return self reference
    */
   CORNET_MAYBE_UNUSED inline sqe_t& with_flags(uint32_t flags) {
+    if(!sqe) return *this;
     sqe->flags |= flags;
     io_uring_sqe_set_flags(sqe, sqe->flags);
     return *this;
@@ -43,6 +45,7 @@ struct sqe_t {
    * @return self reference
    */
   CORNET_MAYBE_UNUSED inline sqe_t& prep_read(int fd, void* buf, uint32_t nbytes, uint64_t offset) {
+    if(!sqe) return *this;
     io_uring_prep_read(sqe, fd, buf, nbytes, offset);
     return *this;
   }
@@ -56,6 +59,7 @@ struct sqe_t {
    * @return self reference
    */
   CORNET_MAYBE_UNUSED inline sqe_t& prep_readv(int fd, iovec* iovecs, int nr_vecs, uint64_t offset) {
+    if(!sqe) return *this;
     io_uring_prep_readv(sqe, fd, iovecs, nr_vecs, offset);
     return *this;
   }
@@ -69,6 +73,7 @@ struct sqe_t {
    * @return self reference
    */
   CORNET_MAYBE_UNUSED inline sqe_t& prep_write(int fd, void* buf, uint32_t nbytes, uint64_t offset) {
+    if(!sqe) return *this;
     io_uring_prep_write(sqe, fd, buf, nbytes, offset);
     return *this;
   }
@@ -82,6 +87,7 @@ struct sqe_t {
    * @return self reference
    */
   CORNET_MAYBE_UNUSED inline sqe_t& prep_writev(int fd, iovec* iovecs, int nr_vecs, uint64_t offset) {
+    if(!sqe) return *this;
     io_uring_prep_writev(sqe, fd, iovecs, nr_vecs, offset);
     return *this;
   }
@@ -95,6 +101,7 @@ struct sqe_t {
    * @return self reference
    */
   CORNET_MAYBE_UNUSED inline sqe_t& prep_send(int sockfd, void* buf, size_t len, int flags) {
+    if(!sqe) return *this;
     io_uring_prep_send(sqe, sockfd, buf, len, flags);
     return *this;
   }
@@ -108,6 +115,7 @@ struct sqe_t {
    * @return self reference
    */
   CORNET_MAYBE_UNUSED inline sqe_t& prep_recv(int sockfd, void* buf, size_t len, int flags) {
+    if(!sqe) return *this;
     io_uring_prep_recv(sqe, sockfd, buf, len, flags);
     return *this;
   }
@@ -121,6 +129,7 @@ struct sqe_t {
    * @return self reference
    */
   CORNET_MAYBE_UNUSED inline sqe_t& prep_accept(int sockfd, sockaddr* addr, socklen_t* addrlen, int flags) {
+    if(!sqe) return *this;
     io_uring_prep_accept(sqe, sockfd, addr, addrlen, flags);
     return *this;
   }
@@ -133,6 +142,7 @@ struct sqe_t {
    * @return self reference
    */
   CORNET_MAYBE_UNUSED inline sqe_t& prep_connect(int sockfd, sockaddr* addr, socklen_t addrlen) {
+    if(!sqe) return *this;
     io_uring_prep_connect(sqe, sockfd, addr, addrlen);
     return *this;
   }
@@ -143,6 +153,7 @@ struct sqe_t {
    * @return self reference
    */
   CORNET_MAYBE_UNUSED inline sqe_t& prep_close(int fd) {
+    if(!sqe) return *this;
     io_uring_prep_close(sqe, fd);
     return *this;
   }
@@ -154,6 +165,7 @@ struct sqe_t {
    * @return self reference
    */
   CORNET_MAYBE_UNUSED inline sqe_t& prep_cancel(void* user_data, int flags) {
+    if(!sqe) return *this;
     io_uring_prep_cancel(sqe, user_data, flags);
     return *this;
   }
@@ -262,8 +274,10 @@ class uring_t {
   inline sqe_t new_sqe() {
     auto sqe = io_uring_get_sqe(uring.get());
     if (!sqe) {
-      if (!submit() || (sqe = io_uring_get_sqe(uring.get()))) {
-        SPDLOG_ERROR("io_uring sqe exhausted or try submit failed.");
+      SPDLOG_WARN("io_uring sqe exhausted, try to increase io_uring entries to avoid performance bottleneck.");
+      submit();
+      if (!(sqe = io_uring_get_sqe(uring.get()))) {
+        SPDLOG_ERROR("io_uring sqe exhausted even submitted once");
         return {nullptr};
       }
     }
