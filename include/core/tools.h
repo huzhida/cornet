@@ -18,7 +18,6 @@ struct chain_awaiter {
     } else {
       task.handle = h;
     }
-    task.sqe.with_data(&task);
   }
 
   bool await_ready() const { return false; }
@@ -61,7 +60,6 @@ struct all_awaiter {
     auto& task = std::get<I>(tasks);
     task.handle = std::coroutine_handle<>::from_address(&on_complete);
     task.callback = true;
-    task.sqe.with_data(&task);
   }
 
   bool await_ready() const { return false; }
