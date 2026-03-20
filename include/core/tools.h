@@ -5,40 +5,66 @@
 
 namespace cornet {
 
-template<typename... UTasks>
-struct chain_awaiter {
-  std::tuple<UTasks...> tasks;
+struct chain_builder {
+  context_t& ctx;
+  std::vector<utask_t*> tasks;
 
-  template<size_t I>
-  void apply_task(std::coroutine_handle<> h) {
-    constexpr size_t N = sizeof...(UTasks);
-    auto& task = std::get<I>(tasks);
-    if constexpr(I < N-1) {
-      task.sqe.with_flags(IOSQE_IO_LINK);
-    } else {
-      task.handle = h;
+  struct chain_awaiter {
+    context_t& ctx;
+    std::vector<utask_t*>& tasks;
+
+    explicit chain_awaiter(context_t& ctx, std::vector<utask_t*> & tasks) : ctx(ctx), tasks(tasks) {}
+    bool await_ready() const {
+      return false;
     }
+    void await_suspend(std::coroutine_handle<> h) {
+      tasks.back()->handle = h;
+      ctx.io_uring().flush();
+    }
+    auto await_resume() {
+      return tasks.back()->value;
+    }
+  };
+
+  template<typename Rep, typename Period>
+  struct timeout_chain_awaiter : chain_awaiter {
+    struct link_timeout_awaiter : utask_t {
+      link_timeout_awaiter(context_t& ctx, std::chrono::duration<Rep, Period> timeout, int flags) : utask_t(ctx) {
+        sqe.prep_link_timeout(timeout, flags).with_data(this);
+      }
+    };
+    link_timeout_awaiter timeout_awaiter;
+    explicit timeout_chain_awaiter(context_t& ctx, std::vector<utask_t*> & tasks,
+                                   std::chrono::duration<Rep, Period> timeout, int flags)
+    : chain_awaiter(ctx, tasks), timeout_awaiter(ctx, tasks, flags) {
+      tasks.emplace_back(&timeout_awaiter);
+    }
+  };
+
+  explicit chain_builder(context_t& ctx) : ctx(ctx) {}
+
+  chain_builder& with_link(utask_t& t) {
+    t.sqe.with_flags(IOSQE_IO_HARDLINK);
+    tasks.emplace_back(&t);
+    return *this;
   }
 
-  bool await_ready() const { return false; }
-  void await_suspend(std::coroutine_handle<> h) {
-    constexpr size_t N = sizeof...(UTasks);
-    [this, &h]<size_t... Is>(std::index_sequence<Is...>) {
-      (this->apply_task<Is>(h), ...);
-    }(std::make_index_sequence<N>{});
+  chain_builder& with_hard_link(utask_t& t) {
+    t.sqe.with_flags(IOSQE_IO_HARDLINK);
+    tasks.emplace_back(&t);
+    return *this;
   }
-  auto await_resume() {
-    constexpr size_t N = sizeof...(UTasks);
-    return [this]<size_t... Is>(std::index_sequence<Is...>) {
-      return std::make_tuple(std::move(std::get<Is>(tasks).value)...);
-    }(std::make_index_sequence<N>{});
+
+  chain_awaiter chain(utask_t& t) {
+    tasks.emplace_back(&t);
+    return chain_awaiter{ctx, tasks};
+  }
+
+  template<typename Rep, typename Period>
+  auto timeout_chain(std::chrono::duration<Rep, Period> timeout, int flags = 0) {
+    return timeout_chain_awaiter(ctx, tasks, timeout, flags);
   }
 };
-
-template<typename... UTasks>
-auto chain(UTasks... tasks) {
-  return chain_awaiter<UTasks...>{std::make_tuple(std::move(tasks)...)};
-}
 
 template<typename... UTasks>
 struct all_awaiter {
@@ -79,7 +105,7 @@ struct all_awaiter {
 };
 
 template<typename... UTasks>
-auto all(UTasks... tasks) {
+CORNET_NODISCARD auto all(UTasks... tasks) {
   return all_awaiter<UTasks...>{std::make_tuple(std::move(tasks)...)};
 }
 

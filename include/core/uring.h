@@ -2,6 +2,7 @@
 #define CORNET_URING_H
 
 #include <liburing.h>
+#include <queue>
 #include "utils/utils.h"
 
 namespace cornet {
@@ -31,8 +32,7 @@ struct sqe_t {
    */
   CORNET_MAYBE_UNUSED inline sqe_t& with_flags(uint32_t flags) {
     if(!sqe) return *this;
-    sqe->flags |= flags;
-    io_uring_sqe_set_flags(sqe, sqe->flags);
+    io_uring_sqe_set_flags(sqe, sqe->flags | flags);
     return *this;
   }
 
@@ -170,6 +170,32 @@ struct sqe_t {
     return *this;
   }
 
+  /**
+   * @brief prepare a link_timout operation
+   * @tparam Rep storage unit
+   * @tparam Period ratio
+   * @param timeout timeout period
+   * @param flags such as IORING_TIMEOUT_ABS / IORING_TIMEOUT_BOOTTIME / IORING_TIMEOUT_REALTIME
+   * @return self reference
+   */
+  template<typename Rep, typename Period>
+  CORNET_MAYBE_UNUSED inline sqe_t& prep_link_timeout(std::chrono::duration<Rep,Period> timeout, int flags) {
+    if(!sqe) return *this;
+    __kernel_timespec ts = to_kernel_timespec(timeout);
+    io_uring_prep_link_timeout(sqe, &ts, flags);
+    return *this;
+  }
+
+  /**
+   * @brief used for empty sqe op
+   * @return self reference
+   */
+  CORNET_MAYBE_UNUSED inline sqe_t& prep_nop() {
+    if(!sqe) return *this;
+    io_uring_prep_nop(sqe);
+    return *this;
+  }
+
   io_uring_sqe* sqe;
 };
 
@@ -199,22 +225,41 @@ class uring_t {
 
   /**
    * @brief submit all prepared SQEs to kernel
-   * @return submit ok?
+   * @return < 0 submit failed, > 0 submitted count
    */
-  bool submit();
+  int submit();
 
   /**
    * @brief wait for CQEs and process them
    * @param process_fn callback function for each CQE
    * @param ctx context reference
    * @param wait_nr minimum number of CQEs to wait for
-   * @param timeout_s timeout seconds
-   * @param timeout_ns timeout nanoseconds
+   * @param timeout timeout period
    * @param mask signal mask
    * @return number of processed CQEs
    */
-  uint32_t wait_cqes(int (*process_fn)(context_t&, cqe_t), context_t& ctx, uint32_t wait_nr = 1,
-                     int timeout_s = -1, int timeout_ns = -1, sigset_t* mask = nullptr);
+  template<typename Rep, typename Period>
+  uint32_t wait_cqes(int (*process_fn)(context_t &, cqe_t),context_t &ctx,uint32_t wait_nr,
+                     std::chrono::duration<Rep, Period> timeout, sigset_t *mask = nullptr) {
+    cqe_t cqe;
+    __kernel_timespec ts = to_kernel_timespec(timeout);
+    int ret = io_uring_wait_cqes(uring.get(), &cqe, wait_nr, &ts, mask);
+    if (ret == -ETIME) {
+      SPDLOG_DEBUG("Uring wait_and_process_cqes timeout.");
+      return 0;
+    }
+    return process_cqes(process_fn, ctx, cqe);
+  }
+
+  /**
+   * @brief wait for CQEs and process them (infinity wait)
+   * @param process_fn callback function for each CQE
+   * @param ctx context reference
+   * @param wait_nr minimum number of CQEs to wait for
+   * @param mask signal mask
+   * @return number of processed CQEs
+   */
+  uint32_t wait_cqes(int (*process_fn)(context_t &, cqe_t),context_t &ctx,uint32_t wait_nr = 1, sigset_t *mask=nullptr);
 
   /**
    * @brief peek available CQEs without blocking
@@ -228,11 +273,19 @@ class uring_t {
                      uint32_t peek_nr = 1, sigset_t* mask = nullptr);
 
   /**
-   * @brief check if the SQE ring is full
-   * @return true if no more SQEs can be allocated before submit
+   * @brief space left in io uring sq
+   * @return remain sqe count
    */
-  inline bool full() const {
-    return remain_sqe_nr == 0;
+  inline uint32_t space_left() const {
+    return io_uring_sq_space_left(uring.get());
+  }
+
+  /**
+   * @brief get sq size
+   * @return sq size
+   */
+  inline size_t sq_size() const {
+    return uring->sq.ring_sz;
   }
 
   /**
@@ -241,6 +294,29 @@ class uring_t {
    */
   inline bool idle() const {
     return task_nr == 0;
+  }
+
+  /**
+   * @brief whether sqe overflow
+   * @return true if overflow / ...
+   */
+  inline bool overflow() const {
+    return !sm.empty();
+  }
+
+  /**
+   * @brief whether io uring sq about full
+   * @return true if about full / ...
+   */
+  inline bool about_full() const {
+    return remain_sqe_nr == 0;
+  }
+
+  /**
+   * @brief if overflow and flush called, will submit overflow tasks immediately afterwards submit once.
+   */
+  inline void flush() {
+    if (overflow()) need_flush = true;
   }
 
   /**
@@ -274,28 +350,63 @@ class uring_t {
   inline sqe_t new_sqe() {
     auto sqe = io_uring_get_sqe(uring.get());
     if (!sqe) {
-      SPDLOG_WARN("io_uring sqe exhausted, try to increase io_uring entries to avoid performance bottleneck.");
-      submit();
-      if (!(sqe = io_uring_get_sqe(uring.get()))) {
-        SPDLOG_ERROR("io_uring sqe exhausted even submitted once");
-        return {nullptr};
-      }
+      return {sm.acquire_overflow_sqe()};
     }
     --remain_sqe_nr;
     return {sqe};
   }
 
  private:
+
+  struct sqe_manager {
+    static constexpr auto OVERFLOW_CAPACITY = 16;
+    io_uring_sqe pool[OVERFLOW_CAPACITY];
+    int head = 0;
+    int tail = 0;
+
+    inline bool empty() const {
+      return head == tail;
+    }
+    inline bool full() const {
+      return ((tail + 1) & (OVERFLOW_CAPACITY - 1)) == head;
+    }
+    sqe_t acquire_overflow_sqe() {
+      if (full()) {
+        SPDLOG_ERROR("reaching the maximum tolerance limit for overflow, try increase OVERFLOW_CAPACITY");
+        exit(1);
+      }
+      auto sqe = &pool[tail];
+      tail = (tail + 1) & (OVERFLOW_CAPACITY - 1);
+      return {sqe};
+    }
+
+    io_uring_sqe* flush_overflow_sqe() {
+      if (empty()) {
+        SPDLOG_ERROR("should never flush empty overflow pool");
+        exit(1);
+      }
+      auto sqe = &pool[head];
+      head = (head + 1) & (OVERFLOW_CAPACITY - 1);
+      return sqe;
+    }
+  };
+
   // submitted task count
   uint32_t task_nr{0};
   // remain sqe count
   uint32_t remain_sqe_nr{0};
   // io_uring handle
   std::unique_ptr<io_uring> uring;
+  // sqe overflow manager
+  sqe_manager sm{};
+  // need submit overflow tasks immediately afterwards submit once
+  bool need_flush{false};
   // registered buffers
   std::unique_ptr<iovec[]> registered_buffers{};
   // registered file descriptors
   std::unique_ptr<int[]> registered_files{};
+
+  uint32_t process_cqes(int (*process_fn)(context_t&, cqe_t), context_t& ctx, cqe_t cqe);
 };
 
 } // cornet
