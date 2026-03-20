@@ -138,10 +138,14 @@ public:
     auto buffer = std::make_shared<std::vector<char> >(4096);
 
     while (server_running) {
-      auto [r, w] = co_await chain(
-          socket.recv(ctx, buffer->data(), config.message_size),
-          socket.send(ctx, buffer->data(), config.message_size)
-      );
+
+      chain_builder builder(ctx);
+      auto ra = socket.recv(ctx, buffer->data(), config.message_size);
+      auto wa = socket.send(ctx, buffer->data(), config.message_size);
+      co_await builder.with_link(ra).chain(wa);
+
+      auto r = ra.value;
+      auto w = wa.value;
       if (r <=0 || w <=0) {
         break;
       }
@@ -200,11 +204,12 @@ public:
 
       auto send_start = std::chrono::steady_clock::now();
 
-      auto [sent, received] = co_await chain(
-          socket->send(ctx, send_buf->data(), send_buf->size()),
-          socket->recv(ctx, recv_buf->data(), send_buf->size(), MSG_WAITALL)
-      );
-      if (sent <=0 || received <= 0) {
+      auto builder = chain_builder(ctx);
+      auto s = socket->send(ctx, send_buf->data(), send_buf->size(), MSG_WAITALL);
+      auto r =socket->recv(ctx, recv_buf->data(), send_buf->size(), MSG_WAITALL);
+      co_await builder.with_link(s).chain(r);
+
+      if (s.value <= 0 || r.value <= 0) {
         break;
       }
 //      // 发送消息
@@ -224,11 +229,11 @@ public:
 //        received += n;
 //      }
 
-      if (received == send_buf->size()) {
+      if (r.value == send_buf->size()) {
         auto latency = std::chrono::duration_cast<std::chrono::microseconds>(
           std::chrono::steady_clock::now() - send_start).count();
 
-        monitor->record_message(sent, received, latency);
+        monitor->record_message(s.value, r.value, latency);
       }
     }
 

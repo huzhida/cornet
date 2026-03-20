@@ -185,14 +185,6 @@ struct context_t {
   }
 
   /**
-   * @brief io_uring task processor
-   * @param ctx context reference
-   * @param cqe complete queue entry on io_uring.
-   * @return 0 for success / < 0 for failed
-   */
-  static int process_utask(context_t& ctx, cqe_t cqe);
-
-  /**
    * @brief context state to string
    * @param s state
    * @return state string

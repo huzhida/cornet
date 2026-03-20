@@ -27,9 +27,8 @@ struct utask_t : task_t {
 
   utask_t(const utask_t&) = delete;
   utask_t& operator=(const utask_t&) = delete;
-
+  utask_t& operator=(utask_t&&) = delete;
   utask_t(utask_t&&) noexcept;
-  utask_t& operator=(utask_t&&) noexcept;
 
   /**
    * @brief checks if the result is already available.
@@ -65,23 +64,20 @@ struct utask_t : task_t {
   void complete(context_t& ctx,cqe_t cqe);
 
   /**
-   * @brief completed flag
-   */
+ * @brief io_uring task processor
+ * @param ctx context reference
+ * @param cqe complete queue entry on io_uring.
+ * @return 0 for success / < 0 for failed
+ */
+  static int process_utask(context_t& ctx, cqe_t cqe);
+
+  // completed flag
   bool completed{false};
-
-  /**
-   * @brief callback flag, when flag = true, it's represent handle is a void (*callback)
-   */
+  // brief callback flag, when flag = true, it's represent handle is a void (*callback)
   bool callback{false};
-
-  /**
-   * @brief the return value of the async system call.
-   */
+  // the return value of the async system call.
   int value{0};
-
-  /**
-   * @brief io_uring_sqe wrapper for this task
-   */
+  // io_uring_sqe wrapper for this task
   sqe_t sqe{nullptr};
 };
 

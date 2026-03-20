@@ -40,13 +40,13 @@ time_slice_scheduler_t::time_slice_scheduler_t() {
 void time_slice_scheduler_t::sched(context_t& ctx) {
   auto start = std::chrono::steady_clock::now();
   auto& uring = ctx.io_uring();
-  while (!ready_tasks.empty() && !cpu_timeout(start) && !uring.full()) {
+  while (!ready_tasks.empty() && !cpu_timeout(start)) {
     resume_one_task();
+    if (uring.about_full() || uring.overflow()) break;
   }
   uring.submit();
 
-  uring.wait_cqes(context_t::process_utask, ctx, uring.running_task_nr()
-                                       , 0, ready_tasks.empty() ? io_budget.count() : 0);
+  uring.wait_cqes(utask_t::process_utask, ctx, uring.running_task_nr(), io_budget);
 }
 
 bool time_slice_scheduler_t::cpu_timeout(std::chrono::steady_clock::time_point& start) const {
@@ -58,12 +58,13 @@ bool time_slice_scheduler_t::cpu_timeout(std::chrono::steady_clock::time_point& 
 CORNET_REGISTER_SCHEDULER(scheduler_type_t::RoundRobin, round_robin_scheduler_t);
 void round_robin_scheduler_t::sched(context_t& ctx) {
   auto& uring = ctx.io_uring();
-  while (!ready_tasks.empty() && !uring.full()) {
+  while (!ready_tasks.empty() && !uring.overflow()) {
     resume_one_task();
+    if (uring.about_full() || uring.overflow()) break;
   }
   uring.submit();
 
-  uring.peek_cqes(context_t::process_utask, ctx, uring.running_task_nr());
+  uring.peek_cqes(utask_t::process_utask, ctx, uring.running_task_nr());
 }
 
 CORNET_REGISTER_SCHEDULER(scheduler_type_t::Batch, batch_scheduler_t);
@@ -75,12 +76,13 @@ batch_scheduler_t::batch_scheduler_t() {
 void batch_scheduler_t::sched(context_t& ctx) {
   size_t processed = 0;
   auto& uring = ctx.io_uring();
-  while (!ready_tasks.empty() && !uring.full() && ++processed < batch_nr) {
+  while (!ready_tasks.empty() && ++processed < batch_nr) {
     resume_one_task();
+    if (uring.about_full() || uring.overflow()) break;
   }
   uring.submit();
 
-  uring.peek_cqes(context_t::process_utask, ctx, batch_nr);
+  uring.peek_cqes(utask_t::process_utask, ctx, batch_nr);
 }
 
 } // cornet

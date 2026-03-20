@@ -4,7 +4,7 @@
 namespace cornet {
 
 uring_t::uring_t(uint32_t entries_nr, uint32_t flags)
-  : uring(std::make_unique<io_uring>()), remain_sqe_nr(entries_nr) {
+  : uring(std::make_unique<io_uring>()) {
   if (io_uring_queue_init(entries_nr, uring.get(), flags) < 0) {
     SPDLOG_ERROR("failed to init io_uring queue with error: {}", strerror(errno));
     throw std::runtime_error("io_uring_queue_init failed");
@@ -39,52 +39,43 @@ uring_t& uring_t::operator=(uring_t&& r) noexcept {
   return *this;
 }
 
-bool uring_t::submit() {
+int uring_t::submit() {
   int submit_nr = io_uring_submit(uring.get());
   if (submit_nr < 0) {
     SPDLOG_ERROR("io_uring submit sqe failed with error: {}", strerror(errno));
-    return false;
+    return submit_nr;
   }
-  remain_sqe_nr += submit_nr;
   task_nr += submit_nr;
-  return true;
+  remain_sqe_nr += submit_nr;
+
+  if (overflow()) {
+    SPDLOG_WARN("io_uring sqe overflow, it will influence performance, try to increase io_uring entry count.");
+    while(!sm.empty()) {
+      auto sqe = io_uring_get_sqe(uring.get());
+      if (!sqe) {
+        SPDLOG_ERROR("get sqe failed even submitted, maybe io_uring capacity overflow...");
+        exit(1);
+      }
+      *sqe = *sm.flush_overflow_sqe();
+    }
+
+    if (need_flush) {
+      int overflow_submit_nr = io_uring_submit(uring.get());
+      if (overflow_submit_nr < 0) {
+        SPDLOG_ERROR("io_uring submit sqe failed with error: {}", strerror(errno));
+        return overflow_submit_nr;
+      }
+      task_nr += overflow_submit_nr;
+      submit_nr += overflow_submit_nr;
+      need_flush = false;
+    }
+  }
+
+  return submit_nr;
 }
 
-uint32_t uring_t::wait_cqes(int (*process_fn)(context_t&, cqe_t), context_t& ctx, uint32_t wait_nr, int timeout_s,
-                                        int timeout_ns, sigset_t* mask) {
-  uint32_t count{0};
-
-  if (timeout_s == 0 && timeout_ns == 0) {
-    std::vector<cqe_t> cqes(wait_nr);
-    uint32_t ret = io_uring_peek_batch_cqe(uring.get(), cqes.data(), wait_nr);
-    if (ret == 0) {
-      SPDLOG_DEBUG("Uring peek batch cqe return empty");
-      return 0;
-    }
-    for (unsigned i = 0; i < ret; i++) {
-      process_fn(ctx, cqes[i]);
-    }
-    io_uring_cq_advance(uring.get(), ret);
-    task_nr -= ret;
-    return ret;
-  }
-
-  cqe_t cqe;
-  uint32_t head;
-  if (timeout_s > 0 || timeout_ns > 0) {
-    __kernel_timespec ts{timeout_s, timeout_ns};
-    int ret = io_uring_wait_cqes(uring.get(), &cqe, wait_nr, &ts, mask);
-    if (ret == -ETIME) {
-      SPDLOG_DEBUG("Uring wait_and_process_cqes timeout.");
-      return 0;
-    }
-  } else {
-    if (io_uring_wait_cqes(uring.get(), &cqe, wait_nr, nullptr, mask) < 0) {
-      SPDLOG_ERROR("failed to wait io_uring cqes with error: {}", strerror(errno));
-      return 0;
-    }
-  }
-
+uint32_t uring_t::process_cqes(int (*process_fn)(context_t &, cqe_t), context_t &ctx, cqe_t cqe) {
+  uint32_t count{0}, head;
   io_uring_for_each_cqe(uring.get(), head, cqe) {
     process_fn(ctx, cqe);
     ++count;
@@ -94,8 +85,28 @@ uint32_t uring_t::wait_cqes(int (*process_fn)(context_t&, cqe_t), context_t& ctx
   return count;
 }
 
+uint32_t uring_t::wait_cqes(int (*process_fn)(context_t &, cqe_t), context_t &ctx, uint32_t wait_nr, sigset_t *mask) {
+  cqe_t cqe;
+  if (io_uring_wait_cqes(uring.get(), &cqe, wait_nr, nullptr, mask) < 0) {
+    SPDLOG_ERROR("failed to wait io_uring cqes with error: {}", strerror(errno));
+    return 0;
+  }
+  return process_cqes(process_fn, ctx, cqe);
+}
+
 uint32_t uring_t::peek_cqes(int(* process_fn)(context_t&, cqe_t), context_t& ctx, uint32_t peek_nr, sigset_t* mask) {
-  return wait_cqes(process_fn, ctx, peek_nr, 0, 0, mask);
+  std::vector<cqe_t> cqes(peek_nr);
+  uint32_t ret = io_uring_peek_batch_cqe(uring.get(), cqes.data(), peek_nr);
+  if (ret == 0) {
+    SPDLOG_DEBUG("Uring peek batch cqe return empty");
+    return 0;
+  }
+  for (unsigned i = 0; i < ret; i++) {
+    process_fn(ctx, cqes[i]);
+  }
+  io_uring_cq_advance(uring.get(), ret);
+  task_nr -= ret;
+  return ret;
 }
 
 CORNET_MAYBE_UNUSED bool uring_t::register_buffers(iovec* buffers, size_t buffer_nr) {
