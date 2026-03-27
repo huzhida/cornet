@@ -120,6 +120,18 @@ struct sqe_t {
     return *this;
   }
 
+  CORNET_MAYBE_UNUSED inline sqe_t& prep_sendmsg(int sockfd, struct msghdr* msg, int flags) {
+    if(!sqe) return *this;
+    io_uring_prep_sendmsg(sqe, sockfd, msg, flags);
+    return *this;
+  }
+
+  CORNET_MAYBE_UNUSED inline sqe_t& prep_recvmsg(int sockfd, struct msghdr* msg, int flags) {
+    if(!sqe) return *this;
+    io_uring_prep_recvmsg(sqe, sockfd, msg, flags);
+    return *this;
+  }
+
   /**
    * @brief prepare an accept operation
    * @param sockfd listening socket
@@ -266,11 +278,9 @@ class uring_t {
    * @param process_fn callback function for each CQE
    * @param ctx context reference
    * @param peek_nr maximum number of CQEs to peek
-   * @param mask signal mask
    * @return number of processed CQEs
    */
-  uint32_t peek_cqes(int (*process_fn)(context_t&, cqe_t), context_t& ctx,
-                     uint32_t peek_nr = 1, sigset_t* mask = nullptr);
+  uint32_t peek_cqes(int (*process_fn)(context_t&, cqe_t), context_t& ctx, uint32_t peek_nr = 1);
 
   /**
    * @brief space left in io uring sq
@@ -372,8 +382,7 @@ class uring_t {
     }
     sqe_t acquire_overflow_sqe() {
       if (full()) {
-        SPDLOG_ERROR("reaching the maximum tolerance limit for overflow, try increase OVERFLOW_CAPACITY");
-        exit(1);
+        CORNET_FATAL("reaching the maximum tolerance limit for overflow, try increase OVERFLOW_CAPACITY");
       }
       auto sqe = &pool[tail];
       tail = (tail + 1) & (OVERFLOW_CAPACITY - 1);
@@ -382,8 +391,7 @@ class uring_t {
 
     io_uring_sqe* flush_overflow_sqe() {
       if (empty()) {
-        SPDLOG_ERROR("should never flush empty overflow pool");
-        exit(1);
+        CORNET_FATAL("should never flush empty overflow pool");
       }
       auto sqe = &pool[head];
       head = (head + 1) & (OVERFLOW_CAPACITY - 1);

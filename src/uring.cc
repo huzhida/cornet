@@ -53,8 +53,7 @@ int uring_t::submit() {
     while(!sm.empty()) {
       auto sqe = io_uring_get_sqe(uring.get());
       if (!sqe) {
-        SPDLOG_ERROR("get sqe failed even submitted, maybe io_uring capacity overflow...");
-        exit(1);
+        CORNET_FATAL("get sqe failed even submitted, maybe io_uring capacity overflow...", 1);
       }
       *sqe = *sm.flush_overflow_sqe();
     }
@@ -94,7 +93,7 @@ uint32_t uring_t::wait_cqes(int (*process_fn)(context_t &, cqe_t), context_t &ct
   return process_cqes(process_fn, ctx, cqe);
 }
 
-uint32_t uring_t::peek_cqes(int(* process_fn)(context_t&, cqe_t), context_t& ctx, uint32_t peek_nr, sigset_t* mask) {
+uint32_t uring_t::peek_cqes(int(* process_fn)(context_t&, cqe_t), context_t& ctx, uint32_t peek_nr) {
   std::vector<cqe_t> cqes(peek_nr);
   uint32_t ret = io_uring_peek_batch_cqe(uring.get(), cqes.data(), peek_nr);
   if (ret == 0) {
