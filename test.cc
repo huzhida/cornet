@@ -164,13 +164,16 @@ public:
   // 服务器主协程
   coro_t<void> server_main(context_t& ctx, const BenchmarkConfig& config) {
     auto listener = tcp::v4::socket_t();
-    if (!listener.listen("127.0.0.1", 12345)) {
+    if (!listener.listen("127.0.0.1", "12345")) {
       std::cerr << "服务器监听失败\n";
       co_return;
     }
 
     while (server_running) {
-      int client_fd = co_await listener.accept(ctx, 0);
+      sockaddr_storage addr{};
+      socklen_t len;
+      int client_fd = co_await listener.accept(ctx, (sockaddr*)&addr, &len);
+      auto s = co_await listener.accept(ctx);
       if (client_fd < 0)
         break;
 
@@ -187,7 +190,7 @@ public:
     auto socket = std::make_shared<tcp::v4::socket_t>();
 
     // 连接到服务器
-    int ok = co_await socket->connect(ctx, "127.0.0.1", 12345);
+    int ok = co_await socket->connect(ctx, "127.0.0.1", "12345");
     if (ok < 0) {
       co_return;
     }

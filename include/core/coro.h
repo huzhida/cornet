@@ -125,7 +125,7 @@ struct coro_t : task_t {
   }
 
   ~coro_t() {
-    if (handle && !(std::coroutine_handle<promise_type>::from_address(handle.address()).promise().detached)){
+    if (handle && !native_handle().promise().detached) {
       handle.destroy();
     }
   }
@@ -170,10 +170,10 @@ struct coro_t : task_t {
         if (handle.promise().value.index() == 2) {
           std::rethrow_exception(std::get<2>(handle.promise().value));
         }
-        return std::get<1>(handle.promise().value);
+        return std::get<1>(std::move(handle.promise().value));
       }
     };
-    return coro_awaiter{handle};
+    return coro_awaiter{native_handle()};
   }
 
   /**
@@ -199,7 +199,11 @@ struct coro_t : task_t {
   void detach() {
     if (!handle || handle.done())
       return;
-    std::coroutine_handle<promise_type>::from_address(handle.address()).promise().detached = true;
+    native_handle().promise().detached = true;
+  }
+
+  std::coroutine_handle<promise_type> native_handle() {
+    return std::coroutine_handle<promise_type>::from_address(handle.address());
   }
 };
 
