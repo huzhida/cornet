@@ -33,6 +33,8 @@ class socket_t {
   struct connect_awaiter : utask_t {
     connect_awaiter(context_t& ctx, int fd, const std::string& ip, const std::string& port, int domain, int type);
     connect_awaiter(context_t& ctx, int fd, const std::string& path);
+
+    sockaddr_storage addr{};
   };
   /**
    * @brief send awaiter for io_uring_prep_send
@@ -277,6 +279,7 @@ class socket_t : public cornet::tcp::socket_t {
 
 namespace cornet::udp::v4 {
 class socket_t : public cornet::udp::socket_t {
+public:
   socket_t();
   explicit socket_t(int fd);
 };
@@ -284,6 +287,7 @@ class socket_t : public cornet::udp::socket_t {
 
 namespace cornet::udp::v6 {
 class socket_t : public cornet::udp::socket_t {
+public:
   socket_t();
   explicit socket_t(int fd);
 };

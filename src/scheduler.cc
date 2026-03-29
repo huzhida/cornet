@@ -47,6 +47,8 @@ void time_slice_scheduler_t::sched(context_t& ctx) {
   uring.submit();
 
   uring.wait_cqes(utask_t::process_utask, ctx, uring.running_task_nr(), io_budget);
+
+  uring.postprocess();
 }
 
 bool time_slice_scheduler_t::cpu_timeout(std::chrono::steady_clock::time_point& start) const {
@@ -65,6 +67,8 @@ void round_robin_scheduler_t::sched(context_t& ctx) {
   uring.submit();
 
   uring.peek_cqes(utask_t::process_utask, ctx, uring.running_task_nr());
+
+  uring.postprocess();
 }
 
 CORNET_REGISTER_SCHEDULER(scheduler_type_t::Batch, batch_scheduler_t);
@@ -83,6 +87,8 @@ void batch_scheduler_t::sched(context_t& ctx) {
   uring.submit();
 
   uring.peek_cqes(utask_t::process_utask, ctx, batch_nr);
+
+  uring.postprocess();
 }
 
 } // cornet

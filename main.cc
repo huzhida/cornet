@@ -11,14 +11,9 @@ coro_t<int> server(context_t& ctx) {
   SPDLOG_INFO("server listen");
   s.port_reuse(true);
   s.address_reuse(true);
-  bool ok = s.listen("127.0.0.1", 12345);
+  bool ok = s.listen("127.0.0.1", "12345");
   SPDLOG_INFO("server accept");
-  int fd = co_await s.accept(ctx, 0);
-  if (fd < 0) {
-    SPDLOG_ERROR("server accept failed with error {}", strerror(errno));
-    co_return -1;
-  }
-  auto c = tcp::v4::socket_t(fd);
+  auto c = co_await s.accept(ctx, 0);
   char buff[2048] = {0};
   SPDLOG_INFO("server recv");
   auto n = co_await c.recv(ctx, buff, 2048);
@@ -36,7 +31,7 @@ coro_t<int> client(context_t& ctx) {
   SPDLOG_INFO("client connect");
   int ok;
   auto start = std::chrono::steady_clock::now();
-  ok = co_await s.connect(ctx, "127.0.0.1", 12345);
+  ok = co_await s.connect(ctx, "127.0.0.1", "12345");
   SPDLOG_INFO("connect elapsed: {}", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count());
   if (ok < 0) {
     SPDLOG_ERROR("failed to connect with error: {}", strerror(-ok));

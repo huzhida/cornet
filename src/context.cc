@@ -40,7 +40,7 @@ void context_t::run() {
     if (idle()) {
       switch_to(state_t::Terminated);
     }else if (scheduler->idle() && !uring.idle()) {
-      uring.wait_cqes(utask_t::process_utask, *this, 1);
+      uring.wait_cqes(utask_t::process_utask, *this, 1, std::chrono::seconds(1));
     }
 
   }

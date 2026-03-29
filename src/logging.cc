@@ -15,7 +15,7 @@ static void logging_init() {
 
   if (auto stdout_conf = logging_conf["stdout"]) {
     auto level = spdlog::level::from_str(stdout_conf["level"].value_or("info"));
-    auto pattern = stdout_conf["pattern"].value_or("%^%L%$ [%Y-%m-%d %T %t] %v");
+    auto pattern = stdout_conf["pattern"].value_or("%^%L%$ [%Y-%m-%d %T %t %@] %v");
     auto stdout_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
     stdout_sink->set_level(level);
     stdout_sink->set_pattern(pattern);
@@ -35,7 +35,7 @@ static void logging_init() {
         continue;
       }
       auto level = spdlog::level::from_str(file["level"].value_or("info"));
-      auto pattern = file["pattern"].value_or("%L [%Y-%m-%d %T %t] %v");
+      auto pattern = file["pattern"].value_or("%L [%Y-%m-%d %T %t %@] %v");
       auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(std::string(path), true);
       file_sink->set_level(level);
       file_sink->set_pattern(pattern);
