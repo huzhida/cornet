@@ -242,6 +242,12 @@ class uring_t {
   int submit();
 
   /**
+   * @brief post process overflow SQEs and flush when need
+   * @return submitted sqe count in postprocess
+   */
+  int postprocess();
+
+  /**
    * @brief wait for CQEs and process them
    * @param process_fn callback function for each CQE
    * @param ctx context reference

@@ -2,6 +2,7 @@
   "dependencies": [
     "spdlog",
     "tomlplusplus",
-    "asio"
+    "asio",
+    "gtest"
   ]
 }

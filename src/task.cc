@@ -33,10 +33,8 @@ void utask_t::complete(context_t& ctx, cqe_t cqe) {
   value = cqe->res;
   completed = true;
 
-  if (callback && handle) {
-    auto a = (action*)handle.address();
-    a->callback(ctx, a->data);
-    return;
+  if (callback) {
+    callback(ctx, user_data);
   }
 
   if (handle) {

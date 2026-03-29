@@ -8,18 +8,13 @@ namespace cornet {
 
 struct context_t;
 
-struct action {
-  using callback_t = void(*)(context_t&, void*);
-  void* data;
-  callback_t callback;
-};
-
 /**
  * @brief io_uring specific task/awaiter base struct.
  * * This struct implements the C++ coroutine Awaiter interface,
  * allowing io_uring operations to be used with 'co_await'.
  */
 struct utask_t : task_t {
+  using callback_t = void(*)(context_t&, void*);
   /**
    * @param ctx the owner context (io_uring manager)
    */
@@ -35,10 +30,6 @@ struct utask_t : task_t {
    * @return if sqe exhausted, return ENOBUFS, else return coroutine completed or not.
    */
   CORNET_MAYBE_UNUSED inline bool await_ready() {
-    if (!sqe.sqe) {
-      value = ENOBUFS;
-      return true;
-    }
     return completed;
   }
 
@@ -73,12 +64,14 @@ struct utask_t : task_t {
 
   // completed flag
   bool completed{false};
-  // brief callback flag, when flag = true, it's represent handle is a void (*callback)
-  bool callback{false};
   // the return value of the async system call.
   int value{0};
   // io_uring_sqe wrapper for this task
   sqe_t sqe{nullptr};
+  // callback, will be called on complete
+  callback_t callback{nullptr};
+  // callback user data
+  void* user_data{nullptr};
 };
 
 } // namespace cornet

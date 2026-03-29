@@ -9,7 +9,12 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
     add_compile_options(-O2 -Ofast -ffast-math -funroll-loops -march=native)
+else()
+    add_compile_options(-fsanitize=address -g)
+    add_link_options(-fsanitize=address)
 endif()
+
+
 
 if(NOT UNIX)
     message(FATAL_ERROR "only support to be build on Unix system")
@@ -33,3 +38,12 @@ add_executable(bench test.cc ${CORNET_SRC})
 
 target_link_libraries(bench PRIVATE uring spdlog::spdlog tomlplusplus::tomlplusplus asio::asio)
 target_include_directories(bench PUBLIC include)
+
+file(GLOB_RECURSE CORNET_TEST_SRC CONFIGURE_DEPENDS tests/*.cc)
+enable_testing()
+find_package(GTest CONFIG REQUIRED)
+include(GoogleTest)
+add_executable(unit_test ${CORNET_TEST_SRC} ${CORNET_SRC})
+target_include_directories(unit_test PUBLIC include)
+target_link_libraries(unit_test PRIVATE uring spdlog::spdlog tomlplusplus::tomlplusplus asio::asio
+        GTest::gtest GTest::gtest_main GTest::gmock GTest::gmock_main)

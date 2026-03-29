@@ -11,33 +11,33 @@ struct chain_builder {
 
   struct chain_awaiter {
     context_t& ctx;
+    int pending;
+    std::coroutine_handle<> handle;
     std::vector<utask_t*>& tasks;
 
-    explicit chain_awaiter(context_t& ctx, std::vector<utask_t*> & tasks) : ctx(ctx), tasks(tasks) {}
+    static void callback(context_t& ctx, void* data) {
+      auto a = (chain_awaiter*)data;
+      if(--a->pending == 0) {
+        ctx.sched(a->handle);
+      }
+    }
+
+    explicit chain_awaiter(context_t& ctx, std::vector<utask_t*> & tasks)
+    : ctx(ctx), tasks(tasks), pending(tasks.size()) {}
+
     bool await_ready() const {
       return false;
     }
     void await_suspend(std::coroutine_handle<> h) {
-      tasks.back()->handle = h;
+      handle = h;
+      for (auto& task : tasks) {
+        task->callback = callback;
+        task->user_data = this;
+      }
       ctx.io_uring().flush();
     }
     auto await_resume() {
       return tasks.back()->value;
-    }
-  };
-
-  template<typename Rep, typename Period>
-  struct timeout_chain_awaiter : chain_awaiter {
-    struct link_timeout_awaiter : utask_t {
-      link_timeout_awaiter(context_t& ctx, std::chrono::duration<Rep, Period> timeout, int flags) : utask_t(ctx) {
-        sqe.prep_link_timeout(timeout, flags).with_data(this);
-      }
-    };
-    link_timeout_awaiter timeout_awaiter;
-    explicit timeout_chain_awaiter(context_t& ctx, std::vector<utask_t*> & tasks,
-                                   std::chrono::duration<Rep, Period> timeout, int flags)
-    : chain_awaiter(ctx, tasks), timeout_awaiter(ctx, tasks, flags) {
-      tasks.emplace_back(&timeout_awaiter);
     }
   };
 
@@ -55,15 +55,32 @@ struct chain_builder {
     return *this;
   }
 
-  chain_awaiter chain(utask_t& t) {
+  coro_t<int> chain(utask_t& t) {
     tasks.emplace_back(&t);
-    return chain_awaiter{ctx, tasks};
+    ctx.io_uring().flush();
+    for (auto& t : tasks) {
+      co_await *t;
+    }
+    co_return 0;
   }
 
   template<typename Rep, typename Period>
-  auto timeout_chain(std::chrono::duration<Rep, Period> timeout, int flags = 0) {
-    return timeout_chain_awaiter(ctx, tasks, timeout, flags);
+  coro_t<int> timeout_chain(utask_t& t) {
+    struct link_timeout_awaiter : utask_t {
+      link_timeout_awaiter(context_t& ctx, std::chrono::duration<Rep, Period> timeout, int flags) : utask_t(ctx) {
+        sqe.prep_link_timeout(timeout, flags).with_data(this);
+      }
+    };
+    link_timeout_awaiter timeout_awaiter;
+    tasks.emplace_back(&t);
+    tasks.emplace_back(&timeout_awaiter);
+    ctx.io_uring().flush();
+    for (auto& t : tasks) {
+      co_await *t;
+    }
+    co_return 0;
   }
+
 };
 
 template<typename... UTasks>
@@ -71,7 +88,6 @@ struct all_awaiter {
   std::tuple<UTasks...> tasks;
   int pending = sizeof...(UTasks);
   std::coroutine_handle<> handle;
-  action on_complete{this, callback};
 
   static void callback(context_t& ctx, void* data) {
     auto a = (all_awaiter*)data;
@@ -84,8 +100,8 @@ struct all_awaiter {
   template<size_t I>
   void apply_task() {
     auto& task = std::get<I>(tasks);
-    task.handle = std::coroutine_handle<>::from_address(&on_complete);
-    task.callback = true;
+    task.callback = callback;
+    task.user_data = this;
   }
 
   bool await_ready() const { return false; }

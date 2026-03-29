@@ -136,25 +136,23 @@ public:
     auto socket = tcp::v4::socket_t(client_fd);
     // 使用动态分配的缓冲区，避免栈溢出
     auto buffer = std::make_shared<std::vector<char> >(4096);
-
     while (server_running) {
 
-      chain_builder builder(ctx);
-      auto ra = socket.recv(ctx, buffer->data(), config.message_size);
-      auto wa = socket.send(ctx, buffer->data(), config.message_size);
-      co_await builder.with_link(ra).chain(wa);
+      // chain_builder builder(ctx);
+      // auto ra = socket.recv(ctx, buffer->data(), config.message_size);
+      // auto wa = socket.send(ctx, buffer->data(), config.message_size);
+      // co_await builder.with_link(ra).chain(wa);
+      //
+      // if (ra.value <= 0 || wa.value <= 0) {
+      //   break;
+      // }
 
-      auto r = ra.value;
-      auto w = wa.value;
-      if (r <=0 || w <=0) {
+      auto n = co_await socket.recv(ctx, buffer->data(), buffer->size());
+      if (n <= 0)
         break;
-      }
-//      auto n = co_await socket.recv(ctx, buffer->data(), buffer->size());
-//      if (n <= 0)
-//        break;
-//      auto send_n = co_await socket.send(ctx, buffer->data(), n);
-//      if (send_n <= 0)
-//        break;
+      auto send_n = co_await socket.send(ctx, buffer->data(), n);
+      if (send_n <= 0)
+        break;
     }
 
     active_connections--;
@@ -171,11 +169,17 @@ public:
 
     while (server_running) {
       sockaddr_storage addr{};
-      socklen_t len;
+      socklen_t len{};
       int client_fd = co_await listener.accept(ctx, (sockaddr*)&addr, &len);
-      auto s = co_await listener.accept(ctx);
-      if (client_fd < 0)
+      if (client_fd < 0) {
+        if (client_fd == -ECANCELED) {
+          SPDLOG_INFO("server accept canceled");
+          break;
+        }
+        SPDLOG_ERROR("server accept failed: {}", strerror(-client_fd));
         break;
+      }
+
 
       // 为每个客户端创建一个会话协程
       ctx.sched(server_session(ctx, config, client_fd));
@@ -207,36 +211,38 @@ public:
 
       auto send_start = std::chrono::steady_clock::now();
 
-      auto builder = chain_builder(ctx);
-      auto s = socket->send(ctx, send_buf->data(), send_buf->size(), MSG_WAITALL);
-      auto r =socket->recv(ctx, recv_buf->data(), send_buf->size(), MSG_WAITALL);
-      co_await builder.with_link(s).chain(r);
+      // auto builder = chain_builder(ctx);
+      // auto s = socket->send(ctx, send_buf->data(), send_buf->size(), MSG_WAITALL);
+      // auto r =socket->recv(ctx, recv_buf->data(), send_buf->size(), MSG_WAITALL);
+      // co_await builder.with_link(s).chain(r);
+      // auto sent = s.value;
+      // auto received = r.value;
+      // if (sent <= 0 || received <= 0) {
+      //   break;
+      // }
 
-      if (s.value <= 0 || r.value <= 0) {
+      // // 发送消息
+      int sent = co_await socket->send(ctx, send_buf->data(), send_buf->size());
+      if (sent <= 0)
         break;
-      }
-//      // 发送消息
-//      int sent = co_await socket->send(ctx, send_buf->data(), send_buf->size());
-//      if (sent <= 0)
-//        break;
-//
-//      // 接收回声
-//      int received = 0;
-//      int need_recv = send_buf->size();
-//      while (received < need_recv) {
-//        int n = co_await socket->recv(ctx,
-//                                      recv_buf->data() + received,
-//                                      recv_buf->size() - received);
-//        if (n <= 0)
-//          break;
-//        received += n;
-//      }
 
-      if (r.value == send_buf->size()) {
+      // 接收回声
+      int received = 0;
+      int need_recv = send_buf->size();
+      while (received < need_recv) {
+        int n = co_await socket->recv(ctx,
+                                      recv_buf->data() + received,
+                                      recv_buf->size() - received);
+        if (n <= 0)
+          break;
+        received += n;
+      }
+
+      if (received == send_buf->size()) {
         auto latency = std::chrono::duration_cast<std::chrono::microseconds>(
           std::chrono::steady_clock::now() - send_start).count();
 
-        monitor->record_message(s.value, r.value, latency);
+        monitor->record_message(sent, received, latency);
       }
     }
 
@@ -534,7 +540,7 @@ int main(int argc, char* argv[]) {
     BenchmarkConfig config;
     config.print();
 
-    std::unordered_map<std::string, BenchmarkResult> results;
+    std::map<std::string, BenchmarkResult> results;
 
     {
       CornetBenchmark cornet_bench(scheduler_type_t::RoundRobin);
@@ -550,6 +556,12 @@ int main(int argc, char* argv[]) {
       CornetBenchmark cornet_bench(scheduler_type_t::Batch);
       std::cout << "Cornet Batch Warming..." << std::endl;
       auto result = cornet_bench.run(config);
+    }
+
+    {
+      AsioBenchmark asio_bench;
+      std::cout << "Asio Warming..." << std::endl;
+      asio_bench.run(config);
     }
 
     // 测试 Cornet
@@ -582,6 +594,7 @@ int main(int argc, char* argv[]) {
       asio_result = asio_bench.run(config);
       results["Asio"] = asio_result;
     }
+
   using namespace std;
     cout << "\n\n ==================== 性能对比 ========================\n";
     cout << left << setw(24) << fixed << "metrics"

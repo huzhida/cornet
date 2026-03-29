@@ -32,7 +32,11 @@ socklen_t to_address(const std::string& path, sockaddr_storage& addr){
   std::strncpy(u->sun_path, path.c_str(), sizeof(u->sun_path) - 1);
   return sizeof(sockaddr_un);
 }
-socket_t::socket_t(int fd) : fd(fd) {}
+socket_t::socket_t(int fd) : fd(fd) {
+  if (fd < 0) {
+    CORNET_FATAL("socket bad file descriptor");
+  }
+}
 socket_t::~socket_t() {
   if (fd != -1) {
     ::close(fd);
@@ -70,7 +74,6 @@ socket_t::accept_awaiter::accept_awaiter(context_t& ctx, int fd, sockaddr* addr,
   sqe.prep_accept(fd, addr, len, flag).with_data(this);
 }
 socket_t::connect_awaiter::connect_awaiter(context_t& ctx, int fd, const std::string& ip, const std::string& port, int domain, int type) : utask_t(ctx) {
-  sockaddr_storage addr{};
   socklen_t socklen = to_address(ip, port, addr, domain, type, AI_ADDRCONFIG | AI_V4MAPPED);
   if (socklen == 0) {
     CORNET_FATAL("failed to get address info on {}:{}", ip, port);
@@ -78,7 +81,6 @@ socket_t::connect_awaiter::connect_awaiter(context_t& ctx, int fd, const std::st
   sqe.prep_connect(fd, (sockaddr*)&addr, socklen).with_data(this);
 }
 socket_t::connect_awaiter::connect_awaiter(context_t& ctx, int fd, const std::string& path) : utask_t(ctx) {
-  sockaddr_storage addr{};
   socklen_t socklen = to_address(path, addr);
   if (socklen == 0) {
     CORNET_FATAL("failed to get address info on {}", path);
@@ -154,7 +156,7 @@ socket_t::accept_awaiter socket_t::accept(context_t& ctx, sockaddr* addr, sockle
 }
 coro_t<socket_t> socket_t::accept(context_t &ctx, int flag) const {
   sockaddr_storage addr{};
-  socklen_t len;
+  socklen_t len{};
   int client_fd = co_await accept(ctx, (sockaddr*)&addr, &len, flag);
   auto socket = tcp::socket_t(client_fd);
   socket.domain = addr.ss_family;
@@ -186,9 +188,10 @@ coro_t<int> socket_t::recvfrom(context_t &ctx,void *buf,size_t nbytes, sockaddr 
   iov.iov_base = buf;
   iov.iov_len = nbytes;
   msg.msg_name = addr;
+  msg.msg_namelen = *socklen;
   msg.msg_iov = &iov;
   msg.msg_iovlen = 1;
-  int ret = co_await sendmsg_awaiter(ctx, fd, &msg, flag);
+  int ret = co_await recvmsg_awaiter(ctx, fd, &msg, flag);
   *socklen = msg.msg_namelen;
   co_return ret;
 }
@@ -202,7 +205,7 @@ auto socket_t::recvmsg(context_t &ctx, struct msghdr *msg, int flags) const {
 } // cornet
 
 namespace cornet::tcp::local {
-socket_t::socket_t() : cornet::tcp::socket_t(::socket(AF_UNIX, SOCK_STREAM, IPPROTO_TCP)) {
+socket_t::socket_t() : cornet::tcp::socket_t(::socket(AF_UNIX, SOCK_STREAM, 0)) {
   domain = AF_UNIX;
 }
 socket_t::socket_t(int fd) : cornet::tcp::socket_t(fd) {
@@ -236,7 +239,7 @@ void socket_t::v6_only(bool on) const {
 } // cornet::tcp::v6
 
 namespace cornet::udp::local {
-socket_t::socket_t() : cornet::udp::socket_t(::socket(AF_UNIX, SOCK_DGRAM, IPPROTO_UDP)) {
+socket_t::socket_t() : cornet::udp::socket_t(::socket(AF_UNIX, SOCK_DGRAM, 0)) {
   domain = AF_UNIX;
 }
 socket_t::socket_t(int fd) : cornet::udp::socket_t(fd) {
