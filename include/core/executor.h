@@ -5,6 +5,7 @@
 #undef BLOCK_SIZE
 #endif
 #include <concurrentqueue/moodycamel/blockingconcurrentqueue.h>
+#include <vector>
 
 namespace cornet {
 struct atask_t;

@@ -14,7 +14,7 @@ class tools : public ::testing::Test {
   void TearDown() override {
   }
 
-  context_t* ctx;
+  context_t* ctx{};
 };
 
 coro_t<int> async_task(context_t& ctx) {

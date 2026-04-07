@@ -103,7 +103,7 @@ struct async_awaiter : public atask_t {
 
   void await_suspend(std::coroutine_handle<> h) {
     this->handle = h;
-    ctx.async_executor().add(this);
+    ctx.sched_async(this);
   }
 
   V await_resume() {
