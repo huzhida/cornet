@@ -60,6 +60,16 @@ struct context_t {
     }
   }
 
+  CORNET_MAYBE_UNUSED inline void sched_async(atask_t* task) {
+    if (!executor) {
+      executor = std::make_unique<executor_t>(
+          config_t::get()["cornet"]["context"]["executor"]["thread_nr"].value_or(1),
+          config_t::get()["cornet"]["context"]["executor"]["max_task_nr"].value_or(16384)
+      );
+    }
+    executor->add(task);
+  }
+
   /**
    * @brief context start to resume task and wait io, run until tasks all complete or stop() called.
    */
@@ -86,19 +96,12 @@ struct context_t {
   }
 
   /**
-   * @brief return context_t async executor
-   * @return context_t owned async executor reference
-   */
-  CORNET_NODISCARD inline executor_t& async_executor() {
-    return executor;
-  }
-
-  /**
    * @brief context idle or not
    * @return true for idle / false for busy
    */
   CORNET_NODISCARD inline bool idle() {
-    return scheduler->idle() && uring.idle() && executor.idle();
+    if (executor && !executor->idle()) return false;
+    return scheduler->idle() && uring.idle();
   }
 
   inline void switch_to(state_t s) {
@@ -222,7 +225,7 @@ private:
   // context scheduler
   std::unique_ptr<scheduler_t> scheduler;
   // context executor
-  executor_t executor;
+  std::unique_ptr<executor_t> executor;
 };
 
 } // cornet
