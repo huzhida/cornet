@@ -16,6 +16,7 @@ cornet::scheduler_t::register_scheduler(name, cls::create);\
 
 
 struct context_t;
+struct atask_t;
 /**
  * @brief scheduler type
  */
@@ -107,6 +108,8 @@ protected:
   queue_t ready_tasks;
   // resume task and maintain r-value task life-span
   void resume_one_task();
+  void process_async_tasks(context_t& ctx);
+  std::array<atask_t*, 32> async_tasks;
 
 private:
   // scheduler registry

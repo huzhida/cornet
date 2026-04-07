@@ -23,6 +23,7 @@ endif()
 find_package(spdlog CONFIG REQUIRED)
 find_package(tomlplusplus CONFIG REQUIRED)
 find_package(asio CONFIG REQUIRED)
+find_package(concurrentqueue CONFIG REQUIRED)
 
 file(GLOB_RECURSE CORNET_SRC CONFIGURE_DEPENDS src/*.cc src/*.hpp)
 
@@ -36,7 +37,7 @@ target_include_directories(${CORNET} PUBLIC include)
 
 add_executable(bench test.cc ${CORNET_SRC})
 
-target_link_libraries(bench PRIVATE uring spdlog::spdlog tomlplusplus::tomlplusplus asio::asio)
+target_link_libraries(bench PRIVATE uring spdlog::spdlog tomlplusplus::tomlplusplus asio::asio concurrentqueue::concurrentqueue)
 target_include_directories(bench PUBLIC include)
 
 file(GLOB_RECURSE CORNET_TEST_SRC CONFIGURE_DEPENDS tests/*.cc)
@@ -45,5 +46,5 @@ find_package(GTest CONFIG REQUIRED)
 include(GoogleTest)
 add_executable(unit_test ${CORNET_TEST_SRC} ${CORNET_SRC})
 target_include_directories(unit_test PUBLIC include)
-target_link_libraries(unit_test PRIVATE uring spdlog::spdlog tomlplusplus::tomlplusplus asio::asio
+target_link_libraries(unit_test PRIVATE uring spdlog::spdlog tomlplusplus::tomlplusplus asio::asio concurrentqueue::concurrentqueue
         GTest::gtest GTest::gtest_main GTest::gmock GTest::gmock_main)

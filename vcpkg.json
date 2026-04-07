@@ -3,6 +3,7 @@
     "spdlog",
     "tomlplusplus",
     "asio",
-    "gtest"
+    "gtest",
+    "concurrentqueue"
   ]
 }

@@ -187,6 +187,23 @@ struct sqe_t {
    * @tparam Rep storage unit
    * @tparam Period ratio
    * @param timeout timeout period
+   * @param count =0 represent only care about timeout,  >0 represent wakeup when `count` number cqe comes
+   * @param flags such as IORING_TIMEOUT_ABS / IORING_TIMEOUT_BOOTTIME / IORING_TIMEOUT_REALTIME
+   * @return self reference
+   */
+  template<typename Rep, typename Period>
+  CORNET_MAYBE_UNUSED inline sqe_t& prep_timeout(std::chrono::duration<Rep,Period> timeout, int count, int flags) {
+    if(!sqe) return *this;
+    __kernel_timespec ts = to_kernel_timespec(timeout);
+    io_uring_prep_timeout(sqe, &ts, count, flags);
+    return *this;
+  }
+
+  /**
+   * @brief prepare a link_timout operation
+   * @tparam Rep storage unit
+   * @tparam Period ratio
+   * @param timeout timeout period
    * @param flags such as IORING_TIMEOUT_ABS / IORING_TIMEOUT_BOOTTIME / IORING_TIMEOUT_REALTIME
    * @return self reference
    */

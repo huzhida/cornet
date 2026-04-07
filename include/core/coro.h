@@ -205,6 +205,14 @@ struct coro_t : task_t {
   std::coroutine_handle<promise_type> native_handle() {
     return std::coroutine_handle<promise_type>::from_address(handle.address());
   }
+
+  V value() {
+    auto& value = native_handle().promise().value;
+    if (value.index() == 2) {
+      std::rethrow_exception(std::get<2>(value));
+    }
+    return std::get<1>(std::move(value));
+  }
 };
 
 

@@ -2,6 +2,7 @@
 #define CORNET_TOOLS_H
 
 #include "utask.h"
+#include "atask.h"
 
 namespace cornet {
 
@@ -55,17 +56,13 @@ struct chain_builder {
     return *this;
   }
 
-  coro_t<int> chain(utask_t& t) {
+  chain_awaiter chain(utask_t& t) {
     tasks.emplace_back(&t);
-    ctx.io_uring().flush();
-    for (auto& t : tasks) {
-      co_await *t;
-    }
-    co_return 0;
+    return chain_awaiter{ctx, tasks};
   }
 
   template<typename Rep, typename Period>
-  coro_t<int> timeout_chain(utask_t& t) {
+  chain_awaiter timeout_chain(utask_t& t) {
     struct link_timeout_awaiter : utask_t {
       link_timeout_awaiter(context_t& ctx, std::chrono::duration<Rep, Period> timeout, int flags) : utask_t(ctx) {
         sqe.prep_link_timeout(timeout, flags).with_data(this);
@@ -74,14 +71,54 @@ struct chain_builder {
     link_timeout_awaiter timeout_awaiter;
     tasks.emplace_back(&t);
     tasks.emplace_back(&timeout_awaiter);
-    ctx.io_uring().flush();
-    for (auto& t : tasks) {
-      co_await *t;
-    }
-    co_return 0;
+    return chain_awaiter{ctx, tasks};
   }
 
 };
+
+
+template<typename V>
+struct async_awaiter : public atask_t {
+  std::optional<V> value;
+  bool completed{false};
+  std::function<V()> function_wrapper;
+  context_t& ctx;
+
+  explicit async_awaiter(context_t& ctx, std::function<V()>&& func) : ctx(ctx), function_wrapper(std::move(func)) {
+    this->fn = [] (atask_t* t) {
+      auto* self = (async_awaiter<V>*)(t);
+      if constexpr(std::is_void_v<V>) {
+        self->completed = true;
+        return;
+      }
+      self->value = self->function_wrapper();
+      self->completed = true;
+    };
+  }
+
+  bool await_ready() {
+    return completed;
+  }
+
+  void await_suspend(std::coroutine_handle<> h) {
+    this->handle = h;
+    ctx.async_executor().add(this);
+  }
+
+  V await_resume() {
+    if constexpr(std::is_void_v<V>) return;
+    return std::move(*value);
+  }
+};
+
+template<typename Func, typename... Args>
+CORNET_NODISCARD auto async(context_t& ctx, Func&& f, Args&&... args) {
+  using return_type = std::invoke_result_t<std::decay_t<Func>, std::decay_t<Args>...>;
+  auto task = [f=std::forward<Func>(f), ...args=std::forward<Args>(args)] () -> return_type {
+    return std::invoke(std::move(f), std::move(args)...);
+  };
+  return async_awaiter<return_type>{ctx, std::move(task)};
+}
 
 template<typename... UTasks>
 struct all_awaiter {
