@@ -19,6 +19,7 @@ class executor_t {
   bool add(atask_t* t);
   size_t get_completed(std::array<atask_t*, 32>& tasks);
   void terminate();
+  bool idle() const;
 
   static void worker(executor_t* p_executor);
  private:
@@ -27,6 +28,7 @@ class executor_t {
   queue_t completed_tasks;
   std::vector<std::thread> workers;
   const size_t max_task_nr;
+  size_t running_task_nr{0};
 };
 
 }
