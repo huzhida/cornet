@@ -17,7 +17,7 @@ context_t::context_t()
 }
 
 context_t::~context_t() {
-  executor.terminate();
+  if (executor) executor->terminate();
   std::lock_guard<std::mutex> guard(contexts_mutex);
   contexts.erase(std::this_thread::get_id());
 }

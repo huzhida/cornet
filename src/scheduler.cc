@@ -33,7 +33,8 @@ void scheduler_t::resume_one_task() {
 
 void scheduler_t::process_async_tasks(context_t& ctx) {
   auto& executor = ctx.async_executor();
-  auto completed = executor.get_completed(async_tasks);
+  if (!executor) return;
+  auto completed = executor->get_completed(async_tasks);
   for (int idx = 0; idx < completed; ++idx) {
     this->ready_tasks.push(async_tasks[idx]->handle);
   }
