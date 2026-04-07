@@ -96,6 +96,14 @@ struct context_t {
   }
 
   /**
+   * @brief return context_t owned executor.
+   * @return context_t owned executor reference
+   */
+  CORNET_NODISCARD inline std::unique_ptr<executor_t>& async_executor() {
+    return executor;
+  }
+
+  /**
    * @brief context idle or not
    * @return true for idle / false for busy
    */
