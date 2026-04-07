@@ -98,7 +98,7 @@ struct context_t {
    * @return true for idle / false for busy
    */
   CORNET_NODISCARD inline bool idle() {
-    return scheduler->idle() && uring.idle();
+    return scheduler->idle() && uring.idle() && executor.idle();
   }
 
   inline void switch_to(state_t s) {
