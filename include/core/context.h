@@ -6,6 +6,7 @@
 #include "utask.h"
 #include "coro.h"
 #include "scheduler.h"
+#include "executor.h"
 #include "utils/ringbuffer.h"
 
 namespace cornet {
@@ -82,6 +83,14 @@ struct context_t {
    */
   CORNET_NODISCARD inline uring_t& io_uring() {
     return uring;
+  }
+
+  /**
+   * @brief return context_t async executor
+   * @return context_t owned async executor reference
+   */
+  CORNET_NODISCARD inline executor_t& async_executor() {
+    return executor;
   }
 
   /**
@@ -212,6 +221,8 @@ private:
   std::thread::id owner{std::this_thread::get_id()};
   // context scheduler
   std::unique_ptr<scheduler_t> scheduler;
+  // context executor
+  executor_t executor;
 };
 
 } // cornet

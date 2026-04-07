@@ -1,5 +1,6 @@
 #include "core/scheduler.h"
 #include "core/context.h"
+#include "core/atask.h"
 #include <fmt/ranges.h>
 
 namespace cornet {
@@ -30,6 +31,14 @@ void scheduler_t::resume_one_task() {
   if (task && !task.done()) task.resume();
 }
 
+void scheduler_t::process_async_tasks(context_t& ctx) {
+  auto& executor = ctx.async_executor();
+  auto completed = executor.get_completed(async_tasks);
+  for (int idx = 0; idx < completed; ++idx) {
+    this->ready_tasks.push(async_tasks[idx]->handle);
+  }
+}
+
 CORNET_REGISTER_SCHEDULER(scheduler_type_t::TimeSlice, time_slice_scheduler_t);
 time_slice_scheduler_t::time_slice_scheduler_t() {
   auto conf = config_t::get()["cornet"]["context"]["scheduler"];
@@ -49,6 +58,8 @@ void time_slice_scheduler_t::sched(context_t& ctx) {
   uring.wait_cqes(utask_t::process_utask, ctx, uring.running_task_nr(), io_budget);
 
   uring.postprocess();
+
+  process_async_tasks(ctx);
 }
 
 bool time_slice_scheduler_t::cpu_timeout(std::chrono::steady_clock::time_point& start) const {
@@ -69,6 +80,8 @@ void round_robin_scheduler_t::sched(context_t& ctx) {
   uring.peek_cqes(utask_t::process_utask, ctx, uring.running_task_nr());
 
   uring.postprocess();
+
+  process_async_tasks(ctx);
 }
 
 CORNET_REGISTER_SCHEDULER(scheduler_type_t::Batch, batch_scheduler_t);
@@ -89,6 +102,8 @@ void batch_scheduler_t::sched(context_t& ctx) {
   uring.peek_cqes(utask_t::process_utask, ctx, batch_nr);
 
   uring.postprocess();
+
+  process_async_tasks(ctx);
 }
 
 } // cornet

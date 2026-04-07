@@ -5,7 +5,10 @@ namespace cornet {
 std::mutex context_t::contexts_mutex;
 std::unordered_map<std::thread::id, context_t*> context_t::contexts;
 
-context_t::context_t() : uring(config_t::get()["cornet"]["context"]["uring"]["capacity"].value_or(32)) {
+context_t::context_t()
+: uring(config_t::get()["cornet"]["context"]["uring"]["capacity"].value_or(32)),
+  executor(config_t::get()["cornet"]["context"]["executor"]["thread_nr"].value_or(1))
+{
   if (auto scheduler_name = config_t::get()["cornet"]["context"]["scheduler"]["name"]) {
     scheduler_type = scheduler_t::to_scheduler_type(scheduler_name.as_string()->value_or(""));
   }
@@ -16,6 +19,7 @@ context_t::context_t() : uring(config_t::get()["cornet"]["context"]["uring"]["ca
 }
 
 context_t::~context_t() {
+  executor.terminate();
   std::lock_guard<std::mutex> guard(contexts_mutex);
   contexts.erase(std::this_thread::get_id());
 }
