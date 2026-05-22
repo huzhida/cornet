@@ -16,6 +16,7 @@ utask_t::utask_t(utask_t&& other) noexcept {
   this->completed = other.completed;
   this->value = other.value;
   this->handle = other.handle;
+  this->user_data = other.user_data;
   this->sqe.with_data(this);
 }
 

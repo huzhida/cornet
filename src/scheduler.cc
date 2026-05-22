@@ -56,7 +56,7 @@ void time_slice_scheduler_t::sched(context_t& ctx) {
   }
   uring.submit();
 
-  uring.wait_cqes(utask_t::process_utask, ctx, uring.running_task_nr(), io_budget);
+  uring.wait_cqes(utask_t::process_utask, ctx, 1, io_budget);
 
   uring.postprocess();
 
