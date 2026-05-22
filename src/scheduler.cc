@@ -35,7 +35,7 @@ void scheduler_t::process_async_tasks(context_t& ctx) {
   auto& executor = ctx.async_executor();
   if (!executor) return;
   auto completed = executor->get_completed(async_tasks);
-  for (int idx = 0; idx < completed; ++idx) {
+  for (size_t idx = 0; idx < completed; ++idx) {
     this->ready_tasks.push(async_tasks[idx]->handle);
   }
 }
@@ -52,13 +52,10 @@ void time_slice_scheduler_t::sched(context_t& ctx) {
   auto& uring = ctx.io_uring();
   while (!ready_tasks.empty() && !cpu_timeout(start)) {
     resume_one_task();
-    if (uring.about_full() || uring.overflow()) break;
   }
   uring.submit();
 
   uring.wait_cqes(utask_t::process_utask, ctx, 1, io_budget);
-
-  uring.postprocess();
 
   process_async_tasks(ctx);
 }
@@ -72,15 +69,15 @@ bool time_slice_scheduler_t::cpu_timeout(std::chrono::steady_clock::time_point& 
 CORNET_REGISTER_SCHEDULER(scheduler_type_t::RoundRobin, round_robin_scheduler_t);
 void round_robin_scheduler_t::sched(context_t& ctx) {
   auto& uring = ctx.io_uring();
-  while (!ready_tasks.empty() && !uring.overflow()) {
+  while (!ready_tasks.empty()) {
     resume_one_task();
-    if (uring.about_full() || uring.overflow()) break;
   }
   uring.submit();
 
-  uring.peek_cqes(utask_t::process_utask, ctx, uring.running_task_nr());
-
-  uring.postprocess();
+  uint32_t nr = uring.running_task_nr();
+  if (nr > 0) {
+    uring.peek_cqes(utask_t::process_utask, ctx, nr);
+  }
 
   process_async_tasks(ctx);
 }
@@ -96,13 +93,12 @@ void batch_scheduler_t::sched(context_t& ctx) {
   auto& uring = ctx.io_uring();
   while (!ready_tasks.empty() && ++processed < batch_nr) {
     resume_one_task();
-    if (uring.about_full() || uring.overflow()) break;
   }
   uring.submit();
 
-  uring.peek_cqes(utask_t::process_utask, ctx, batch_nr);
-
-  uring.postprocess();
+  if (uring.running_task_nr() > 0) {
+    uring.peek_cqes(utask_t::process_utask, ctx, batch_nr);
+  }
 
   process_async_tasks(ctx);
 }

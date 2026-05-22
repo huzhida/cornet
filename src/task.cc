@@ -4,24 +4,22 @@
 
 namespace cornet {
 
-utask_t::utask_t(context_t &ctx) {
-  sqe = ctx.io_uring().new_sqe();
-}
-
 utask_t::utask_t(utask_t&& other) noexcept {
-  this->sqe = other.sqe;
-  other.sqe.sqe = nullptr;
-
   this->callback = other.callback;
   this->completed = other.completed;
   this->value = other.value;
   this->handle = other.handle;
   this->user_data = other.user_data;
-  this->sqe.with_data(this);
+  this->ctx = other.ctx;
+  other.ctx = nullptr;
 }
 
-void utask_t::await_suspend(std::coroutine_handle<> handle) {
-  this->handle = handle;
+void utask_t::await_suspend(std::coroutine_handle<> h) {
+  this->handle = h;
+  auto& uring = ctx->io_uring();
+  auto sqe = uring.get_sqe();
+  prepare_fn(this, sqe);
+  io_uring_sqe_set_data(sqe, this);
 }
 
 int utask_t::process_utask(context_t& ctx, cqe_t cqe) {

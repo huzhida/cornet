@@ -70,8 +70,12 @@ std::thread::id context_t::owner_thread() const {
 }
 
 context_t::cancel_awaiter::cancel_awaiter(context_t& ctx, void* user_data, int flags)
-  : utask_t(ctx) {
-  sqe.prep_cancel(user_data, flags).with_data(this);
+  : user_data_(user_data), flags_(flags) {
+  this->ctx = &ctx;
+  this->prepare_fn = [](utask_t* self, io_uring_sqe* sqe) {
+    auto* t = static_cast<cancel_awaiter*>(self);
+    io_uring_prep_cancel(sqe, t->user_data_, t->flags_);
+  };
 }
 
 } // cornet

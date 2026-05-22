@@ -1,15 +1,13 @@
 #include "core/uring.h"
-#include <sys/eventfd.h>
 
 namespace cornet {
 
 uring_t::uring_t(uint32_t entries_nr, uint32_t flags)
-  : uring(std::make_unique<io_uring>()), remain_sqe_nr(entries_nr) {
+  : uring(std::make_unique<io_uring>()) {
   if (io_uring_queue_init(entries_nr, uring.get(), flags) < 0) {
     CORNET_FATAL("failed to init io_uring queue with error: {}", strerror(errno));
   }
 }
-
 
 uring_t::~uring_t() {
   if (registered_buffers) {
@@ -23,20 +21,15 @@ uring_t::~uring_t() {
 uring_t::uring_t(uring_t&& r) noexcept {
   if (this != &r) {
     this->uring = std::move(r.uring);
+    this->task_nr = r.task_nr;
     this->registered_buffers = std::move(r.registered_buffers);
     this->registered_buffer_nr = r.registered_buffer_nr;
     this->registered_files = std::move(r.registered_files);
-    this->task_nr = r.task_nr;
-    this->remain_sqe_nr = r.remain_sqe_nr;
-    this->sm = std::move(r.sm);
-    this->need_flush = r.need_flush;
     r.uring = nullptr;
+    r.task_nr = 0;
     r.registered_buffers = nullptr;
     r.registered_buffer_nr = 0;
     r.registered_files = nullptr;
-    r.task_nr = 0;
-    r.remain_sqe_nr = 0;
-    r.need_flush = false;
   }
 }
 
@@ -49,22 +42,30 @@ uring_t& uring_t::operator=(uring_t&& r) noexcept {
     }
     if (uring) io_uring_queue_exit(uring.get());
     this->uring = std::move(r.uring);
+    this->task_nr = r.task_nr;
     this->registered_buffers = std::move(r.registered_buffers);
     this->registered_buffer_nr = r.registered_buffer_nr;
     this->registered_files = std::move(r.registered_files);
-    this->task_nr = r.task_nr;
-    this->remain_sqe_nr = r.remain_sqe_nr;
-    this->sm = std::move(r.sm);
-    this->need_flush = r.need_flush;
     r.uring = nullptr;
+    r.task_nr = 0;
     r.registered_buffers = nullptr;
     r.registered_buffer_nr = 0;
     r.registered_files = nullptr;
-    r.task_nr = 0;
-    r.remain_sqe_nr = 0;
-    r.need_flush = false;
   }
   return *this;
+}
+
+io_uring_sqe* uring_t::get_sqe() {
+  auto sqe = io_uring_get_sqe(uring.get());
+  if (!sqe) {
+    int ret = io_uring_submit(uring.get());
+    if (ret > 0) task_nr += ret;
+    sqe = io_uring_get_sqe(uring.get());
+    if (!sqe) {
+      CORNET_FATAL("failed to get sqe even after submit");
+    }
+  }
+  return sqe;
 }
 
 int uring_t::submit() {
@@ -74,34 +75,6 @@ int uring_t::submit() {
     return submit_nr;
   }
   task_nr += submit_nr;
-  remain_sqe_nr += submit_nr;
-
-  return submit_nr;
-}
-
-int uring_t::postprocess()  {
-  int submit_nr = 0;
-  if (overflow()) {
-    SPDLOG_WARN("io_uring sqe overflow, it will influence performance, try to increase io_uring entry count.");
-    while(!sm.empty()) {
-      auto sqe = io_uring_get_sqe(uring.get());
-      if (!sqe) {
-        CORNET_FATAL("get sqe failed even submitted, maybe io_uring capacity overflow...", 1);
-      }
-      *sqe = *sm.flush_overflow_sqe();
-    }
-
-    if (need_flush) {
-      int overflow_submit_nr = io_uring_submit(uring.get());
-      if (overflow_submit_nr < 0) {
-        SPDLOG_ERROR("io_uring submit sqe failed with error: {}", strerror(errno));
-        return overflow_submit_nr;
-      }
-      task_nr += overflow_submit_nr;
-      submit_nr += overflow_submit_nr;
-      need_flush = false;
-    }
-  }
   return submit_nr;
 }
 
