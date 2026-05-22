@@ -1,6 +1,10 @@
 #include "core/uring.h"
+#include "core/context.h"
+#include "utils/metrics.h"
 
 namespace cornet {
+
+static latency_stats_t dummy_latency_;
 
 uring_t::uring_t(uint32_t entries_nr, uint32_t flags)
   : uring(std::make_unique<io_uring>()) {
@@ -56,8 +60,10 @@ uring_t& uring_t::operator=(uring_t&& r) noexcept {
 }
 
 io_uring_sqe* uring_t::get_sqe() {
+  if (metrics_) metrics_->get_sqe_calls++;
   auto sqe = io_uring_get_sqe(uring.get());
   if (!sqe) {
+    if (metrics_) metrics_->get_sqe_submit_forced++;
     int ret = io_uring_submit(uring.get());
     if (ret > 0) task_nr += ret;
     sqe = io_uring_get_sqe(uring.get());
@@ -69,12 +75,16 @@ io_uring_sqe* uring_t::get_sqe() {
 }
 
 int uring_t::submit() {
+  if (metrics_) metrics_->submit_calls++;
+  scoped_timer_t timer(metrics_ ? metrics_->submit_latency : dummy_latency_);
   int submit_nr = io_uring_submit(uring.get());
   if (submit_nr < 0) {
+    if (metrics_) metrics_->submit_failures++;
     SPDLOG_ERROR("io_uring submit sqe failed with error: {}", strerror(errno));
     return submit_nr;
   }
   task_nr += submit_nr;
+  if (metrics_) metrics_->submit_sqes += submit_nr;
   return submit_nr;
 }
 
@@ -90,15 +100,20 @@ uint32_t uring_t::process_cqes(int (*process_fn)(context_t &, cqe_t), context_t 
 }
 
 uint32_t uring_t::wait_cqes(int (*process_fn)(context_t &, cqe_t), context_t &ctx, uint32_t wait_nr, sigset_t *mask) {
+  if (metrics_) metrics_->wait_calls++;
+  scoped_timer_t timer(metrics_ ? metrics_->wait_latency : dummy_latency_);
   cqe_t cqe;
   if (io_uring_wait_cqes(uring.get(), &cqe, wait_nr, nullptr, mask) < 0) {
-    SPDLOG_ERROR("failed to wait io_uring cqes with error: {}", strerror(errno));
+    if (metrics_) metrics_->wait_timeouts++;
     return 0;
   }
-  return process_cqes(process_fn, ctx, cqe);
+  uint32_t n = process_cqes(process_fn, ctx, cqe);
+  if (metrics_) metrics_->wait_cqes_processed += n;
+  return n;
 }
 
 uint32_t uring_t::peek_cqes(int(* process_fn)(context_t&, cqe_t), context_t& ctx, uint32_t peek_nr) {
+  if (metrics_) metrics_->peek_calls++;
   cqe_t cqe;
   uint32_t count = 0, head;
   io_uring_for_each_cqe(uring.get(), head, cqe) {
@@ -106,11 +121,12 @@ uint32_t uring_t::peek_cqes(int(* process_fn)(context_t&, cqe_t), context_t& ctx
     if (++count >= peek_nr) break;
   }
   if (count == 0) {
-    SPDLOG_DEBUG("Uring peek batch cqe return empty");
+    if (metrics_) metrics_->peek_empty++;
     return 0;
   }
   io_uring_cq_advance(uring.get(), count);
   task_nr -= count;
+  if (metrics_) metrics_->peek_cqes_processed += count;
   return count;
 }
 
