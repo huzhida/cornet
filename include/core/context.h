@@ -7,22 +7,21 @@
 #include "coro.h"
 #include "scheduler.h"
 #include "executor.h"
-#include "utils/ringbuffer.h"
 
 namespace cornet {
 
 struct context_t {
   /**
-   * @brief context current state, represent
+   * @brief context current state
    */
   enum class state_t : uint32_t {
     // context is running
     Running,
-    // context is trying to cancel io tasks.
+    // context is trying to cancel io tasks
     Canceling,
-    // context is terminating, draining remain tasks.
+    // context is terminating, draining remain tasks
     Terminating,
-    // context terminated, all tasks done or error occupied.
+    // context terminated, all tasks done or error occupied
     Terminated
   };
 
@@ -77,7 +76,7 @@ struct context_t {
 
   /**
    * @brief cancel context io tasks or stop running.
-   * @param cancel whether cancel io tasks, it makes all io_uring tasks to be cancels.
+   * @param cancel whether cancel io tasks, it makes all io_uring tasks to be cancelled.
    */
   void stop(bool cancel = true);
 
@@ -123,39 +122,20 @@ struct context_t {
    */
   CORNET_NODISCARD std::thread::id owner_thread() const;
 
-
   /**
    * @brief cancel awaiter, used for cancel io_uring async tasks.
    */
   struct cancel_awaiter : utask_t {
+    void* user_data_;
+    int flags_;
     cancel_awaiter(context_t& ctx, void* user_data, int flags);
   };
 
   /**
    * @brief cancel io_uring async tasks.
-   * @param user_data
-   * -------------------------------------------------------------------------------------------\n
-   * flag                          user_data               comment
-   * -------------------------------------------------------------------------------------------\n
-   * IORING_ASYNC_CANCEL_ALL      | ptr                  | cancel all tasks match `user_data`.\n
-   * IORING_ASYNC_CANCEL_FD       | fd                   | will cancel the first match fd task.\n
-   * IORING_ASYNC_CANCEL_ANY      | nullptr              | will cancel all tasks.\n
-   * IORING_ASYNC_CANCEL_FD_FIXED | registered fd index  | will cancel correspond fd.\n
-   * -------------------------------------------------------------------------------------------\n
-   * @param flags
-   * IORING_ASYNC_CANCEL_ALL      Cancel all requests that match the given key\n
-   * IORING_ASYNC_CANCEL_FD       Key off 'fd' for cancelation rather than the request 'user_data'\n
-   * IORING_ASYNC_CANCEL_ANY      Match any request\n
-   * IORING_ASYNC_CANCEL_FD_FIXED 'fd' passed in is a fixed descriptor\n
-   * @return
-   * -------------------------------------------------------------------------------------------\n
-   * flag                          return\n
-   * -------------------------------------------------------------------------------------------\n
-   * IORING_ASYNC_CANCEL_ALL      | canceled task count \n
-   * IORING_ASYNC_CANCEL_FD       | 0 for success / < 0 for failed \n
-   * IORING_ASYNC_CANCEL_ANY      | 0 for success / < 0 for failed \n
-   * IORING_ASYNC_CANCEL_FD_FIXED | 0 for success / < 0 for failed \n
-   * -------------------------------------------------------------------------------------------\n
+   * @param user_data target to cancel (depends on flags)
+   * @param flags IORING_ASYNC_CANCEL_* flags
+   * @return canceled task count or error code
    */
   inline coro_t<int> cancel_io_tasks(void* user_data = nullptr, int flags = IORING_ASYNC_CANCEL_ANY) {
     int canceled_nr = 0;

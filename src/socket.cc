@@ -70,38 +70,85 @@ void socket_t::port_reuse(bool on) const {
   int reuse = on ? 1 : 0;
   setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, (void*)&reuse, sizeof(reuse));
 }
-socket_t::close_awaiter::close_awaiter(context_t& ctx, int fd) : utask_t(ctx) {
-  sqe.prep_close(fd).with_data(this);
+
+socket_t::close_awaiter::close_awaiter(context_t& ctx, int fd) : fd_(fd) {
+  this->ctx = &ctx;
+  this->prepare_fn = [](utask_t* self, io_uring_sqe* sqe) {
+    auto* t = static_cast<close_awaiter*>(self);
+    io_uring_prep_close(sqe, t->fd_);
+  };
 }
-socket_t::accept_awaiter::accept_awaiter(context_t& ctx, int fd, sockaddr* addr, socklen_t* len, int flag) : utask_t(ctx) {
-  sqe.prep_accept(fd, addr, len, flag).with_data(this);
+
+socket_t::accept_awaiter::accept_awaiter(context_t& ctx, int fd, sockaddr* addr, socklen_t* len, int flag)
+  : fd_(fd), addr_(addr), addr_len_(len), flag_(flag) {
+  this->ctx = &ctx;
+  this->prepare_fn = [](utask_t* self, io_uring_sqe* sqe) {
+    auto* t = static_cast<accept_awaiter*>(self);
+    io_uring_prep_accept(sqe, t->fd_, t->addr_, t->addr_len_, t->flag_);
+  };
 }
-socket_t::connect_awaiter::connect_awaiter(context_t& ctx, int fd, const std::string& ip, const std::string& port, int domain, int type) : utask_t(ctx) {
-  socklen_t socklen = to_address(ip, port, addr, domain, type, AI_ADDRCONFIG | AI_V4MAPPED);
-  if (socklen == 0) {
+
+socket_t::connect_awaiter::connect_awaiter(context_t& ctx, int fd, const std::string& ip, const std::string& port, int domain, int type)
+  : fd_(fd) {
+  this->ctx = &ctx;
+  socklen_ = to_address(ip, port, addr, domain, type, AI_ADDRCONFIG | AI_V4MAPPED);
+  if (socklen_ == 0) {
     CORNET_FATAL("failed to get address info on {}:{}", ip, port);
   }
-  sqe.prep_connect(fd, (sockaddr*)&addr, socklen).with_data(this);
+  this->prepare_fn = [](utask_t* self, io_uring_sqe* sqe) {
+    auto* t = static_cast<connect_awaiter*>(self);
+    io_uring_prep_connect(sqe, t->fd_, (sockaddr*)&t->addr, t->socklen_);
+  };
 }
-socket_t::connect_awaiter::connect_awaiter(context_t& ctx, int fd, const std::string& path) : utask_t(ctx) {
-  socklen_t socklen = to_address(path, addr);
-  if (socklen == 0) {
+socket_t::connect_awaiter::connect_awaiter(context_t& ctx, int fd, const std::string& path)
+  : fd_(fd) {
+  this->ctx = &ctx;
+  socklen_ = to_address(path, addr);
+  if (socklen_ == 0) {
     CORNET_FATAL("failed to get address info on {}", path);
   }
-  sqe.prep_connect(fd, (sockaddr*)&addr, socklen).with_data(this);
+  this->prepare_fn = [](utask_t* self, io_uring_sqe* sqe) {
+    auto* t = static_cast<connect_awaiter*>(self);
+    io_uring_prep_connect(sqe, t->fd_, (sockaddr*)&t->addr, t->socklen_);
+  };
 }
-socket_t::recv_awaiter::recv_awaiter(context_t& ctx, int fd, void* buf, uint32_t nbytes, int flag) : utask_t(ctx) {
-  sqe.prep_recv(fd, buf, nbytes, flag).with_data(this);
+
+socket_t::recv_awaiter::recv_awaiter(context_t& ctx, int fd, void* buf, uint32_t nbytes, int flag)
+  : fd_(fd), buf_(buf), nbytes_(nbytes), flag_(flag) {
+  this->ctx = &ctx;
+  this->prepare_fn = [](utask_t* self, io_uring_sqe* sqe) {
+    auto* t = static_cast<recv_awaiter*>(self);
+    io_uring_prep_recv(sqe, t->fd_, t->buf_, t->nbytes_, t->flag_);
+  };
 }
-socket_t::send_awaiter::send_awaiter(context_t& ctx, int fd, void* buf, uint32_t nbytes, int flag) : utask_t(ctx) {
-  sqe.prep_send(fd, buf, nbytes, flag).with_data(this);
+
+socket_t::send_awaiter::send_awaiter(context_t& ctx, int fd, void* buf, uint32_t nbytes, int flag)
+  : fd_(fd), buf_(buf), nbytes_(nbytes), flag_(flag) {
+  this->ctx = &ctx;
+  this->prepare_fn = [](utask_t* self, io_uring_sqe* sqe) {
+    auto* t = static_cast<send_awaiter*>(self);
+    io_uring_prep_send(sqe, t->fd_, t->buf_, t->nbytes_, t->flag_);
+  };
 }
-socket_t::sendmsg_awaiter::sendmsg_awaiter(context_t &ctx, int fd, struct msghdr *msg, int flags) : utask_t(ctx) {
-  sqe.prep_sendmsg(fd, msg, flags).with_data(this);
+
+socket_t::sendmsg_awaiter::sendmsg_awaiter(context_t &ctx, int fd, struct msghdr *msg, int flags)
+  : fd_(fd), msg_(msg), flags_(flags) {
+  this->ctx = &ctx;
+  this->prepare_fn = [](utask_t* self, io_uring_sqe* sqe) {
+    auto* t = static_cast<sendmsg_awaiter*>(self);
+    io_uring_prep_sendmsg(sqe, t->fd_, t->msg_, t->flags_);
+  };
 }
-socket_t::recvmsg_awaiter::recvmsg_awaiter(context_t &ctx, int fd, struct msghdr *msg, int flags) : utask_t(ctx) {
-  sqe.prep_recvmsg(fd, msg, flags).with_data(this);
+
+socket_t::recvmsg_awaiter::recvmsg_awaiter(context_t &ctx, int fd, struct msghdr *msg, int flags)
+  : fd_(fd), msg_(msg), flags_(flags) {
+  this->ctx = &ctx;
+  this->prepare_fn = [](utask_t* self, io_uring_sqe* sqe) {
+    auto* t = static_cast<recvmsg_awaiter*>(self);
+    io_uring_prep_recvmsg(sqe, t->fd_, t->msg_, t->flags_);
+  };
 }
+
 socket_t::close_awaiter socket_t::close(context_t& ctx) const {
   return close_awaiter{ctx, fd};
 }
