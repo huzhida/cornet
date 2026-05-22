@@ -32,6 +32,13 @@ void executor_t::terminate() {
       w.join();
     }
   }
+  atask_t* task;
+  while (pending_tasks.try_dequeue(task)) {
+    task->fn(task);
+    while (!completed_tasks.try_enqueue(task)) {
+      std::this_thread::yield();
+    }
+  }
 }
 
 void executor_t::worker(executor_t* p_executor) {
@@ -47,7 +54,9 @@ void executor_t::worker(executor_t* p_executor) {
       auto* task = tasks[idx];
       task->fn(task);
     }
-    executor.completed_tasks.try_enqueue_bulk(tasks.begin(), dequeued);
+    while (!executor.completed_tasks.try_enqueue_bulk(tasks.begin(), dequeued)) {
+      std::this_thread::yield();
+    }
   }
 }
 bool executor_t::idle() const {

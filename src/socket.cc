@@ -161,6 +161,9 @@ coro_t<socket_t> socket_t::accept(context_t &ctx, int flag) const {
   sockaddr_storage addr{};
   socklen_t len{};
   int client_fd = co_await accept(ctx, (sockaddr*)&addr, &len, flag);
+  if (client_fd < 0) {
+    throw std::runtime_error(fmt::format("accept failed with error: {}", strerror(-client_fd)));
+  }
   auto socket = tcp::socket_t(client_fd);
   socket.domain = addr.ss_family;
   co_return socket;

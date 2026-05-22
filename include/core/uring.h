@@ -435,6 +435,8 @@ class uring_t {
   bool need_flush{false};
   // registered buffers
   std::unique_ptr<iovec[]> registered_buffers{};
+  // registered buffer count
+  size_t registered_buffer_nr{0};
   // registered file descriptors
   std::unique_ptr<int[]> registered_files{};
 

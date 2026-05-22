@@ -12,6 +12,11 @@ uring_t::uring_t(uint32_t entries_nr, uint32_t flags)
 
 
 uring_t::~uring_t() {
+  if (registered_buffers) {
+    for (size_t i = 0; i < registered_buffer_nr; ++i) {
+      free(registered_buffers[i].iov_base);
+    }
+  }
   if (uring) io_uring_queue_exit(uring.get());
 }
 
@@ -19,21 +24,45 @@ uring_t::uring_t(uring_t&& r) noexcept {
   if (this != &r) {
     this->uring = std::move(r.uring);
     this->registered_buffers = std::move(r.registered_buffers);
+    this->registered_buffer_nr = r.registered_buffer_nr;
     this->registered_files = std::move(r.registered_files);
+    this->task_nr = r.task_nr;
+    this->remain_sqe_nr = r.remain_sqe_nr;
+    this->sm = std::move(r.sm);
+    this->need_flush = r.need_flush;
     r.uring = nullptr;
     r.registered_buffers = nullptr;
+    r.registered_buffer_nr = 0;
     r.registered_files = nullptr;
+    r.task_nr = 0;
+    r.remain_sqe_nr = 0;
+    r.need_flush = false;
   }
 }
 
 uring_t& uring_t::operator=(uring_t&& r) noexcept {
   if (this != &r) {
+    if (registered_buffers) {
+      for (size_t i = 0; i < registered_buffer_nr; ++i) {
+        free(registered_buffers[i].iov_base);
+      }
+    }
+    if (uring) io_uring_queue_exit(uring.get());
     this->uring = std::move(r.uring);
     this->registered_buffers = std::move(r.registered_buffers);
+    this->registered_buffer_nr = r.registered_buffer_nr;
     this->registered_files = std::move(r.registered_files);
+    this->task_nr = r.task_nr;
+    this->remain_sqe_nr = r.remain_sqe_nr;
+    this->sm = std::move(r.sm);
+    this->need_flush = r.need_flush;
     r.uring = nullptr;
     r.registered_buffers = nullptr;
+    r.registered_buffer_nr = 0;
     r.registered_files = nullptr;
+    r.task_nr = 0;
+    r.remain_sqe_nr = 0;
+    r.need_flush = false;
   }
   return *this;
 }
@@ -116,14 +145,23 @@ CORNET_MAYBE_UNUSED bool uring_t::register_buffers(iovec* buffers, size_t buffer
     iovec& buffer = buffers[index];
     if (posix_memalign(&buffer.iov_base, 4 * 1024, buffer.iov_len) != 0) {
       SPDLOG_ERROR("failed to allocate aligned buffer with error: {}", strerror(errno));
+      for (size_t i = 0; i < index; ++i) {
+        free(buffers[i].iov_base);
+        buffers[i].iov_base = nullptr;
+      }
       return false;
     }
   }
   int x = io_uring_register_buffers(uring.get(), buffers, buffer_nr);
   if (x < 0) {
     SPDLOG_ERROR("failed to register buffer on io_uring with error: {}", strerror(-x));
+    for (size_t i = 0; i < buffer_nr; ++i) {
+      free(buffers[i].iov_base);
+      buffers[i].iov_base = nullptr;
+    }
     return false;
   }
+  this->registered_buffer_nr = buffer_nr;
   this->registered_buffers = std::make_unique<iovec[]>(buffer_nr);
   for (size_t index = 0; index < buffer_nr; ++index) {
     this->registered_buffers[index] = buffers[index];
