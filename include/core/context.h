@@ -77,9 +77,16 @@ struct context_t {
 
   /**
    * @brief cancel context io tasks or stop running.
+   * Thread-safe: can be called from any thread. Wakes the owner thread if blocked.
    * @param cancel whether cancel io tasks, it makes all io_uring tasks to be cancelled.
    */
   void stop(bool cancel = true);
+
+  /**
+   * @brief wake up the owner thread if it's blocked in io_uring_wait.
+   * Thread-safe.
+   */
+  void wakeup();
 
   /**
    * @brief set context scheduler type, new scheduler will take over schedule.
@@ -219,6 +226,8 @@ private:
   uring_t uring;
   // context owned io slot table for safe user_data management
   io_slot_table_t slots;
+  // eventfd for cross-thread wakeup
+  int wakeup_fd{-1};
   // context current state
   std::atomic<state_t> state;
   // context current scheduler type
