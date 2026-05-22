@@ -91,6 +91,12 @@ class uring_t {
   uint32_t peek_cqes(int (*process_fn)(context_t&, cqe_t), context_t& ctx, uint32_t peek_nr = 1);
 
   /**
+   * @brief get raw io_uring pointer for low-level operations
+   * @return raw io_uring pointer
+   */
+  inline io_uring* raw() { return uring.get(); }
+
+  /**
    * @brief check if there are no pending tasks
    * @return true if task count is zero
    */

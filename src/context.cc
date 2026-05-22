@@ -1,4 +1,6 @@
 #include "core/context.h"
+#include <sys/eventfd.h>
+#include <unistd.h>
 
 namespace cornet {
 
@@ -11,13 +13,23 @@ context_t::context_t()
     scheduler_type = scheduler_t::to_scheduler_type(scheduler_name.as_string()->value_or(""));
   }
   scheduler = scheduler_t::scheduler(scheduler_type);
+
+  wakeup_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+  if (wakeup_fd < 0) {
+    CORNET_FATAL("failed to create eventfd: {}", strerror(errno));
+  }
+  io_uring_register_eventfd(uring.raw(), wakeup_fd);
+
   std::lock_guard<std::mutex> guard(contexts_mutex);
   contexts[std::this_thread::get_id()] = this;
-
 }
 
 context_t::~context_t() {
   if (executor) executor->terminate();
+  if (wakeup_fd >= 0) {
+    ::close(wakeup_fd);
+    wakeup_fd = -1;
+  }
   std::lock_guard<std::mutex> guard(contexts_mutex);
   contexts.erase(std::this_thread::get_id());
 }
@@ -59,10 +71,16 @@ void context_t::set_scheduler_type(scheduler_type_t type) {
 
 void context_t::stop(bool cancel) {
   if (cancel) {
-    state.store(state_t::Canceling);
+    state.store(state_t::Canceling, std::memory_order_release);
   } else {
-    state.store(state_t::Terminated);
+    state.store(state_t::Terminated, std::memory_order_release);
   }
+  wakeup();
+}
+
+void context_t::wakeup() {
+  uint64_t val = 1;
+  ::write(wakeup_fd, &val, sizeof(val));
 }
 
 std::thread::id context_t::owner_thread() const {

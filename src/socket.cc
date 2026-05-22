@@ -39,6 +39,7 @@ socket_t::socket_t(int fd) : fd(fd) {
 }
 socket_t::~socket_t() {
   if (fd != -1) {
+    ::shutdown(fd, SHUT_RDWR);
     ::close(fd);
     fd = -1;
   }
@@ -52,6 +53,7 @@ socket_t::socket_t(socket_t&& s) noexcept {
 socket_t& socket_t::operator=(socket_t&& s) noexcept {
   if (this != &s) {
     if (this->fd != -1) {
+      ::shutdown(this->fd, SHUT_RDWR);
       ::close(this->fd);
     }
     this->fd = s.fd;
