@@ -93,7 +93,9 @@ socket_t::connect_awaiter::connect_awaiter(context_t& ctx, int fd, const std::st
   this->ctx = &ctx;
   socklen_ = to_address(ip, port, addr, domain, type, AI_ADDRCONFIG | AI_V4MAPPED);
   if (socklen_ == 0) {
-    CORNET_FATAL("failed to get address info on {}:{}", ip, port);
+    this->completed = true;
+    this->value = -EINVAL;
+    return;
   }
   this->prepare_fn = [](utask_t* self, io_uring_sqe* sqe) {
     auto* t = static_cast<connect_awaiter*>(self);
@@ -105,7 +107,9 @@ socket_t::connect_awaiter::connect_awaiter(context_t& ctx, int fd, const std::st
   this->ctx = &ctx;
   socklen_ = to_address(path, addr);
   if (socklen_ == 0) {
-    CORNET_FATAL("failed to get address info on {}", path);
+    this->completed = true;
+    this->value = -EINVAL;
+    return;
   }
   this->prepare_fn = [](utask_t* self, io_uring_sqe* sqe) {
     auto* t = static_cast<connect_awaiter*>(self);
@@ -161,27 +165,26 @@ socket_t::recv_awaiter socket_t::recv(context_t& ctx, void* buf, uint32_t nbytes
 socket_t::send_awaiter socket_t::send(context_t& ctx, void* buf, uint32_t nbytes, int flag) const {
   return send_awaiter{ctx, fd, buf, nbytes, flag};
 }
-bool socket_t::bind(const std::string& address, const std::string& port) const {
+expected<void> socket_t::bind(const std::string& address, const std::string& port) const {
   sockaddr_storage addr{};
   socklen_t socklen;
   if (this->domain == AF_UNIX) {
     ::unlink(address.c_str());
     socklen = to_address(address, addr);
     if (socklen == 0) {
-      CORNET_FATAL("failed to get address info on {}", address);
+      return unexpected(EINVAL);
     }
   } else {
     socklen = to_address(address, port, addr, domain, type, AI_PASSIVE | AI_NUMERICHOST);
     if (socklen == 0) {
-      CORNET_FATAL("failed to get address info on {}:{}", address, port);
+      return unexpected(EINVAL);
     }
   }
 
   if (::bind(fd, (sockaddr*)&addr, socklen) < 0) {
-    SPDLOG_ERROR("bind to {}:{} failed with error: {}", address, port, strerror(errno));
-    return false;
+    return unexpected(errno);
   }
-  return true;
+  return {};
 }
 
 namespace tcp {
@@ -189,29 +192,25 @@ socket_t::socket_t(int fd) : cornet::socket_t(fd) {
   type = SOCK_STREAM;
   protocol = IPPROTO_TCP;
 }
-bool socket_t::listen(const std::string& address, const std::string& port) const {
-  if (!bind(address, port)) return false;
+expected<void> socket_t::listen(const std::string& address, const std::string& port) const {
+  auto ret = bind(address, port);
+  if (!ret) return ret;
   if (::listen(fd, 2048) < 0) {
-    if (domain == AF_UNIX) {
-      SPDLOG_ERROR("listen on {} failed with error: {}", address, strerror(errno));
-    } else {
-      SPDLOG_ERROR("listen on {}:{} failed with error: {}", address, port, strerror(errno));
-    }
-    return false;
+    return unexpected(errno);
   }
-  return true;
+  return {};
 }
 socket_t::accept_awaiter socket_t::accept(context_t& ctx, sockaddr* addr, socklen_t* socklen, int flag) const {
   return accept_awaiter{ctx, fd, addr, socklen, flag};
 }
-coro_t<socket_t> socket_t::accept(context_t &ctx, int flag) const {
+coro_t<expected<socket_t>> socket_t::accept(context_t &ctx, int flag) const {
   sockaddr_storage addr{};
   socklen_t len{};
-  int client_fd = co_await accept(ctx, (sockaddr*)&addr, &len, flag);
-  if (client_fd < 0) {
-    throw std::runtime_error(fmt::format("accept failed with error: {}", strerror(-client_fd)));
+  auto result = co_await accept(ctx, (sockaddr*)&addr, &len, flag);
+  if (!result) {
+    co_return unexpected(result.error());
   }
-  auto socket = tcp::socket_t(client_fd);
+  auto socket = tcp::socket_t(*result);
   socket.domain = addr.ss_family;
   co_return socket;
 }
@@ -221,7 +220,7 @@ socket_t::socket_t(int fd) : cornet::socket_t(fd) {
   type = SOCK_DGRAM;
   protocol = IPPROTO_UDP;
 }
-coro_t<int> socket_t::sendto(context_t &ctx,void *buf,size_t nbytes, sockaddr *addr, socklen_t socklen,int flag) const {
+coro_t<expected<int>> socket_t::sendto(context_t &ctx,void *buf,size_t nbytes, sockaddr *addr, socklen_t socklen,int flag) const {
   struct iovec iov{};
   struct msghdr msg{};
 
@@ -234,7 +233,7 @@ coro_t<int> socket_t::sendto(context_t &ctx,void *buf,size_t nbytes, sockaddr *a
 
   co_return co_await sendmsg_awaiter(ctx, fd, &msg, flag);
 }
-coro_t<int> socket_t::recvfrom(context_t &ctx,void *buf,size_t nbytes, sockaddr *addr, socklen_t *socklen,int flag) const {
+coro_t<expected<int>> socket_t::recvfrom(context_t &ctx,void *buf,size_t nbytes, sockaddr *addr, socklen_t *socklen,int flag) const {
   struct iovec iov{};
   struct msghdr msg{};
 
@@ -244,9 +243,12 @@ coro_t<int> socket_t::recvfrom(context_t &ctx,void *buf,size_t nbytes, sockaddr 
   msg.msg_namelen = *socklen;
   msg.msg_iov = &iov;
   msg.msg_iovlen = 1;
-  int ret = co_await recvmsg_awaiter(ctx, fd, &msg, flag);
+  auto ret = co_await recvmsg_awaiter(ctx, fd, &msg, flag);
+  if (!ret) {
+    co_return unexpected(ret.error());
+  }
   *socklen = msg.msg_namelen;
-  co_return ret;
+  co_return *ret;
 }
 auto socket_t::sendmsg(context_t &ctx, struct msghdr *msg, int flags) const {
   return sendmsg_awaiter{ctx, fd, msg, flags};

@@ -133,15 +133,14 @@ public:
   coro_t<void> server_session(context_t& ctx, const BenchmarkConfig& config, int client_fd) {
     active_connections++;
     auto socket = tcp::v4::socket_t(client_fd);
-    // 使用动态分配的缓冲区，避免栈溢出
     auto buffer = std::make_shared<std::vector<char> >(4096);
     while (server_running) {
 
       auto n = co_await socket.recv(ctx, buffer->data(), config.message_size);
-      if (n <= 0)
+      if (!n || *n <= 0)
         break;
-      auto send_n = co_await socket.send(ctx, buffer->data(), n);
-      if (send_n <= 0)
+      auto send_n = co_await socket.send(ctx, buffer->data(), *n);
+      if (!send_n || *send_n <= 0)
         break;
     }
 
@@ -160,19 +159,17 @@ public:
     while (server_running) {
       sockaddr_storage addr{};
       socklen_t len{};
-      int client_fd = co_await listener.accept(ctx, (sockaddr*)&addr, &len);
-      if (client_fd < 0) {
-        if (client_fd == -ECANCELED) {
+      auto client_fd = co_await listener.accept(ctx, (sockaddr*)&addr, &len);
+      if (!client_fd) {
+        if (client_fd.error().code == ECANCELED) {
           SPDLOG_INFO("server accept canceled");
           break;
         }
-        SPDLOG_ERROR("server accept failed: {}", strerror(-client_fd));
+        SPDLOG_ERROR("server accept failed: {}", client_fd.error().message());
         break;
       }
 
-
-      // 为每个客户端创建一个会话协程
-      ctx.sched(server_session(ctx, config, client_fd));
+      ctx.sched(server_session(ctx, config, *client_fd));
     }
 
     co_return;
@@ -183,17 +180,14 @@ public:
                               std::shared_ptr<std::atomic<int> > remaining_msgs) {
     auto socket = std::make_shared<tcp::v4::socket_t>();
 
-    // 连接到服务器
-    int ok = co_await socket->connect(ctx, "127.0.0.1", "12345");
-    if (ok < 0) {
+    auto conn = co_await socket->connect(ctx, "127.0.0.1", "12345");
+    if (!conn) {
       co_return;
     }
 
-    // 准备消息 - 使用shared_ptr管理缓冲区
     auto send_buf = std::make_shared<std::string>(config.message_size, 'a' + (id % 26));
     auto recv_buf = std::make_shared<std::vector<char> >(config.message_size + 1024);
 
-    // 持续发送消息直到达到总数
     while (true) {
       int current = (*remaining_msgs)--;
       if (current <= 0)
@@ -201,36 +195,19 @@ public:
 
       auto send_start = std::chrono::steady_clock::now();
 
-      int sent = co_await socket->send(ctx, send_buf->data(), send_buf->size());
-      if (sent <= 0)
+      auto sent = co_await socket->send(ctx, send_buf->data(), send_buf->size());
+      if (!sent || *sent <= 0)
         break;
 
-      int received = co_await socket->recv(ctx, recv_buf->data(), send_buf->size(), MSG_WAITALL);
-      if (received <= 0)
+      auto received = co_await socket->recv(ctx, recv_buf->data(), send_buf->size(), MSG_WAITALL);
+      if (!received || *received <= 0)
         break;
 
-      // // 发送消息
-//      int sent = co_await socket->send(ctx, send_buf->data(), send_buf->size());
-//      if (sent <= 0)
-//        break;
-//
-//      // 接收回声
-//      int received = 0;
-//      int need_recv = send_buf->size();
-//      while (received < need_recv) {
-//        int n = co_await socket->recv(ctx,
-//                                      recv_buf->data() + received,
-//                                      recv_buf->size() - received);
-//        if (n <= 0)
-//          break;
-//        received += n;
-//      }
-
-      if (received == send_buf->size()) {
+      if (*received == (int)send_buf->size()) {
         auto latency = std::chrono::duration_cast<std::chrono::microseconds>(
           std::chrono::steady_clock::now() - send_start).count();
 
-        monitor->record_message(sent, received, latency);
+        monitor->record_message(*sent, *received, latency);
       }
     }
 

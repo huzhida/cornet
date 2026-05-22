@@ -4,6 +4,7 @@
 #include "defines.h"
 #include "config.h"
 #include "logging.h"
+#include "expected.h"
 
 #include <linux/time_types.h>
 template<typename Rep, typename Period>
