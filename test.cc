@@ -16,6 +16,7 @@
 
 #include "core/socket.h"
 #include "core/context.h"
+#include "core/combinators.h"
 
 using namespace cornet;
 

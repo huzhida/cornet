@@ -89,6 +89,18 @@ struct context_t {
   void wakeup();
 
   /**
+   * @brief submit a generic io_uring operation via a user-provided prep function.
+   * Enables any io_uring op without framework changes.
+   * Usage: auto result = co_await ctx.io([fd, buf, n](io_uring_sqe* sqe) {
+   *            io_uring_prep_read(sqe, fd, buf, n, 0);
+   *        });
+   * @param f callable that fills the io_uring_sqe
+   * @return generic_io_awaiter<F>
+   */
+  template<typename F>
+  auto io(F&& f);
+
+  /**
    * @brief set context scheduler type, new scheduler will take over schedule.
    * @param type new scheduler type.
    */
@@ -239,6 +251,27 @@ private:
   // context executor
   std::unique_ptr<executor_t> executor;
 };
+
+/**
+ * @brief generic io_uring awaiter that accepts any prep function.
+ * @tparam F callable type with signature void(io_uring_sqe*)
+ */
+template<typename F>
+struct generic_io_awaiter : utask_t {
+  F prep_;
+
+  generic_io_awaiter(context_t& ctx, F&& f) : prep_(std::forward<F>(f)) {
+    this->ctx = &ctx;
+    this->prepare_fn = [](utask_t* self, io_uring_sqe* sqe) {
+      static_cast<generic_io_awaiter*>(self)->prep_(sqe);
+    };
+  }
+};
+
+template<typename F>
+auto context_t::io(F&& f) {
+  return generic_io_awaiter<std::decay_t<F>>{*this, std::forward<F>(f)};
+}
 
 } // cornet
 
