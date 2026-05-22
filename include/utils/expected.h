@@ -54,34 +54,58 @@ struct unexpected {
 
 /**
  * @brief lightweight expected type for non-void values.
- * Zero-overhead: no exceptions, no heap allocation, trivially copyable for trivial T.
+ * Zero-overhead: no exceptions, no heap allocation.
+ * Uses union storage to avoid requiring default-constructible T.
  * @tparam T value type on success
  */
 template<typename T>
 class expected {
  public:
-  expected(T val) : val_(std::move(val)), err_{}, ok_(true) {}
+  expected(T val) : ok_(true) {
+    new (&storage_) T(std::move(val));
+  }
 
-  expected(unexpected e) : val_{}, err_(e.err), ok_(false) {}
+  expected(unexpected e) : err_(e.err), ok_(false) {}
+
+  ~expected() {
+    if (ok_) {
+      reinterpret_cast<T*>(&storage_)->~T();
+    }
+  }
+
+  expected(const expected& other) : err_(other.err_), ok_(other.ok_) {
+    if (ok_) {
+      new (&storage_) T(*reinterpret_cast<const T*>(&other.storage_));
+    }
+  }
+
+  expected(expected&& other) noexcept : err_(other.err_), ok_(other.ok_) {
+    if (ok_) {
+      new (&storage_) T(std::move(*reinterpret_cast<T*>(&other.storage_)));
+    }
+  }
+
+  expected& operator=(const expected&) = delete;
+  expected& operator=(expected&&) = delete;
 
   explicit operator bool() const { return ok_; }
 
   bool has_value() const { return ok_; }
 
-  T& value() { return val_; }
-  const T& value() const { return val_; }
+  T& value() { return *reinterpret_cast<T*>(&storage_); }
+  const T& value() const { return *reinterpret_cast<const T*>(&storage_); }
 
-  T& operator*() { return val_; }
-  const T& operator*() const { return val_; }
+  T& operator*() { return value(); }
+  const T& operator*() const { return value(); }
 
-  T* operator->() { return &val_; }
-  const T* operator->() const { return &val_; }
+  T* operator->() { return reinterpret_cast<T*>(&storage_); }
+  const T* operator->() const { return reinterpret_cast<const T*>(&storage_); }
 
   error_t error() const { return err_; }
 
  private:
-  T val_;
-  error_t err_;
+  alignas(T) unsigned char storage_[sizeof(T)];
+  error_t err_{};
   bool ok_;
 };
 

@@ -19,6 +19,7 @@ struct utask_t : task_t {
   using prepare_fn_t = void(*)(utask_t*, io_uring_sqe*);
 
   utask_t() = default;
+  ~utask_t();
   utask_t(const utask_t&) = delete;
   utask_t& operator=(const utask_t&) = delete;
   utask_t& operator=(utask_t&&) = delete;
@@ -49,8 +50,6 @@ struct utask_t : task_t {
     }
     return value;
   }
-    return value;
-  }
 
   /**
    * @brief completes the task by processing the CQE and storing the result.
@@ -79,6 +78,8 @@ struct utask_t : task_t {
   void* user_data{nullptr};
   // owner context
   context_t* ctx{nullptr};
+  // encoded slot data (index + generation) for safe lifetime tracking
+  uint64_t slot_data{0};
 };
 
 } // namespace cornet
