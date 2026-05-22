@@ -8,6 +8,7 @@
 #include "scheduler.h"
 #include "executor.h"
 #include "io_slot.h"
+#include "utils/metrics.h"
 
 namespace cornet {
 
@@ -120,6 +121,14 @@ struct context_t {
    */
   CORNET_NODISCARD inline io_slot_table_t& io_slots() {
     return slots;
+  }
+
+  /**
+   * @brief return context metrics for performance diagnostics.
+   * @return metrics reference
+   */
+  CORNET_NODISCARD inline context_metrics_t& metrics() {
+    return metrics_;
   }
 
   /**
@@ -238,6 +247,8 @@ private:
   uring_t uring;
   // context owned io slot table for safe user_data management
   io_slot_table_t slots;
+  // context performance metrics
+  context_metrics_t metrics_;
   // eventfd for cross-thread wakeup
   int wakeup_fd{-1};
   // context current state

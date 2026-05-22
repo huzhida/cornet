@@ -1,6 +1,7 @@
 #include "core/scheduler.h"
 #include "core/context.h"
 #include "core/atask.h"
+#include "utils/metrics.h"
 #include <fmt/ranges.h>
 
 namespace cornet {
@@ -48,10 +49,13 @@ time_slice_scheduler_t::time_slice_scheduler_t() {
   io_budget = config_t::to_nanoseconds(conf["io_budget"].value_or("1ms"));
 }
 void time_slice_scheduler_t::sched(context_t& ctx) {
+  scoped_timer_t timer(ctx.metrics().sched_latency);
+  ctx.metrics().sched_cycles++;
   auto start = std::chrono::steady_clock::now();
   auto& uring = ctx.io_uring();
   while (!ready_tasks.empty() && !cpu_timeout(start)) {
     resume_one_task();
+    ctx.metrics().tasks_resumed++;
   }
   uring.submit();
 
@@ -68,9 +72,12 @@ bool time_slice_scheduler_t::cpu_timeout(std::chrono::steady_clock::time_point& 
 
 CORNET_REGISTER_SCHEDULER(scheduler_type_t::RoundRobin, round_robin_scheduler_t);
 void round_robin_scheduler_t::sched(context_t& ctx) {
+  scoped_timer_t timer(ctx.metrics().sched_latency);
+  ctx.metrics().sched_cycles++;
   auto& uring = ctx.io_uring();
   while (!ready_tasks.empty()) {
     resume_one_task();
+    ctx.metrics().tasks_resumed++;
   }
   uring.submit();
 
@@ -89,10 +96,13 @@ batch_scheduler_t::batch_scheduler_t() {
   }
 }
 void batch_scheduler_t::sched(context_t& ctx) {
+  scoped_timer_t timer(ctx.metrics().sched_latency);
+  ctx.metrics().sched_cycles++;
   size_t processed = 0;
   auto& uring = ctx.io_uring();
   while (!ready_tasks.empty() && ++processed < batch_nr) {
     resume_one_task();
+    ctx.metrics().tasks_resumed++;
   }
   uring.submit();
 

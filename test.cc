@@ -248,6 +248,13 @@ public:
       server_thread.join();
     }
 
+    fprintf(stderr, "\n[Client Context Metrics]\n");
+    ctx.metrics().dump(stderr);
+    if (sctx) {
+      fprintf(stderr, "\n[Server Context Metrics]\n");
+      sctx->metrics().dump(stderr);
+    }
+
     monitor->stop();
     return monitor->get_result("Cornet");
   }

@@ -4,6 +4,7 @@
 #include <liburing.h>
 #include <queue>
 #include "utils/utils.h"
+#include "utils/metrics.h"
 
 namespace cornet {
 
@@ -61,14 +62,17 @@ class uring_t {
   template<typename Rep, typename Period>
   uint32_t wait_cqes(int (*process_fn)(context_t &, cqe_t), context_t &ctx, uint32_t wait_nr,
                      std::chrono::duration<Rep, Period> timeout, sigset_t *mask = nullptr) {
+    if (metrics_) metrics_->wait_calls++;
     cqe_t cqe;
     __kernel_timespec ts = to_kernel_timespec(timeout);
     int ret = io_uring_wait_cqes(uring.get(), &cqe, wait_nr, &ts, mask);
     if (ret == -ETIME) {
-      SPDLOG_DEBUG("Uring wait_and_process_cqes timeout.");
+      if (metrics_) metrics_->wait_timeouts++;
       return 0;
     }
-    return process_cqes(process_fn, ctx, cqe);
+    uint32_t n = process_cqes(process_fn, ctx, cqe);
+    if (metrics_) metrics_->wait_cqes_processed += n;
+    return n;
   }
 
   /**
@@ -139,8 +143,12 @@ class uring_t {
   size_t registered_buffer_nr{0};
   // registered file descriptors
   std::unique_ptr<int[]> registered_files{};
+  // metrics pointer (set by context after construction)
+  context_metrics_t* metrics_{nullptr};
 
   uint32_t process_cqes(int (*process_fn)(context_t&, cqe_t), context_t& ctx, cqe_t cqe);
+
+  friend struct context_t;
 };
 
 } // cornet

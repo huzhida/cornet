@@ -9,6 +9,7 @@ std::unordered_map<std::thread::id, context_t*> context_t::contexts;
 
 context_t::context_t()
 : uring(config_t::get()["cornet"]["context"]["uring"]["capacity"].value_or(32)) {
+  uring.metrics_ = &metrics_;
   if (auto scheduler_name = config_t::get()["cornet"]["context"]["scheduler"]["name"]) {
     scheduler_type = scheduler_t::to_scheduler_type(scheduler_name.as_string()->value_or(""));
   }
