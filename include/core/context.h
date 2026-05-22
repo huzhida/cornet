@@ -135,20 +135,23 @@ struct context_t {
    * @brief cancel io_uring async tasks.
    * @param user_data target to cancel (depends on flags)
    * @param flags IORING_ASYNC_CANCEL_* flags
-   * @return canceled task count or error code
+   * @return expected<int, errc>: canceled task count on success, error on failure
    */
-  inline coro_t<int> cancel_io_tasks(void* user_data = nullptr, int flags = IORING_ASYNC_CANCEL_ANY) {
+  inline coro_t<expected<int>> cancel_io_tasks(void* user_data = nullptr, int flags = IORING_ASYNC_CANCEL_ANY) {
     int canceled_nr = 0;
     while(!uring.idle()) {
       auto ret = co_await cancel_awaiter{*this, user_data, flags};
-      if (ret > 0) {
-        canceled_nr += ret;
-      }else if(ret == -ENOENT || ret == 0) {
+      if (!ret) {
+        if (ret.error().code == ENOENT) {
           co_return canceled_nr;
-      } else {
-        SPDLOG_ERROR("cancel tasks encountered error: {}", strerror(-ret));
-        co_return ret;
+        }
+        co_return unexpected(ret.error());
       }
+      int val = *ret;
+      if (val == 0) {
+        co_return canceled_nr;
+      }
+      canceled_nr += val;
     }
     co_return canceled_nr;
   }

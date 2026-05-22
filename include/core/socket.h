@@ -150,9 +150,9 @@ class socket_t {
    * @brief bind address:port to socket
    * @param address ip address
    * @param port port
-   * @return bind ok?
+   * @return expected<void, errc>
    */
-  bool bind(const std::string& address, const std::string& port) const;
+  expected<void> bind(const std::string& address, const std::string& port) const;
  protected:
   explicit socket_t(int fd);
 
@@ -171,9 +171,9 @@ class socket_t : public cornet::socket_t {
    * @brief listen on address:port, or listen on unix path if is local socket
    * @param address address
    * @param port port, local socket will ignore this argument.
-   * @return listen ok?
+   * @return expected<void, errc>
    */
-  CORNET_NODISCARD bool listen(const std::string& address, const std::string& port) const;
+  CORNET_NODISCARD expected<void> listen(const std::string& address, const std::string& port) const;
   /**
    * @brief accept new socket from client
    * @param ctx owner context
@@ -183,7 +183,7 @@ class socket_t : public cornet::socket_t {
    * @return co_await -> value (system call return)
    */
   accept_awaiter accept(context_t& ctx, sockaddr* addr, socklen_t* socklen, int flag = 0) const;
-  coro_t<socket_t> accept(context_t& ctx, int flag = 0) const;
+  coro_t<expected<socket_t>> accept(context_t& ctx, int flag = 0) const;
 };
 } // cornet::net::tcp
 
@@ -200,9 +200,9 @@ class socket_t : public cornet::socket_t {
    * @param addr address to send
    * @param socklen address length
    * @param flag sendto flag
-   * @return coroutine return int
+   * @return coroutine return expected<int>
    */
-  coro_t<int> sendto(context_t& ctx, void* buf, size_t nbtyes, sockaddr* addr, socklen_t socklen, int flag = 0) const;
+  coro_t<expected<int>> sendto(context_t& ctx, void* buf, size_t nbtyes, sockaddr* addr, socklen_t socklen, int flag = 0) const;
   /**
    * @brief recvfrom wrapper
    * @param ctx context reference
@@ -211,9 +211,9 @@ class socket_t : public cornet::socket_t {
    * @param addr address to recv
    * @param socklen address length
    * @param flag recvfrom flag
-   * @return coroutine return int
+   * @return coroutine return expected<int>
    */
-  coro_t<int> recvfrom(context_t& ctx, void* buf, size_t nbytes, sockaddr* addr, socklen_t* socklen, int flag = 0) const;
+  coro_t<expected<int>> recvfrom(context_t& ctx, void* buf, size_t nbytes, sockaddr* addr, socklen_t* socklen, int flag = 0) const;
   /**
    * @brief sendmsg wrapper
    * @param ctx context reference
@@ -241,10 +241,10 @@ namespace cornet::tcp::local {
   socket_t();
   explicit socket_t(int fd);
 
-  CORNET_NODISCARD inline bool bind(const std::string& address) {
+  CORNET_NODISCARD inline expected<void> bind(const std::string& address) {
     return cornet::tcp::socket_t::bind(address, "");
   }
-  CORNET_NODISCARD inline bool listen(const std::string& address) const {
+  CORNET_NODISCARD inline expected<void> listen(const std::string& address) const {
     return cornet::tcp::socket_t::listen(address, "");
   }
   CORNET_NODISCARD inline connect_awaiter connect(context_t& ctx, const std::string& address) const {
@@ -263,7 +263,7 @@ class socket_t : public cornet::udp::socket_t {
   socket_t();
   explicit socket_t(int fd);
 
-  CORNET_NODISCARD inline bool bind(const std::string& address) {
+  CORNET_NODISCARD inline expected<void> bind(const std::string& address) {
     return cornet::udp::socket_t::bind(address, "");
   }
   CORNET_NODISCARD inline connect_awaiter connect(context_t& ctx, const std::string& address) const {

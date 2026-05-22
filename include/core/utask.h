@@ -41,9 +41,14 @@ struct utask_t : task_t {
 
   /**
    * @brief called by the compiler when the coroutine resumes.
-   * @return the result of the io_uring operation (e.g., bytes read or error code).
+   * @return expected<int>: value on success, error on failure.
    */
-  CORNET_NODISCARD CORNET_MAYBE_UNUSED inline int await_resume() const {
+  CORNET_NODISCARD CORNET_MAYBE_UNUSED inline expected<int> await_resume() const {
+    if (value < 0) {
+      return unexpected(-value);
+    }
+    return value;
+  }
     return value;
   }
 
