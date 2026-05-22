@@ -16,7 +16,6 @@
 
 #include "core/socket.h"
 #include "core/context.h"
-#include "core/tools.h"
 
 using namespace cornet;
 
@@ -138,21 +137,12 @@ public:
     auto buffer = std::make_shared<std::vector<char> >(4096);
     while (server_running) {
 
-       chain_builder builder(ctx);
-       auto ra = socket.recv(ctx, buffer->data(), config.message_size);
-       auto wa = socket.send(ctx, buffer->data(), config.message_size);
-       co_await builder.with_link(ra).chain(wa);
-
-       if (ra.value <= 0 || wa.value <= 0) {
-         break;
-       }
-
-//      auto n = co_await socket.recv(ctx, buffer->data(), buffer->size());
-//      if (n <= 0)
-//        break;
-//      auto send_n = co_await socket.send(ctx, buffer->data(), n);
-//      if (send_n <= 0)
-//        break;
+      auto n = co_await socket.recv(ctx, buffer->data(), config.message_size);
+      if (n <= 0)
+        break;
+      auto send_n = co_await socket.send(ctx, buffer->data(), n);
+      if (send_n <= 0)
+        break;
     }
 
     active_connections--;
@@ -211,15 +201,13 @@ public:
 
       auto send_start = std::chrono::steady_clock::now();
 
-       auto builder = chain_builder(ctx);
-       auto s = socket->send(ctx, send_buf->data(), send_buf->size(), MSG_WAITALL);
-       auto r =socket->recv(ctx, recv_buf->data(), send_buf->size(), MSG_WAITALL);
-       co_await builder.with_link(s).chain(r);
-       auto sent = s.value;
-       auto received = r.value;
-       if (sent <= 0 || received <= 0) {
-         break;
-       }
+      int sent = co_await socket->send(ctx, send_buf->data(), send_buf->size());
+      if (sent <= 0)
+        break;
+
+      int received = co_await socket->recv(ctx, recv_buf->data(), send_buf->size(), MSG_WAITALL);
+      if (received <= 0)
+        break;
 
       // // 发送消息
 //      int sent = co_await socket->send(ctx, send_buf->data(), send_buf->size());

@@ -6,6 +6,7 @@
 #include <variant>
 #include <exception>
 #include <iterator>
+#include <type_traits>
 #include "task.h"
 #include "utils/utils.h"
 
@@ -167,10 +168,16 @@ struct coro_t : task_t {
       }
 
       CORNET_MAYBE_UNUSED V await_resume() {
-        if (handle.promise().value.index() == 2) {
-          std::rethrow_exception(std::get<2>(handle.promise().value));
+        if constexpr (std::is_void_v<V>) {
+          if (handle.promise().value.index() == 1) {
+            std::rethrow_exception(std::get<1>(handle.promise().value));
+          }
+        } else {
+          if (handle.promise().value.index() == 2) {
+            std::rethrow_exception(std::get<2>(handle.promise().value));
+          }
+          return std::get<1>(std::move(handle.promise().value));
         }
-        return std::get<1>(std::move(handle.promise().value));
       }
     };
     return coro_awaiter{native_handle()};
@@ -207,11 +214,17 @@ struct coro_t : task_t {
   }
 
   V value() {
-    auto& value = native_handle().promise().value;
-    if (value.index() == 2) {
-      std::rethrow_exception(std::get<2>(value));
+    auto& val = native_handle().promise().value;
+    if constexpr (std::is_void_v<V>) {
+      if (val.index() == 1) {
+        std::rethrow_exception(std::get<1>(val));
+      }
+    } else {
+      if (val.index() == 2) {
+        std::rethrow_exception(std::get<2>(val));
+      }
+      return std::get<1>(std::move(val));
     }
-    return std::get<1>(std::move(value));
   }
 };
 

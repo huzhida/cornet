@@ -29,7 +29,7 @@ class executor_t {
   queue_t completed_tasks;
   std::vector<std::thread> workers;
   const size_t max_task_nr;
-  size_t running_task_nr{0};
+  std::atomic<size_t> running_task_nr{0};
 };
 
 }

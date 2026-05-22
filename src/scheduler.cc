@@ -15,7 +15,7 @@ std::unique_ptr<scheduler_t> scheduler_t::scheduler(scheduler_type_t scheduler_t
     for (const auto& kv : registry) {
       registered_schedulers.emplace_back(kv.second.first);
     }
-    SPDLOG_ERROR("scheduler '{}' not exist, available scheduler: [{}]",
+    CORNET_FATAL("scheduler '{}' not exist, available scheduler: [{}]",
                  cornet::scheduler_name(scheduler_type),
                  fmt::join(registered_schedulers.begin(), registered_schedulers.end(), ","));
   }

@@ -12,7 +12,7 @@ inline __kernel_timespec to_kernel_timespec(std::chrono::duration<Rep, Period> t
   auto nano_secs= std::chrono::duration_cast<std::chrono::nanoseconds>(t).count();
   __kernel_timespec ts{};
   ts.tv_sec = secs;
-  ts.tv_nsec = nano_secs;
+  ts.tv_nsec = nano_secs - secs * 1'000'000'000;
   return ts;
 }
 

@@ -170,6 +170,7 @@ struct context_t {
         co_return ret;
       }
     }
+    co_return canceled_nr;
   }
 
   /**
