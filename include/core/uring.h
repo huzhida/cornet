@@ -194,7 +194,7 @@ struct sqe_t {
   template<typename Rep, typename Period>
   CORNET_MAYBE_UNUSED inline sqe_t& prep_timeout(std::chrono::duration<Rep,Period> timeout, int count, int flags) {
     if(!sqe) return *this;
-    __kernel_timespec ts = to_kernel_timespec(timeout);
+    ts = to_kernel_timespec(timeout);
     io_uring_prep_timeout(sqe, &ts, count, flags);
     return *this;
   }
@@ -210,7 +210,7 @@ struct sqe_t {
   template<typename Rep, typename Period>
   CORNET_MAYBE_UNUSED inline sqe_t& prep_link_timeout(std::chrono::duration<Rep,Period> timeout, int flags) {
     if(!sqe) return *this;
-    __kernel_timespec ts = to_kernel_timespec(timeout);
+    ts = to_kernel_timespec(timeout);
     io_uring_prep_link_timeout(sqe, &ts, flags);
     return *this;
   }
@@ -226,6 +226,7 @@ struct sqe_t {
   }
 
   io_uring_sqe* sqe;
+  __kernel_timespec ts{};
 };
 
 struct context_t;

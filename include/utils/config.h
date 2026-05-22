@@ -14,12 +14,12 @@ struct config_t {
   }
 
   template<typename T>
-  T& get(std::string_view key, T default_value) {
+  T get(std::string_view key, T default_value) {
     return root.get_as<T>(key).value_or(default_value);
   }
 
   template<typename T>
-  T& get(std::string_view key) {
+  auto get(std::string_view key) {
     return root.get_as<T>(key);
   }
 

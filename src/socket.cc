@@ -51,6 +51,9 @@ socket_t::socket_t(socket_t&& s) noexcept {
 }
 socket_t& socket_t::operator=(socket_t&& s) noexcept {
   if (this != &s) {
+    if (this->fd != -1) {
+      ::close(this->fd);
+    }
     this->fd = s.fd;
     s.fd = -1;
   }

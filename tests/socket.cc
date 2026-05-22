@@ -108,7 +108,7 @@ TEST_F(socket, tcpv4_send_recv) {
     auto client = co_await sock.accept(ctx);
     char buffer[16] = {};
     for (int i = 0; i < 8; ++i) {
-      auto received = co_await client.recv(ctx, buffer, 128);
+      auto received = co_await client.recv(ctx, buffer, sizeof(buffer));
       EXPECT_EQ(received, strlen("hello world."));
       EXPECT_STREQ(buffer, "hello world.");
       auto sent = co_await client.send(ctx, buffer, strlen(buffer));
@@ -139,7 +139,7 @@ TEST_F(socket, tcpv6_send_recv) {
     auto client = co_await sock.accept(ctx);
     char buffer[16] = {};
     for (int i = 0; i < 8; ++i) {
-      auto received = co_await client.recv(ctx, buffer, 128);
+      auto received = co_await client.recv(ctx, buffer, sizeof(buffer));
       EXPECT_EQ(received, strlen("hello world."));
       EXPECT_STREQ(buffer, "hello world.");
       auto sent = co_await client.send(ctx, buffer, strlen(buffer));
@@ -171,7 +171,7 @@ TEST_F(socket, tcp_local_send_recv) {
     auto client = co_await sock.accept(ctx);
     char buffer[16] = {};
     for (int i = 0; i < 8; ++i) {
-      auto received = co_await client.recv(ctx, buffer, 128);
+      auto received = co_await client.recv(ctx, buffer, sizeof(buffer));
       EXPECT_EQ(received, strlen("hello world."));
       EXPECT_STREQ(buffer, "hello world.");
       auto sent = co_await client.send(ctx, buffer, strlen(buffer));
