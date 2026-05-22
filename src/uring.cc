@@ -99,18 +99,19 @@ uint32_t uring_t::wait_cqes(int (*process_fn)(context_t &, cqe_t), context_t &ct
 }
 
 uint32_t uring_t::peek_cqes(int(* process_fn)(context_t&, cqe_t), context_t& ctx, uint32_t peek_nr) {
-  std::vector<cqe_t> cqes(peek_nr);
-  uint32_t ret = io_uring_peek_batch_cqe(uring.get(), cqes.data(), peek_nr);
-  if (ret == 0) {
+  cqe_t cqe;
+  uint32_t count = 0, head;
+  io_uring_for_each_cqe(uring.get(), head, cqe) {
+    process_fn(ctx, cqe);
+    if (++count >= peek_nr) break;
+  }
+  if (count == 0) {
     SPDLOG_DEBUG("Uring peek batch cqe return empty");
     return 0;
   }
-  for (unsigned i = 0; i < ret; i++) {
-    process_fn(ctx, cqes[i]);
-  }
-  io_uring_cq_advance(uring.get(), ret);
-  task_nr -= ret;
-  return ret;
+  io_uring_cq_advance(uring.get(), count);
+  task_nr -= count;
+  return count;
 }
 
 CORNET_MAYBE_UNUSED bool uring_t::register_buffers(iovec* buffers, size_t buffer_nr) {
