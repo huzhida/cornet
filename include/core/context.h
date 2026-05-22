@@ -7,6 +7,7 @@
 #include "coro.h"
 #include "scheduler.h"
 #include "executor.h"
+#include "io_slot.h"
 
 namespace cornet {
 
@@ -92,6 +93,14 @@ struct context_t {
    */
   CORNET_NODISCARD inline uring_t& io_uring() {
     return uring;
+  }
+
+  /**
+   * @brief return context_t owned io slot table.
+   * @return io slot table reference
+   */
+  CORNET_NODISCARD inline io_slot_table_t& io_slots() {
+    return slots;
   }
 
   /**
@@ -208,6 +217,8 @@ private:
 
   // context owned io_uring wrapper
   uring_t uring;
+  // context owned io slot table for safe user_data management
+  io_slot_table_t slots;
   // context current state
   std::atomic<state_t> state;
   // context current scheduler type
