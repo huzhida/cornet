@@ -67,7 +67,7 @@ void utask_t::complete(context_t& ctx, cqe_t cqe) {
   }
 
   if (handle) {
-    ctx.sched(this);
+    ctx.spawn(this);
   }
 }
 

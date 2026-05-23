@@ -137,10 +137,10 @@ public:
     auto buffer = std::make_shared<std::vector<char> >(4096);
     while (server_running) {
 
-      auto n = co_await socket.recv(ctx, buffer->data(), config.message_size);
+      auto n = co_await socket.recv(buffer->data(), config.message_size);
       if (!n || *n <= 0)
         break;
-      auto send_n = co_await socket.send(ctx, buffer->data(), *n);
+      auto send_n = co_await socket.send(buffer->data(), *n);
       if (!send_n || *send_n <= 0)
         break;
     }
@@ -152,7 +152,7 @@ public:
   // 服务器主协程
   coro_t<void> server_main(context_t& ctx, const BenchmarkConfig& config) {
     auto listener = tcp::v4::socket_t();
-    if (!listener.listen("127.0.0.1", "12345")) {
+    if (!listener.listen("127.0.0.1", 12345)) {
       std::cerr << "服务器监听失败\n";
       co_return;
     }
@@ -160,7 +160,7 @@ public:
     while (server_running) {
       sockaddr_storage addr{};
       socklen_t len{};
-      auto client_fd = co_await listener.accept(ctx, (sockaddr*)&addr, &len);
+      auto client_fd = co_await listener.accept( (sockaddr*)&addr, &len);
       if (!client_fd) {
         if (client_fd.error().code == ECANCELED) {
           SPDLOG_INFO("server accept canceled");
@@ -170,7 +170,7 @@ public:
         break;
       }
 
-      ctx.sched(server_session(ctx, config, *client_fd));
+      ctx.spawn(server_session(ctx, config, *client_fd));
     }
 
     co_return;
@@ -181,7 +181,7 @@ public:
                               std::shared_ptr<std::atomic<int> > remaining_msgs) {
     auto socket = std::make_shared<tcp::v4::socket_t>();
 
-    auto conn = co_await socket->connect(ctx, "127.0.0.1", "12345");
+    auto conn = co_await socket->connect("127.0.0.1", 12345);
     if (!conn) {
       co_return;
     }
@@ -196,11 +196,11 @@ public:
 
       auto send_start = std::chrono::steady_clock::now();
 
-      auto sent = co_await socket->send(ctx, send_buf->data(), send_buf->size());
+      auto sent = co_await socket->send(send_buf->data(), send_buf->size());
       if (!sent || *sent <= 0)
         break;
 
-      auto received = co_await socket->recv(ctx, recv_buf->data(), send_buf->size(), MSG_WAITALL);
+      auto received = co_await socket->recv(recv_buf->data(), send_buf->size(), MSG_WAITALL);
       if (!received || *received <= 0)
         break;
 
@@ -221,21 +221,21 @@ public:
 
     // 启动服务器
     std::thread server_thread([this, &config] {
-      auto& ctx = context_t::context();
+      auto& ctx = context_t::current();
       ctx.set_scheduler_type(type);
       auto server = server_main(ctx, config);
-      ctx.sched(server);
+      ctx.spawn(server);
       ctx.run();
     });
 
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    auto& ctx = context_t::context();
+    auto& ctx = context_t::current();
     ctx.set_scheduler_type(type);
     auto remaining_msgs = std::make_shared<std::atomic<int> >(config.total_messages);
     std::vector<coro_t<void> > clients;
     for (int i = 0; i < config.num_connections; i++) {
       clients.push_back(std::move(client_session(ctx, i, config, remaining_msgs)));
-      ctx.sched(clients.back());
+      ctx.spawn(clients.back());
     }
     ctx.run();
 
