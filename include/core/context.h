@@ -4,6 +4,7 @@
 #include "uring.h"
 #include "task.h"
 #include "utask.h"
+#include "atask.h"
 #include "coro.h"
 #include "scheduler.h"
 #include "executor.h"
@@ -38,12 +39,12 @@ struct context_t {
   context_t& operator=(context_t&& ctx) = delete;
 
   /**
-   * @brief push task-like to ready queue, will maintain r-value
-   * @tparam T task-like type
+   * @brief spawn a coroutine into the scheduler's ready queue.
+   * @tparam T task-like type (coro_t, task_t*, coroutine_handle)
    * @param task task-like object
    */
   template <typename T>
-  CORNET_MAYBE_UNUSED inline void sched(T&& task) {
+  CORNET_MAYBE_UNUSED inline void spawn(T&& task) {
     using R = std::decay_t<T>;
     if constexpr (std::is_pointer_v<R>) {
       static_assert(std::is_base_of_v<task_t, std::remove_pointer_t<R> >,
@@ -61,15 +62,15 @@ struct context_t {
     }
   }
 
-  CORNET_MAYBE_UNUSED inline void sched_async(atask_t* task) {
-    if (!executor) {
-      executor = std::make_unique<executor_t>(
-          config_t::get()["cornet"]["context"]["executor"]["thread_nr"].value_or(1),
-          config_t::get()["cornet"]["context"]["executor"]["max_task_nr"].value_or(16384)
-      );
-    }
-    executor->add(task);
-  }
+  /**
+   * @brief execute a callable on the thread pool and co_await the result.
+   * Usage: auto result = co_await ctx.async([] { return heavy_work(); });
+   * @tparam F callable type
+   * @param f callable to execute on worker thread
+   * @return async_awaiter that yields the callable's return value
+   */
+  template<typename F>
+  auto async(F&& f);
 
   /**
    * @brief context start to resume task and wait io, run until tasks all complete or stop() called.
@@ -206,7 +207,11 @@ struct context_t {
    * @brief return current thread owned context
    * @return thread owned context reference
    */
-  static inline context_t& context() {
+  /**
+   * @brief return current thread's context (thread-local singleton)
+   * @return thread-local context reference
+   */
+  static inline context_t& current() {
     static thread_local context_t ctx;
     return ctx;
   }
@@ -242,6 +247,18 @@ struct context_t {
 
 private:
   context_t();
+
+  void ensure_executor() {
+    if (!executor) {
+      executor = std::make_unique<executor_t>(
+          config_t::get()["cornet"]["context"]["executor"]["thread_nr"].value_or(1),
+          config_t::get()["cornet"]["context"]["executor"]["max_task_nr"].value_or(16384)
+      );
+    }
+  }
+
+  template<typename F, typename R>
+  friend struct async_awaiter;
 
   // context owned io_uring wrapper
   uring_t uring;
@@ -282,6 +299,41 @@ struct generic_io_awaiter : utask_t {
 template<typename F>
 auto context_t::io(F&& f) {
   return generic_io_awaiter<std::decay_t<F>>{*this, std::forward<F>(f)};
+}
+
+/**
+ * @brief awaiter for executing a callable on the thread pool.
+ * On await_suspend, submits work to executor. On completion, the scheduler
+ * picks it up and resumes the coroutine with the result.
+ * @tparam F callable type
+ * @tparam R return type
+ */
+template<typename F, typename R = std::invoke_result_t<F>>
+struct async_awaiter {
+  context_t& ctx_;
+  typed_atask_t<F, R> task_;
+
+  explicit async_awaiter(context_t& ctx, F&& f)
+    : ctx_(ctx), task_(std::forward<F>(f)) {}
+
+  bool await_ready() { return false; }
+
+  void await_suspend(std::coroutine_handle<> h) {
+    task_.handle = h;
+    ctx_.ensure_executor();
+    ctx_.executor->add(&task_);
+  }
+
+  R await_resume() {
+    if constexpr (!std::is_void_v<R>) {
+      return std::move(task_.result_);
+    }
+  }
+};
+
+template<typename F>
+auto context_t::async(F&& f) {
+  return async_awaiter<std::decay_t<F>>{*this, std::forward<F>(f)};
 }
 
 } // cornet

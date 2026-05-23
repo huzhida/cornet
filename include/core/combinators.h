@@ -10,14 +10,14 @@ namespace cornet {
 
 /**
  * @brief sleep awaiter. Suspends the coroutine for the given duration using io_uring timeout.
- * Usage: co_await sleep(ctx, std::chrono::seconds(1));
+ * Usage: co_await sleep(std::chrono::seconds(1));
  */
 struct sleep_awaiter : utask_t {
   __kernel_timespec ts_;
 
   template<typename Rep, typename Period>
-  sleep_awaiter(context_t& ctx, std::chrono::duration<Rep, Period> duration) {
-    this->ctx = &ctx;
+  explicit sleep_awaiter(std::chrono::duration<Rep, Period> duration) {
+    this->ctx = &context_t::current();
     ts_ = to_kernel_timespec(duration);
     this->prepare_fn = [](utask_t* self, io_uring_sqe* sqe) {
       auto* t = static_cast<sleep_awaiter*>(self);
@@ -25,26 +25,25 @@ struct sleep_awaiter : utask_t {
     };
   }
 
-  CORNET_NODISCARD CORNET_MAYBE_UNUSED expected<int> await_resume() const {
+  CORNET_NODISCARD CORNET_MAYBE_UNUSED expected<void> await_resume() const {
     if (value == -ETIME) {
-      return 0;
+      return {};
     }
     if (value < 0) {
       return unexpected(-value);
     }
-    return 0;
+    return {};
   }
 };
 
 /**
  * @brief create a sleep awaiter
- * @param ctx owner context
  * @param duration how long to sleep
  * @return awaitable that completes after the duration
  */
 template<typename Rep, typename Period>
-sleep_awaiter sleep(context_t& ctx, std::chrono::duration<Rep, Period> duration) {
-  return sleep_awaiter{ctx, duration};
+sleep_awaiter sleep(std::chrono::duration<Rep, Period> duration) {
+  return sleep_awaiter{duration};
 }
 
 /**
@@ -53,7 +52,7 @@ sleep_awaiter sleep(context_t& ctx, std::chrono::duration<Rep, Period> duration)
  * If the operation completes before the timeout, returns its result.
  * If the timeout fires first, the operation is cancelled and returns ETIMEDOUT.
  *
- * Usage: auto result = co_await with_timeout(sock.recv(ctx, buf, n), ctx, 5s);
+ * Usage: auto result = co_await with_timeout(sock.recv(buf, n), 5s);
  */
 template<typename Awaitable, typename Rep, typename Period>
 struct timeout_awaiter {
@@ -62,8 +61,8 @@ struct timeout_awaiter {
   __kernel_timespec ts_;
   uint64_t timeout_slot_{0};
 
-  timeout_awaiter(Awaitable op, context_t& ctx, std::chrono::duration<Rep, Period> duration)
-    : op_(std::move(op)), ctx_(&ctx), ts_(to_kernel_timespec(duration)) {}
+  timeout_awaiter(Awaitable op, std::chrono::duration<Rep, Period> duration)
+    : op_(std::move(op)), ctx_(&context_t::current()), ts_(to_kernel_timespec(duration)) {}
 
   bool await_ready() { return op_.await_ready(); }
 
@@ -97,13 +96,12 @@ struct timeout_awaiter {
 /**
  * @brief create a timeout-wrapped awaitable
  * @param op the io operation awaiter (recv_awaiter, send_awaiter, etc.)
- * @param ctx owner context
  * @param duration timeout duration
  * @return awaitable that returns ETIMEDOUT on timeout
  */
 template<typename Awaitable, typename Rep, typename Period>
-timeout_awaiter<Awaitable, Rep, Period> with_timeout(Awaitable op, context_t& ctx, std::chrono::duration<Rep, Period> duration) {
-  return {std::move(op), ctx, duration};
+timeout_awaiter<Awaitable, Rep, Period> with_timeout(Awaitable op, std::chrono::duration<Rep, Period> duration) {
+  return {std::move(op), duration};
 }
 
 namespace detail {
@@ -141,7 +139,7 @@ coro_t<void> when_all_task(std::shared_ptr<State> state, coro_t<T> coro, context
   }
   if (state->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
     if (state->continuation) {
-      ctx.sched(state->continuation);
+      ctx.spawn(state->continuation);
     }
   }
   co_return;
@@ -160,7 +158,7 @@ coro_t<void> when_any_task(std::shared_ptr<State> state, coro_t<T> coro, context
   if (state->done.compare_exchange_strong(expected_val, true, std::memory_order_acq_rel)) {
     state->completed_index.store(I, std::memory_order_release);
     if (state->continuation) {
-      ctx.sched(state->continuation);
+      ctx.spawn(state->continuation);
     }
   }
   co_return;
@@ -168,7 +166,7 @@ coro_t<void> when_any_task(std::shared_ptr<State> state, coro_t<T> coro, context
 
 template<typename State, typename Tuple, size_t... Is>
 void launch_all_impl(std::shared_ptr<State>& state, Tuple& coros, context_t& ctx, std::index_sequence<Is...>) {
-  (ctx.sched(when_all_task<Is>(state, std::move(std::get<Is>(coros)), ctx)), ...);
+  (ctx.spawn(when_all_task<Is>(state, std::move(std::get<Is>(coros)), ctx)), ...);
 }
 
 template<typename State, typename Tuple, size_t... Is>
@@ -178,7 +176,7 @@ void launch_all(std::shared_ptr<State>& state, Tuple& coros, context_t& ctx, std
 
 template<typename State, typename Tuple, size_t... Is>
 void launch_any_impl(std::shared_ptr<State>& state, Tuple& coros, context_t& ctx, std::index_sequence<Is...>) {
-  (ctx.sched(when_any_task<Is>(state, std::move(std::get<Is>(coros)), ctx)), ...);
+  (ctx.spawn(when_any_task<Is>(state, std::move(std::get<Is>(coros)), ctx)), ...);
 }
 
 template<typename State, typename Tuple, size_t... Is>
@@ -219,11 +217,11 @@ struct when_any_result {
 
 /**
  * @brief await all coroutines concurrently, resume when all complete.
- * Usage: auto result = co_await when_all(ctx, coro1(), coro2());
+ * Usage: auto result = co_await when_all(coro1(), coro2());
  * @return when_all_result containing all results
  */
 template<typename... Ts>
-auto when_all(context_t& ctx, coro_t<Ts>... coros) {
+auto when_all(coro_t<Ts>... coros) {
   struct awaiter {
     context_t& ctx_;
     std::shared_ptr<detail::when_all_state<Ts...>> state_;
@@ -241,16 +239,17 @@ auto when_all(context_t& ctx, coro_t<Ts>... coros) {
     }
   };
 
+  auto& ctx = context_t::current();
   return awaiter{ctx, std::make_shared<detail::when_all_state<Ts...>>(), std::tuple{std::move(coros)...}};
 }
 
 /**
  * @brief await any coroutine concurrently, resume when the first one completes.
- * Usage: auto result = co_await when_any(ctx, coro1(), coro2());
+ * Usage: auto result = co_await when_any(coro1(), coro2());
  * @return when_any_result containing all results (only the completed one is valid)
  */
 template<typename... Ts>
-auto when_any(context_t& ctx, coro_t<Ts>... coros) {
+auto when_any(coro_t<Ts>... coros) {
   struct awaiter {
     context_t& ctx_;
     std::shared_ptr<detail::when_any_state<Ts...>> state_;
@@ -268,6 +267,7 @@ auto when_any(context_t& ctx, coro_t<Ts>... coros) {
     }
   };
 
+  auto& ctx = context_t::current();
   return awaiter{ctx, std::make_shared<detail::when_any_state<Ts...>>(), std::tuple{std::move(coros)...}};
 }
 

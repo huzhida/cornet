@@ -46,7 +46,7 @@ void context_t::run() {
   while ((current_state = state.load(std::memory_order_acquire)) != state_t::Terminated) {
 
     if (current_state == state_t::Canceling) {
-      sched(cancel_io_tasks());
+      spawn(cancel_io_tasks());
       switch_to(state_t::Terminating);
     }
 
