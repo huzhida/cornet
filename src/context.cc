@@ -54,8 +54,6 @@ void context_t::run() {
 
     if (current_state == state_t::Canceling) {
       spawn(cancel_pending_io());
-      switch_to(state_t::Terminated);
-      break;
     }
 
     scheduler->sched(*this);
