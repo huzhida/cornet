@@ -198,7 +198,7 @@ private:
   void adapt(size_t resumed, uint32_t cqes_ready, size_t inflight);
 
   // dynamic parameters
-  size_t cpu_batch_{8};
+  size_t cpu_batch_{64};
   std::chrono::nanoseconds io_wait_{std::chrono::milliseconds(1)};
 
   // feedback signals (exponential moving average)

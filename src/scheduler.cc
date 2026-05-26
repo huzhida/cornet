@@ -138,24 +138,24 @@ void adaptive_scheduler_t::sched(context_t& ctx) {
 void adaptive_scheduler_t::adapt(size_t resumed, uint32_t cqes_ready, size_t inflight) {
   // update I/O saturation (exponential moving average)
   double sat = inflight > 0 ? double(cqes_ready) / double(inflight) : 0.0;
-  io_saturation_ = io_saturation_ * 0.8 + sat * 0.2;
+  io_saturation_ = io_saturation_ * 0.9 + sat * 0.1;
 
   // adjust cpu_batch based on I/O saturation
-  if (io_saturation_ > 0.7) {
-    // I/O completions piling up, reduce CPU time to process them faster
-    cpu_batch_ = std::max(size_t(1), cpu_batch_ / 2);
-  } else if (io_saturation_ < 0.2 && resumed >= cpu_batch_) {
+  if (io_saturation_ > 0.5 && cpu_batch_ > 8) {
+    // I/O completions piling up, reduce CPU batch to process them faster
+    cpu_batch_ = std::max(size_t(8), cpu_batch_ * 3 / 4);
+  } else if (io_saturation_ < 0.1 && resumed >= cpu_batch_) {
     // I/O idle and CPU saturated, allow more CPU work per cycle
-    cpu_batch_ = std::min(size_t(256), cpu_batch_ * 2);
+    cpu_batch_ = std::min(size_t(1024), cpu_batch_ + cpu_batch_ / 4 + 1);
   }
 
   // adjust wait timeout based on load
   if (resumed == 0 && cqes_ready == 0) {
     // nothing happening, increase wait to save CPU
     io_wait_ = std::min(std::chrono::nanoseconds(10000000), io_wait_ * 2);
-  } else {
+  } else if (cqes_ready > 0 || resumed > 0) {
     // active workload, keep wait tight
-    io_wait_ = std::max(std::chrono::nanoseconds(100000), io_wait_ / 2);
+    io_wait_ = std::max(std::chrono::nanoseconds(50000), io_wait_ * 3 / 4);
   }
 }
 
