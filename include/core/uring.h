@@ -101,11 +101,11 @@ class uring_t {
   inline io_uring* raw() { return uring.get(); }
 
   /**
-   * @brief check if there are no pending tasks
-   * @return true if task count is zero
+   * @brief check if there are no pending tasks (excluding persistent watchers)
+   * @return true if task count equals persistent count (only watchers remain)
    */
   inline bool idle() const {
-    return task_nr == 0;
+    return task_nr <= persistent_task_nr;
   }
 
   /**
@@ -115,6 +115,16 @@ class uring_t {
   inline size_t running_task_nr() const {
     return task_nr;
   }
+
+  /**
+   * @brief increment persistent task count (for long-lived watchers like signalfd)
+   */
+  inline void add_persistent() { persistent_task_nr++; }
+
+  /**
+   * @brief decrement persistent task count
+   */
+  inline void remove_persistent() { persistent_task_nr--; }
 
   /**
    * @brief register fixed buffers for performance optimization
@@ -135,6 +145,8 @@ class uring_t {
  private:
   // submitted task count
   uint32_t task_nr{0};
+  // persistent watcher task count (not considered for idle)
+  uint32_t persistent_task_nr{0};
   // io_uring handle
   std::unique_ptr<io_uring> uring;
   // registered buffers

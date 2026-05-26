@@ -4,6 +4,7 @@
     "tomlplusplus",
     "asio",
     "gtest",
-    "concurrentqueue"
+    "concurrentqueue",
+    "libuv"
   ]
 }

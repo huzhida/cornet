@@ -14,8 +14,6 @@ else()
     add_link_options(-fsanitize=address)
 endif()
 
-
-
 if(NOT UNIX)
     message(FATAL_ERROR "only support to be build on Unix system")
 endif()
@@ -24,21 +22,17 @@ find_package(spdlog CONFIG REQUIRED)
 find_package(tomlplusplus CONFIG REQUIRED)
 find_package(asio CONFIG REQUIRED)
 find_package(concurrentqueue CONFIG REQUIRED)
+find_package(libuv CONFIG REQUIRED)
 
 file(GLOB_RECURSE CORNET_SRC CONFIGURE_DEPENDS src/*.cc src/*.hpp)
-
-#add_library(${CORNET} SHARED ${CORNET_SRC})
-#target_link_libraries(${CORNET} uring)
 
 add_executable(${CORNET} main.cc ${CORNET_SRC})
 target_link_libraries(${CORNET} uring spdlog::spdlog tomlplusplus::tomlplusplus)
 target_include_directories(${CORNET} PUBLIC include)
 
-
-add_executable(bench test.cc ${CORNET_SRC})
-
-target_link_libraries(bench PRIVATE uring spdlog::spdlog tomlplusplus::tomlplusplus asio::asio concurrentqueue::concurrentqueue)
-target_include_directories(bench PUBLIC include)
+add_executable(bench bench/benchmark.cc ${CORNET_SRC})
+target_link_libraries(bench PRIVATE uring spdlog::spdlog tomlplusplus::tomlplusplus asio::asio concurrentqueue::concurrentqueue $<IF:$<TARGET_EXISTS:libuv::uv_a>,libuv::uv_a,libuv::uv>)
+target_include_directories(bench PUBLIC include bench)
 
 file(GLOB_RECURSE CORNET_TEST_SRC CONFIGURE_DEPENDS tests/*.cc)
 enable_testing()

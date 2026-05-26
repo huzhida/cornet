@@ -10,6 +10,7 @@
 #include "executor.h"
 #include "io_slot.h"
 #include "utils/metrics.h"
+#include <functional>
 
 namespace cornet {
 
@@ -18,13 +19,13 @@ struct context_t {
    * @brief context current state
    */
   enum class state_t : uint32_t {
-    // context is running
+    // context is running normally
     Running,
-    // context is trying to cancel io tasks
+    // context is draining: no new connections, waiting for existing work to finish
+    Draining,
+    // context is canceling all pending io
     Canceling,
-    // context is terminating, draining remain tasks
-    Terminating,
-    // context terminated, all tasks done or error occupied
+    // context terminated, all tasks done
     Terminated
   };
 
@@ -80,17 +81,43 @@ struct context_t {
   void run();
 
   /**
-   * @brief cancel context io tasks or stop running.
-   * Thread-safe: can be called from any thread. Wakes the owner thread if blocked.
-   * @param cancel whether cancel io tasks, it makes all io_uring tasks to be cancelled.
+   * @brief initiate graceful shutdown.
+   * Transitions to Draining → waits for idle or timeout → Canceling → Terminated.
+   * Thread-safe: can be called from any thread.
+   * @param timeout max time to wait for existing work to finish before force-canceling
    */
-  void stop(bool cancel = true);
+  void shutdown(std::chrono::nanoseconds timeout = std::chrono::seconds(5));
+
+  /**
+   * @brief force stop immediately (no drain, no timeout).
+   * Thread-safe.
+   */
+  void stop();
 
   /**
    * @brief wake up the owner thread if it's blocked in io_uring_wait.
    * Thread-safe.
    */
   void wakeup();
+
+  /**
+   * @brief whether the context is in draining state (shutting down gracefully).
+   * Users should check this in accept loops to stop accepting new connections.
+   * @return true if draining or later state
+   */
+  CORNET_NODISCARD inline bool is_draining() const {
+    auto s = state.load(std::memory_order_acquire);
+    return s != state_t::Running;
+  }
+
+  /**
+   * @brief register a callback for one or more signals.
+   * Uses signalfd + io_uring for async signal delivery.
+   * Must be called before run().
+   * @param signals list of signal numbers to handle
+   * @param handler callback invoked with the signal number
+   */
+  void on_signal(std::initializer_list<int> signals, std::function<void(int)> handler);
 
   /**
    * @brief submit a generic io_uring operation via a user-provided prep function.
@@ -167,12 +194,12 @@ struct context_t {
   };
 
   /**
-   * @brief cancel io_uring async tasks.
+   * @brief cancel all pending io_uring operations.
    * @param user_data target to cancel (depends on flags)
    * @param flags IORING_ASYNC_CANCEL_* flags
    * @return expected<int>: canceled task count on success, error on failure
    */
-  inline coro_t<expected<int>> cancel_io_tasks(void* user_data = nullptr, int flags = IORING_ASYNC_CANCEL_ANY) {
+  inline coro_t<expected<int>> cancel_pending_io(void* user_data = nullptr, int flags = IORING_ASYNC_CANCEL_ANY) {
     int canceled_nr = 0;
     while(!uring.idle()) {
       auto ret = co_await cancel_awaiter{*this, user_data, flags};
@@ -222,8 +249,8 @@ struct context_t {
   static inline const char* to_string(state_t s) {
     switch (s) {
       case state_t::Running: return "Running";
+      case state_t::Draining: return "Draining";
       case state_t::Canceling: return "Canceling";
-      case state_t::Terminating: return "Terminating";
       case state_t::Terminated: return "Terminated";
     }
     return "Unknown";
@@ -271,6 +298,17 @@ private:
   std::unique_ptr<scheduler_t> scheduler;
   // context executor
   std::unique_ptr<executor_t> executor;
+  // signalfd for async signal handling (-1 if not used)
+  int signal_fd{-1};
+  // per-signal handler callbacks
+  std::unordered_map<int, std::function<void(int)>> signal_handlers;
+  // shutdown timeout
+  std::chrono::nanoseconds shutdown_timeout{std::chrono::seconds(5)};
+
+  // internal: signal watch coroutine
+  coro_t<void> signal_watch_loop();
+  // internal: shutdown coroutine (drain → cancel → terminate)
+  coro_t<void> shutdown_sequence();
 };
 
 /**
