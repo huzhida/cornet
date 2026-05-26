@@ -61,6 +61,8 @@ struct unexpected {
 template<typename T>
 class expected {
  public:
+  expected() : err_{}, ok_(false) {}
+
   expected(T val) : ok_(true) {
     new (&storage_) T(std::move(val));
   }
@@ -85,8 +87,25 @@ class expected {
     }
   }
 
-  expected& operator=(const expected&) = delete;
-  expected& operator=(expected&&) = delete;
+  expected& operator=(const expected& other) {
+    if (this != &other) {
+      if (ok_) reinterpret_cast<T*>(&storage_)->~T();
+      ok_ = other.ok_;
+      err_ = other.err_;
+      if (ok_) new (&storage_) T(*reinterpret_cast<const T*>(&other.storage_));
+    }
+    return *this;
+  }
+
+  expected& operator=(expected&& other) noexcept {
+    if (this != &other) {
+      if (ok_) reinterpret_cast<T*>(&storage_)->~T();
+      ok_ = other.ok_;
+      err_ = other.err_;
+      if (ok_) new (&storage_) T(std::move(*reinterpret_cast<T*>(&other.storage_)));
+    }
+    return *this;
+  }
 
   explicit operator bool() const { return ok_; }
 

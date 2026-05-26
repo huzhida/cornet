@@ -39,7 +39,7 @@ struct base_promise_t {
 
 template <>
 struct base_promise_t<void> {
-  // variant return value
+  // variant: monostate (initial) | exception_ptr (error)
   std::variant<std::monostate, std::exception_ptr> value;
 
   /**
@@ -65,8 +65,9 @@ struct coro_t : task_t {
    * @brief coroutine constraint promise_type
    */
   struct promise_type : base_promise_t<V> {
-    // for co_await invoke
+    // whether this coroutine is detached (self-destructs at final_suspend)
     bool detached{false};
+    // parent coroutine to resume when this one completes
     std::coroutine_handle<> continuation;
 
     /**
@@ -121,10 +122,17 @@ struct coro_t : task_t {
 
   };
 
+  /**
+   * @brief construct from coroutine handle
+   * @param h native coroutine handle
+   */
   explicit coro_t(std::coroutine_handle<promise_type> h) {
     this->handle = h;
   }
 
+  /**
+   * @brief destructor. destroys coroutine frame unless detached.
+   */
   ~coro_t() {
     if (handle && !native_handle().promise().detached) {
       handle.destroy();
@@ -133,6 +141,9 @@ struct coro_t : task_t {
 
   coro_t(const coro_t&) = delete;
 
+  /**
+   * @brief move constructor. takes ownership of coroutine frame.
+   */
   coro_t(coro_t&& c) noexcept {
     if (this != &c) {
       if (this->handle)
@@ -143,6 +154,9 @@ struct coro_t : task_t {
 
   coro_t& operator=(const coro_t&) = delete;
 
+  /**
+   * @brief move assignment. takes ownership of coroutine frame.
+   */
   coro_t& operator=(coro_t&& c) noexcept {
     if (this != &c) {
       if (this->handle)
@@ -209,10 +223,18 @@ struct coro_t : task_t {
     native_handle().promise().detached = true;
   }
 
+  /**
+   * @brief get the native typed coroutine handle
+   * @return typed coroutine handle
+   */
   std::coroutine_handle<promise_type> native_handle() {
     return std::coroutine_handle<promise_type>::from_address(handle.address());
   }
 
+  /**
+   * @brief get the coroutine's return value, rethrowing any stored exception
+   * @return the return value of type V
+   */
   V value() {
     auto& val = native_handle().promise().value;
     if constexpr (std::is_void_v<V>) {
@@ -235,8 +257,11 @@ struct coro_t : task_t {
  */
 template <typename V>
 struct generator_t : task_t {
+  /**
+   * @brief generator promise_type for co_yield support
+   */
   struct promise_type : base_promise_t<void> {
-    // current value
+    // current yielded value
     V current_value;
 
     /**
@@ -266,6 +291,9 @@ struct generator_t : task_t {
     }
   };
 
+  /**
+   * @brief construct generator from coroutine handle
+   */
   explicit generator_t(std::coroutine_handle<promise_type> h) {
     this->handle = h;
   }
@@ -298,9 +326,10 @@ struct generator_t : task_t {
   }
 
   /**
-   * @brief iterator used for range.
+   * @brief input iterator for range-based for loop over yielded values
    */
   struct iterator {
+    // coroutine handle to resume/read from
     std::coroutine_handle<promise_type> handle;
 
     using iterator_category = std::input_iterator_tag;
@@ -317,12 +346,18 @@ struct generator_t : task_t {
     void operator++() { handle.resume(); }
   };
 
+  /**
+   * @brief begin iteration, resumes coroutine to get first value
+   */
   iterator begin() {
     if (handle)
       handle.resume();
     return {handle};
   }
 
+  /**
+   * @brief sentinel for end of iteration
+   */
   std::default_sentinel_t end() {
     return {};
   }

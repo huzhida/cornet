@@ -130,12 +130,16 @@ struct when_any_state {
 
 template<size_t I, typename State, typename T>
 coro_t<void> when_all_task(std::shared_ptr<State> state, coro_t<T> coro, context_t& ctx) {
-  if constexpr (std::is_void_v<T>) {
-    co_await coro;
-    std::get<I>(state->results) = expected<void>{};
-  } else {
-    auto result = co_await coro;
-    std::get<I>(state->results) = std::move(result);
+  try {
+    if constexpr (std::is_void_v<T>) {
+      co_await coro;
+      std::get<I>(state->results) = expected<void>{};
+    } else {
+      auto result = co_await coro;
+      std::get<I>(state->results) = std::move(result);
+    }
+  } catch (...) {
+    std::get<I>(state->results) = unexpected(ECANCELED, error_domain::internal);
   }
   if (state->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
     if (state->continuation) {
@@ -147,12 +151,16 @@ coro_t<void> when_all_task(std::shared_ptr<State> state, coro_t<T> coro, context
 
 template<size_t I, typename State, typename T>
 coro_t<void> when_any_task(std::shared_ptr<State> state, coro_t<T> coro, context_t& ctx) {
-  if constexpr (std::is_void_v<T>) {
-    co_await coro;
-    std::get<I>(state->results) = expected<void>{};
-  } else {
-    auto result = co_await coro;
-    std::get<I>(state->results) = std::move(result);
+  try {
+    if constexpr (std::is_void_v<T>) {
+      co_await coro;
+      std::get<I>(state->results) = expected<void>{};
+    } else {
+      auto result = co_await coro;
+      std::get<I>(state->results) = std::move(result);
+    }
+  } catch (...) {
+    std::get<I>(state->results) = unexpected(ECANCELED, error_domain::internal);
   }
   bool expected_val = false;
   if (state->done.compare_exchange_strong(expected_val, true, std::memory_order_acq_rel)) {

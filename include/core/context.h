@@ -40,6 +40,8 @@ struct context_t {
 
   /**
    * @brief spawn a coroutine into the scheduler's ready queue.
+   * Rvalue coroutines are detached (fire-and-forget, self-destructs on completion).
+   * Lvalue coroutines are NOT detached (caller retains ownership and can read result after completion).
    * @tparam T task-like type (coro_t, task_t*, coroutine_handle)
    * @param task task-like object
    */
@@ -183,7 +185,7 @@ struct context_t {
         if (ret.error().code == ENOENT) {
           co_return canceled_nr;
         }
-        co_return unexpected(ret.error());
+        co_return ret;
       }
       int val = *ret;
       if (val == 0) {
@@ -325,6 +327,9 @@ struct async_awaiter {
   }
 
   R await_resume() {
+    if (task_.exception) {
+      std::rethrow_exception(task_.exception);
+    }
     if constexpr (!std::is_void_v<R>) {
       return std::move(task_.result_);
     }

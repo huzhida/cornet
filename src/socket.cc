@@ -255,7 +255,7 @@ coro_t<expected<int>> socket_t::recvfrom(void *buf, size_t nbytes, sockaddr *add
   msg.msg_iovlen = 1;
   auto ret = co_await recvmsg_awaiter(fd, &msg, flag);
   if (!ret) {
-    co_return unexpected(ret.error());
+    co_return ret;
   }
   *socklen = msg.msg_namelen;
   co_return *ret;

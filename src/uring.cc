@@ -80,7 +80,7 @@ int uring_t::submit() {
   int submit_nr = io_uring_submit(uring.get());
   if (submit_nr < 0) {
     if (metrics_) metrics_->submit_failures++;
-    SPDLOG_ERROR("io_uring submit sqe failed with error: {}", strerror(errno));
+    SPDLOG_ERROR("io_uring submit sqe failed with error: {}", strerror(-submit_nr));
     return submit_nr;
   }
   task_nr += submit_nr;

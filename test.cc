@@ -223,8 +223,7 @@ public:
     std::thread server_thread([this, &config] {
       auto& ctx = context_t::current();
       ctx.set_scheduler_type(type);
-      auto server = server_main(ctx, config);
-      ctx.spawn(server);
+      ctx.spawn(server_main(ctx, config));
       ctx.run();
     });
 
@@ -232,10 +231,8 @@ public:
     auto& ctx = context_t::current();
     ctx.set_scheduler_type(type);
     auto remaining_msgs = std::make_shared<std::atomic<int> >(config.total_messages);
-    std::vector<coro_t<void> > clients;
     for (int i = 0; i < config.num_connections; i++) {
-      clients.push_back(std::move(client_session(ctx, i, config, remaining_msgs)));
-      ctx.spawn(clients.back());
+      ctx.spawn(client_session(ctx, i, config, remaining_msgs));
     }
     ctx.run();
 
