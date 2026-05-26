@@ -12,6 +12,7 @@
 #include <functional>
 #include <cmath>
 #include <fstream>
+#include <map>
 
 namespace bench {
 
@@ -226,6 +227,187 @@ inline void print_scenario_recommendation(const std::vector<result_t>& results, 
 }
 
 using bench_fn_t = std::function<result_t(const scenario_t& scenario)>;
+
+constexpr int BENCH_ROUNDS = 3;
+
+// 多轮运行取中位数（按RPS排序取中间那次）
+inline result_t median_result(std::vector<result_t>& runs) {
+  std::sort(runs.begin(), runs.end(), [](auto& a, auto& b) { return a.rps < b.rps; });
+  return runs[runs.size() / 2];
+}
+
+// 打印多轮运行的RPS波动范围
+inline void print_rounds_variance(const std::vector<std::vector<result_t>>& all_runs) {
+  printf("\n  [多轮运行波动 (3次RPS: min ~ median ~ max)]\n");
+  for (auto& runs : all_runs) {
+    if (runs.empty()) continue;
+    auto sorted = runs;
+    std::sort(sorted.begin(), sorted.end(), [](auto& a, auto& b) { return a.rps < b.rps; });
+    double cv = 0;
+    if (sorted.size() >= 2) {
+      double mean = 0;
+      for (auto& r : sorted) mean += r.rps;
+      mean /= sorted.size();
+      double var = 0;
+      for (auto& r : sorted) { double d = r.rps - mean; var += d * d; }
+      cv = mean > 0 ? std::sqrt(var / sorted.size()) / mean * 100 : 0;
+    }
+    printf("    %-18s %8.0f ~ %8.0f ~ %8.0f  (CV=%.1f%%)\n",
+           sorted[0].framework.c_str(),
+           sorted.front().rps, sorted[sorted.size()/2].rps, sorted.back().rps, cv);
+  }
+}
+
+// 综合评估：得分排名、置信度、延迟稳定性、内存效率
+inline void print_comprehensive_summary(
+    const std::vector<result_t>& all_results,
+    const std::vector<std::vector<std::vector<result_t>>>& all_rounds, // [scenario][framework][round]
+    const std::vector<scenario_t>& scenarios) {
+
+  printf("\n");
+  printf("╔══════════════════════════════════════════════════════════════╗\n");
+  printf("║                      综合评估                              ║\n");
+  printf("╚══════════════════════════════════════════════════════════════╝\n\n");
+
+  // 收集所有框架名
+  std::vector<std::string> frameworks;
+  for (auto& r : all_results) {
+    if (std::find(frameworks.begin(), frameworks.end(), r.framework) == frameworks.end())
+      frameworks.push_back(r.framework);
+  }
+
+  // === 综合得分排名 ===
+  printf("  [综合得分排名] (RPS 40%% + P99延迟 30%% + 稳定性 20%% + 内存 10%%)\n");
+  std::map<std::string, double> total_score;
+  for (auto& fw : frameworks) total_score[fw] = 0;
+
+  for (auto& scenario : scenarios) {
+    // 收集该场景所有结果
+    std::vector<const result_t*> scene_results;
+    for (auto& r : all_results)
+      if (r.scenario == scenario.name) scene_results.push_back(&r);
+
+    if (scene_results.empty()) continue;
+    size_t n = scene_results.size();
+
+    // 按各维度排名 (rank 0 = best)
+    auto rank_by = [&](auto cmp) {
+      std::vector<const result_t*> sorted = scene_results;
+      std::sort(sorted.begin(), sorted.end(), cmp);
+      std::map<std::string, int> ranks;
+      for (size_t i = 0; i < sorted.size(); ++i) ranks[sorted[i]->framework] = i;
+      return ranks;
+    };
+
+    auto rps_rank = rank_by([](auto* a, auto* b) { return a->rps > b->rps; });
+    auto p99_rank = rank_by([](auto* a, auto* b) { return a->p99_latency_us < b->p99_latency_us; });
+    auto mem_rank = rank_by([](auto* a, auto* b) { return a->peak_rss_kb < b->peak_rss_kb; });
+    auto cv_rank = rank_by([](auto* a, auto* b) {
+      double ca = a->avg_latency_us > 0 ? a->stddev_latency_us / a->avg_latency_us : 999;
+      double cb = b->avg_latency_us > 0 ? b->stddev_latency_us / b->avg_latency_us : 999;
+      return ca < cb;
+    });
+
+    for (auto& fw : frameworks) {
+      // 归一化得分: (n - rank) / n, 越高越好
+      double score = 0;
+      if (rps_rank.count(fw)) score += 0.4 * (n - rps_rank[fw]) / (double)n;
+      if (p99_rank.count(fw)) score += 0.3 * (n - p99_rank[fw]) / (double)n;
+      if (cv_rank.count(fw))  score += 0.2 * (n - cv_rank[fw]) / (double)n;
+      if (mem_rank.count(fw)) score += 0.1 * (n - mem_rank[fw]) / (double)n;
+      total_score[fw] += score;
+    }
+  }
+
+  // 排序输出
+  std::vector<std::pair<std::string, double>> score_vec(total_score.begin(), total_score.end());
+  std::sort(score_vec.begin(), score_vec.end(), [](auto& a, auto& b) { return a.second > b.second; });
+  int rank = 1;
+  for (auto& [fw, score] : score_vec) {
+    printf("    #%d  %-20s  %.2f / %.1f\n", rank++, fw.c_str(), score, (double)scenarios.size());
+  }
+
+  // === 置信度分析 ===
+  printf("\n  [多轮运行置信度] (CV<5%%=高可信, 5-15%%=中等, >15%%=低可信)\n");
+  printf("    %-18s", "框架");
+  for (auto& s : scenarios) printf(" %10s", s.name.substr(0, 10).c_str());
+  printf("\n");
+
+  for (size_t fi = 0; fi < frameworks.size(); ++fi) {
+    printf("    %-18s", frameworks[fi].c_str());
+    for (size_t si = 0; si < scenarios.size(); ++si) {
+      if (si < all_rounds.size() && fi < all_rounds[si].size() && all_rounds[si][fi].size() >= 2) {
+        auto& runs = all_rounds[si][fi];
+        double mean = 0;
+        for (auto& r : runs) mean += r.rps;
+        mean /= runs.size();
+        double var = 0;
+        for (auto& r : runs) { double d = r.rps - mean; var += d * d; }
+        double cv = mean > 0 ? std::sqrt(var / runs.size()) / mean * 100 : 0;
+        const char* tag = cv < 5 ? "高" : cv < 15 ? "中" : "低";
+        printf(" %5.1f%%(%s)", cv, tag);
+      } else {
+        printf(" %10s", "-");
+      }
+    }
+    printf("\n");
+  }
+
+  // === 延迟稳定性对比 ===
+  printf("\n  [延迟稳定性] (P99/P50 尾部放大比, 越低越稳定)\n");
+  for (auto& fw : frameworks) {
+    double sum_ratio = 0; int cnt = 0;
+    for (auto& r : all_results) {
+      if (r.framework == fw && r.p50_latency_us > 0) {
+        sum_ratio += r.p99_latency_us / r.p50_latency_us;
+        cnt++;
+      }
+    }
+    double avg_ratio = cnt > 0 ? sum_ratio / cnt : 0;
+    const char* grade = avg_ratio < 3 ? "优秀" : avg_ratio < 5 ? "良好" : avg_ratio < 10 ? "一般" : "较差";
+    printf("    %-18s 平均P99/P50=%.1fx  %s\n", fw.c_str(), avg_ratio, grade);
+  }
+
+  // === 内存效率对比 ===
+  printf("\n  [内存效率] (平均内存占用 & 每万RPS内存消耗)\n");
+  printf("    %-18s %10s %14s\n", "框架", "平均内存KB", "KB/万RPS");
+  for (auto& fw : frameworks) {
+    double sum_mem = 0, sum_rps = 0; int cnt = 0;
+    for (auto& r : all_results) {
+      if (r.framework == fw) {
+        sum_mem += r.peak_rss_kb;
+        sum_rps += r.rps;
+        cnt++;
+      }
+    }
+    double avg_mem = cnt > 0 ? sum_mem / cnt : 0;
+    double avg_rps = cnt > 0 ? sum_rps / cnt : 0;
+    double mem_per_10k_rps = avg_rps > 0 ? avg_mem / (avg_rps / 10000.0) : 0;
+    printf("    %-18s %10.0f %14.1f\n", fw.c_str(), avg_mem, mem_per_10k_rps);
+  }
+
+  // === 适用场景建议 ===
+  printf("\n  [适用场景建议]\n");
+  struct scene_category { const char* label; std::string scenario_name; };
+  std::vector<scene_category> categories = {
+    {"高并发小包 (IM/推送)",    "small_msg_high_conc"},
+    {"常规请求响应 (Web API)",  "medium_msg"},
+    {"大数据传输 (文件/流媒体)", "large_msg"},
+    {"极限并发 (C10K+)",       "extreme_conc"},
+    {"持续吞吐 (日志/管道)",    "sustained_throughput"},
+  };
+  for (auto& cat : categories) {
+    const result_t* best = nullptr;
+    for (auto& r : all_results) {
+      if (r.scenario != cat.scenario_name) continue;
+      if (!best || r.rps > best->rps) best = &r;
+    }
+    if (best) {
+      printf("    %-28s → %s (%.0f RPS, P99=%.0fus)\n",
+             cat.label, best->framework.c_str(), best->rps, best->p99_latency_us);
+    }
+  }
+}
 
 } // namespace bench
 
