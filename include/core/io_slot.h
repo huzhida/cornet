@@ -49,7 +49,7 @@ class io_slot_table_t {
  public:
   explicit io_slot_table_t(uint32_t capacity = 4096)
     : slots_(capacity) {
-    for (uint32_t i = 0; i < capacity - 1; ++i) {
+    for (uint32_t i = 0; i < capacity; ++i) {
       free_list_.push_back(i);
     }
   }
