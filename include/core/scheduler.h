@@ -21,7 +21,7 @@ struct atask_t;
  * @brief scheduler type
  */
 enum class scheduler_type_t {
-  UnKnown, RoundRobin, TimeSlice, Batch
+  UnKnown, RoundRobin, TimeSlice, Batch, Adaptive
 };
 /**
  * @brief get name from scheduler type
@@ -33,6 +33,7 @@ inline const char* scheduler_name(scheduler_type_t type) {
     case scheduler_type_t::RoundRobin: return "RoundRobin";
     case scheduler_type_t::Batch: return "Batch";
     case scheduler_type_t::TimeSlice: return "TimeSlice";
+    case scheduler_type_t::Adaptive: return "Adaptive";
     default: return "UnknownScheduler";
   }
 }
@@ -106,9 +107,17 @@ struct scheduler_t {
 protected:
   // ready to resume queue
   queue_t ready_tasks;
-  // resume task and maintain r-value task life-span
+  // resume one task from the ready queue
   void resume_one_task();
+  // collect completed executor tasks into ready queue
   void process_async_tasks(context_t& ctx);
+  /**
+   * @brief common post-CPU-phase logic: submit SQEs, harvest CQEs, handle idle wait.
+   * @param ctx owner context
+   * @param wait_timeout how long to block when no CQEs ready and no CPU tasks pending
+   * @return number of CQEs processed
+   */
+  uint32_t flush_io(context_t& ctx, std::chrono::nanoseconds wait_timeout = std::chrono::milliseconds(10));
   std::array<atask_t*, 32> async_tasks;
 
 private:
@@ -128,13 +137,14 @@ struct time_slice_scheduler_t : scheduler_t {
   time_slice_scheduler_t();
 
   void sched(context_t& ctx) final;
+
+private:
   /**
    * @brief whether cpu timeout
    * @param start start time
    * @return true for yes/ false for no.
    */
   bool cpu_timeout(std::chrono::steady_clock::time_point& start) const;
-private:
   // cpu budget in ns
   std::chrono::nanoseconds cpu_budget{10000000};
   // io budget in ns
@@ -168,6 +178,31 @@ struct batch_scheduler_t : scheduler_t {
 private:
   // batch size
   uint32_t batch_nr{32};
+};
+
+/**
+ * @brief adaptive scheduler implementation.
+ * Dynamically adjusts CPU batch size and I/O wait timeout based on feedback signals:
+ * - I/O saturation: ratio of ready CQEs to inflight tasks
+ * - CPU pressure: whether ready queue has pending tasks
+ * Automatically balances between CPU-bound and I/O-bound workloads without configuration.
+ */
+struct adaptive_scheduler_t : scheduler_t {
+  static inline std::unique_ptr<scheduler_t> create() {
+    return std::make_unique<adaptive_scheduler_t>();
+  }
+
+  void sched(context_t& ctx) final;
+
+private:
+  void adapt(size_t resumed, uint32_t cqes_ready, size_t inflight);
+
+  // dynamic parameters
+  size_t cpu_batch_{8};
+  std::chrono::nanoseconds io_wait_{std::chrono::milliseconds(1)};
+
+  // feedback signals (exponential moving average)
+  double io_saturation_{0.0};
 };
 
 } // cornet

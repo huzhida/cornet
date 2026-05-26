@@ -41,6 +41,25 @@ void scheduler_t::process_async_tasks(context_t& ctx) {
   }
 }
 
+uint32_t scheduler_t::flush_io(context_t& ctx, std::chrono::nanoseconds wait_timeout) {
+  auto& uring = ctx.io_uring();
+  uring.submit();
+
+  uint32_t cqes = 0;
+  size_t inflight = uring.running_task_nr();
+  if (inflight > 0) {
+    cqes = uring.peek_cqes(utask_t::process_utask, ctx, inflight);
+    if (cqes == 0 && ready_tasks.empty()) {
+      cqes = uring.wait_cqes(utask_t::process_utask, ctx, 1, wait_timeout);
+    }
+  } else if (ready_tasks.empty()) {
+    std::this_thread::yield();
+  }
+
+  process_async_tasks(ctx);
+  return cqes;
+}
+
 CORNET_REGISTER_SCHEDULER(scheduler_type_t::TimeSlice, time_slice_scheduler_t);
 time_slice_scheduler_t::time_slice_scheduler_t() {
   auto conf = config_t::get()["cornet"]["context"]["scheduler"];
@@ -52,16 +71,13 @@ void time_slice_scheduler_t::sched(context_t& ctx) {
   scoped_timer_t timer(ctx.metrics().sched_latency);
   ctx.metrics().sched_cycles++;
   auto start = std::chrono::steady_clock::now();
-  auto& uring = ctx.io_uring();
+
   while (!ready_tasks.empty() && !cpu_timeout(start)) {
     resume_one_task();
     ctx.metrics().tasks_resumed++;
   }
-  uring.submit();
 
-  uring.wait_cqes(utask_t::process_utask, ctx, 1, io_budget);
-
-  process_async_tasks(ctx);
+  flush_io(ctx, io_budget);
 }
 
 bool time_slice_scheduler_t::cpu_timeout(std::chrono::steady_clock::time_point& start) const {
@@ -74,19 +90,13 @@ CORNET_REGISTER_SCHEDULER(scheduler_type_t::RoundRobin, round_robin_scheduler_t)
 void round_robin_scheduler_t::sched(context_t& ctx) {
   scoped_timer_t timer(ctx.metrics().sched_latency);
   ctx.metrics().sched_cycles++;
-  auto& uring = ctx.io_uring();
+
   while (!ready_tasks.empty()) {
     resume_one_task();
     ctx.metrics().tasks_resumed++;
   }
-  uring.submit();
 
-  uint32_t nr = uring.running_task_nr();
-  if (nr > 0) {
-    uring.peek_cqes(utask_t::process_utask, ctx, nr);
-  }
-
-  process_async_tasks(ctx);
+  flush_io(ctx);
 }
 
 CORNET_REGISTER_SCHEDULER(scheduler_type_t::Batch, batch_scheduler_t);
@@ -99,18 +109,54 @@ void batch_scheduler_t::sched(context_t& ctx) {
   scoped_timer_t timer(ctx.metrics().sched_latency);
   ctx.metrics().sched_cycles++;
   size_t processed = 0;
-  auto& uring = ctx.io_uring();
+
   while (!ready_tasks.empty() && ++processed < batch_nr) {
     resume_one_task();
     ctx.metrics().tasks_resumed++;
   }
-  uring.submit();
 
-  if (uring.running_task_nr() > 0) {
-    uring.peek_cqes(utask_t::process_utask, ctx, batch_nr);
+  flush_io(ctx);
+}
+
+CORNET_REGISTER_SCHEDULER(scheduler_type_t::Adaptive, adaptive_scheduler_t);
+void adaptive_scheduler_t::sched(context_t& ctx) {
+  scoped_timer_t timer(ctx.metrics().sched_latency);
+  ctx.metrics().sched_cycles++;
+
+  size_t resumed = 0;
+  while (!ready_tasks.empty() && resumed < cpu_batch_) {
+    resume_one_task();
+    resumed++;
+    ctx.metrics().tasks_resumed++;
   }
 
-  process_async_tasks(ctx);
+  size_t inflight = ctx.io_uring().running_task_nr();
+  uint32_t cqes_ready = flush_io(ctx, io_wait_);
+  adapt(resumed, cqes_ready, inflight);
+}
+
+void adaptive_scheduler_t::adapt(size_t resumed, uint32_t cqes_ready, size_t inflight) {
+  // update I/O saturation (exponential moving average)
+  double sat = inflight > 0 ? double(cqes_ready) / double(inflight) : 0.0;
+  io_saturation_ = io_saturation_ * 0.8 + sat * 0.2;
+
+  // adjust cpu_batch based on I/O saturation
+  if (io_saturation_ > 0.7) {
+    // I/O completions piling up, reduce CPU time to process them faster
+    cpu_batch_ = std::max(size_t(1), cpu_batch_ / 2);
+  } else if (io_saturation_ < 0.2 && resumed >= cpu_batch_) {
+    // I/O idle and CPU saturated, allow more CPU work per cycle
+    cpu_batch_ = std::min(size_t(256), cpu_batch_ * 2);
+  }
+
+  // adjust wait timeout based on load
+  if (resumed == 0 && cqes_ready == 0) {
+    // nothing happening, increase wait to save CPU
+    io_wait_ = std::min(std::chrono::nanoseconds(10000000), io_wait_ * 2);
+  } else {
+    // active workload, keep wait tight
+    io_wait_ = std::max(std::chrono::nanoseconds(100000), io_wait_ / 2);
+  }
 }
 
 } // cornet

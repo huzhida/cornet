@@ -151,11 +151,6 @@ struct context_t {
     return scheduler->idle() && uring.idle();
   }
 
-  inline void switch_to(state_t s) {
-    state.store(s, std::memory_order_release);
-    SPDLOG_DEBUG("context switch to state:{}", to_string(s));
-  }
-
   /**
    * @brief return context_t owner thread id
    * @return owner thread id
@@ -175,7 +170,7 @@ struct context_t {
    * @brief cancel io_uring async tasks.
    * @param user_data target to cancel (depends on flags)
    * @param flags IORING_ASYNC_CANCEL_* flags
-   * @return expected<int, errc>: canceled task count on success, error on failure
+   * @return expected<int>: canceled task count on success, error on failure
    */
   inline coro_t<expected<int>> cancel_io_tasks(void* user_data = nullptr, int flags = IORING_ASYNC_CANCEL_ANY) {
     int canceled_nr = 0;
@@ -196,19 +191,6 @@ struct context_t {
     co_return canceled_nr;
   }
 
-  /**
-   * @brief thread-safety mutex for global contexts registry.
-   */
-  static std::mutex contexts_mutex;
-  /**
-   * @brief global contexts registry.
-   */
-  static std::unordered_map<std::thread::id, context_t*> contexts;
-
-  /**
-   * @brief return current thread owned context
-   * @return thread owned context reference
-   */
   /**
    * @brief return current thread's context (thread-local singleton)
    * @return thread-local context reference
@@ -262,6 +244,15 @@ private:
   template<typename F, typename R>
   friend struct async_awaiter;
 
+  void switch_to(state_t s) {
+    state.store(s, std::memory_order_release);
+    SPDLOG_DEBUG("context switch to state:{}", to_string(s));
+  }
+
+  // thread-safety mutex for global contexts registry
+  static std::mutex contexts_mutex;
+  // global contexts registry
+  static std::unordered_map<std::thread::id, context_t*> contexts;
   // context owned io_uring wrapper
   uring_t uring;
   // context owned io slot table for safe user_data management
