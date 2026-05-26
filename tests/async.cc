@@ -42,11 +42,11 @@ TEST_F(async_test, void_callable) {
 TEST_F(async_test, heavy_computation) {
   auto test = [](context_t& ctx) -> coro_t<void> {
     auto result = co_await ctx.async([] {
-      int sum = 0;
+      long long sum = 0;
       for (int i = 0; i < 1000000; ++i) sum += i;
       return sum;
     });
-    EXPECT_EQ(result, 499999500000);
+    EXPECT_EQ(result, 499999500000LL);
     co_return;
   };
   ctx->spawn(test(*ctx));

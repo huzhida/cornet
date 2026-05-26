@@ -15,7 +15,7 @@ struct utask_t;
  */
 struct io_slot_t {
   utask_t* task{nullptr};
-  uint32_t generation{0};
+  uint32_t generation{1};
 };
 
 /**
