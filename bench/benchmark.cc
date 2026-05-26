@@ -15,7 +15,7 @@ using namespace bench;
 int main(int argc, char* argv[]) {
   cornet::config_t::load("conf/default.toml");
   cornet::logging::init();
-
+  signal(SIGPIPE, SIG_IGN);
   auto scenarios = default_scenarios();
 
   printf("╔══════════════════════════════════════════════════════════════╗\n");

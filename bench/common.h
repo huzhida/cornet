@@ -93,7 +93,8 @@ struct latency_collector_t {
     r.elapsed_sec = elapsed_sec;
     r.total_messages = total_messages.load();
     r.failed_messages = failed_messages.load();
-    r.peak_rss_kb = get_current_rss_kb() - rss_before_kb;
+    size_t rss_now = get_current_rss_kb();
+    r.peak_rss_kb = rss_now > rss_before_kb ? rss_now - rss_before_kb : 0;
 
     if (r.total_messages == 0 || elapsed_sec == 0) return r;
 
