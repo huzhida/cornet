@@ -66,20 +66,26 @@ struct utask_t : task_t {
    */
   static int process_utask(context_t& ctx, cqe_t cqe);
 
+protected:
   // function pointer that fills the io_uring_sqe with operation-specific data
   prepare_fn_t prepare_fn{nullptr};
-  // completed flag
+  // completed flag (set by subclass on early failure, or by complete())
   bool completed{false};
   // the return value of the async system call
   int value{0};
+  // owner context
+  context_t* ctx{nullptr};
+
+private:
   // callback, will be called on complete
   callback_t callback{nullptr};
   // callback user data
   void* user_data{nullptr};
-  // owner context
-  context_t* ctx{nullptr};
   // encoded slot data (index + generation) for safe lifetime tracking
   uint64_t slot_data{0};
+
+  template<typename Awaitable, typename Rep, typename Period>
+  friend struct timeout_awaiter;
 };
 
 } // namespace cornet

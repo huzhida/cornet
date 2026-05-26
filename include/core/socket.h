@@ -19,33 +19,32 @@ class socket_t {
    * @brief accept awaiter for io_uring_prep_accept
    */
   struct accept_awaiter : utask_t {
+    accept_awaiter(int fd, sockaddr* addr, socklen_t* addr_len, int flag);
+   private:
     int fd_;
     sockaddr* addr_;
     socklen_t* addr_len_;
     int flag_;
-    accept_awaiter(int fd, sockaddr* addr, socklen_t* addr_len, int flag);
   };
 
   /**
    * @brief close awaiter for io_uring_prep_close
    */
   struct close_awaiter : utask_t {
-    int fd_;
     close_awaiter(int fd);
 
     CORNET_NODISCARD CORNET_MAYBE_UNUSED expected<void> await_resume() const {
       if (value < 0) return unexpected(-value);
       return {};
     }
+   private:
+    int fd_;
   };
 
   /**
    * @brief connect awaiter for io_uring_prep_connect
    */
   struct connect_awaiter : utask_t {
-    int fd_;
-    sockaddr_storage addr{};
-    socklen_t socklen_{};
     connect_awaiter(int fd, std::string_view ip, uint16_t port, int domain, int type);
     connect_awaiter(int fd, std::string_view path);
 
@@ -53,48 +52,56 @@ class socket_t {
       if (value < 0) return unexpected(-value);
       return {};
     }
+   private:
+    int fd_;
+    sockaddr_storage addr{};
+    socklen_t socklen_{};
   };
 
   /**
    * @brief send awaiter for io_uring_prep_send
    */
   struct send_awaiter : utask_t {
+    send_awaiter(int fd, const void* buf, size_t nbytes, int flag);
+   private:
     int fd_;
     const void* buf_;
     size_t nbytes_;
     int flag_;
-    send_awaiter(int fd, const void* buf, size_t nbytes, int flag);
   };
 
   /**
    * @brief recv awaiter for io_uring_prep_recv
    */
   struct recv_awaiter : utask_t {
+    recv_awaiter(int fd, void* buf, size_t nbytes, int flag);
+   private:
     int fd_;
     void* buf_;
     size_t nbytes_;
     int flag_;
-    recv_awaiter(int fd, void* buf, size_t nbytes, int flag);
   };
 
   /**
    * @brief sendmsg awaiter for io_uring_prep_sendmsg
    */
   struct sendmsg_awaiter : utask_t {
+    sendmsg_awaiter(int fd, struct msghdr* msg, int flags);
+   private:
     int fd_;
     struct msghdr* msg_;
     int flags_;
-    sendmsg_awaiter(int fd, struct msghdr* msg, int flags);
   };
 
   /**
    * @brief recvmsg awaiter for io_uring_prep_recvmsg
    */
   struct recvmsg_awaiter : utask_t {
+    recvmsg_awaiter(int fd, struct msghdr* msg, int flags);
+   private:
     int fd_;
     struct msghdr* msg_;
     int flags_;
-    recvmsg_awaiter(int fd, struct msghdr* msg, int flags);
   };
 
   ~socket_t();

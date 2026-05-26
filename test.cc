@@ -527,6 +527,11 @@ int main(int argc, char* argv[]) {
       std::cout << "Cornet Batch Warming..." << std::endl;
       auto result = cornet_bench.run(config);
     }
+    {
+      CornetBenchmark cornet_bench(scheduler_type_t::Adaptive);
+      std::cout << "Cornet Adaptive Warming..." << std::endl;
+      auto result = cornet_bench.run(config);
+    }
 
     {
       AsioBenchmark asio_bench;
@@ -554,6 +559,13 @@ int main(int argc, char* argv[]) {
       std::cout << "Cornet TimeSlice Running..." << std::endl;
       auto result = cornet_bench.run(config);
       results["TimeSlice"] = result;
+    }
+
+    {
+      CornetBenchmark cornet_bench(scheduler_type_t::Adaptive);
+      std::cout << "Cornet Adaptive Running..." << std::endl;
+      auto result = cornet_bench.run(config);
+      results["Adaptive"] = result;
     }
 
     // 测试 ASIO
