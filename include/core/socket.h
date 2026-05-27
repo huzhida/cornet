@@ -28,20 +28,6 @@ class socket_t {
   };
 
   /**
-   * @brief close awaiter for io_uring_prep_close
-   */
-  struct close_awaiter : utask_t {
-    close_awaiter(int fd);
-
-    CORNET_NODISCARD CORNET_MAYBE_UNUSED expected<void> await_resume() const {
-      if (value < 0) return unexpected(-value);
-      return {};
-    }
-   private:
-    int fd_;
-  };
-
-  /**
    * @brief connect awaiter for io_uring_prep_connect
    */
   struct connect_awaiter : utask_t {
@@ -131,7 +117,7 @@ class socket_t {
   /**
    * @brief async close socket
    */
-  close_awaiter close() const;
+  cornet::close_awaiter close() const;
   /**
    * @brief async connect to ip:port
    */
@@ -165,7 +151,7 @@ class socket_t : public cornet::socket_t {
   /**
    * @brief sync listen on address:port
    */
-  CORNET_NODISCARD expected<void> listen(std::string_view address, uint16_t port) const;
+  expected<void> listen(std::string_view address, uint16_t port) const;
   /**
    * @brief async accept (raw, returns fd)
    */

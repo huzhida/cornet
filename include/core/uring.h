@@ -45,6 +45,15 @@ class uring_t {
   io_uring_sqe* get_sqe();
 
   /**
+   * @brief atomically get multiple SQEs from the ring.
+   * If SQ space is insufficient, submits pending SQEs first, then acquires all at once.
+   * Guarantees all returned SQEs are in the same submission batch (safe for IOSQE_IO_LINK).
+   * @param out pointer to array that receives the SQE pointers
+   * @param n number of SQEs to acquire
+   */
+  void get_sqes(io_uring_sqe** out, size_t n);
+
+  /**
    * @brief submit all prepared SQEs to kernel
    * @return < 0 submit failed, > 0 submitted count
    */

@@ -46,8 +46,12 @@ socket_t::socket_t(int fd) : fd(fd) {
 }
 socket_t::~socket_t() {
   if (fd != -1) {
-    ::shutdown(fd, SHUT_RDWR);
-    ::close(fd);
+    auto& ctx = context_t::current();
+    if (std::this_thread::get_id() == ctx.owner_thread()) {
+      ctx.spawn(async_close(fd));
+    } else {
+      ::close(fd);
+    }
     fd = -1;
   }
 }
@@ -60,8 +64,12 @@ socket_t::socket_t(socket_t&& s) noexcept {
 socket_t& socket_t::operator=(socket_t&& s) noexcept {
   if (this != &s) {
     if (this->fd != -1) {
-      ::shutdown(this->fd, SHUT_RDWR);
-      ::close(this->fd);
+      auto& ctx = context_t::current();
+      if (std::this_thread::get_id() == ctx.owner_thread()) {
+        ctx.spawn(async_close(this->fd));
+      } else {
+        ::close(this->fd);
+      }
     }
     this->fd = s.fd;
     s.fd = -1;
@@ -78,14 +86,6 @@ void socket_t::address_reuse(bool on) const {
 void socket_t::port_reuse(bool on) const {
   int reuse = on ? 1 : 0;
   setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, (void*)&reuse, sizeof(reuse));
-}
-
-socket_t::close_awaiter::close_awaiter(int fd) : fd_(fd) {
-  this->ctx = &context_t::current();
-  this->prepare_fn = [](utask_t* self, io_uring_sqe* sqe) {
-    auto* t = static_cast<close_awaiter*>(self);
-    io_uring_prep_close(sqe, t->fd_);
-  };
 }
 
 socket_t::accept_awaiter::accept_awaiter(int fd, sockaddr* addr, socklen_t* len, int flag)
@@ -162,7 +162,7 @@ socket_t::recvmsg_awaiter::recvmsg_awaiter(int fd, struct msghdr *msg, int flags
   };
 }
 
-socket_t::close_awaiter socket_t::close() const {
+cornet::close_awaiter socket_t::close() const {
   return close_awaiter{fd};
 }
 socket_t::connect_awaiter socket_t::connect(std::string_view ip, uint16_t port) const {
