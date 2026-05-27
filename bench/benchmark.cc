@@ -9,10 +9,12 @@
 
 #include <iostream>
 #include <map>
+#include <csignal>
 
 using namespace bench;
 
 int main(int argc, char* argv[]) {
+  signal(SIGPIPE, SIG_IGN);
   cornet::config_t::load("conf/default.toml");
   cornet::logging::init();
   signal(SIGPIPE, SIG_IGN);

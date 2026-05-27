@@ -3,8 +3,6 @@
 
 #include "context.h"
 #include <tuple>
-#include <atomic>
-#include <memory>
 
 namespace cornet {
 
@@ -71,15 +69,16 @@ struct timeout_awaiter {
     auto& uring = ctx_->io_uring();
     auto& slots = ctx_->io_slots();
 
-    auto sqe1 = uring.get_sqe();
-    op_.slot_data = slots.alloc(&op_);
-    op_.prepare_fn(&op_, sqe1);
-    io_uring_sqe_set_data(sqe1, reinterpret_cast<void*>(op_.slot_data));
-    io_uring_sqe_set_flags(sqe1, sqe1->flags | IOSQE_IO_LINK);
+    io_uring_sqe* sqes[2];
+    uring.get_sqes(sqes, 2);
 
-    auto sqe2 = uring.get_sqe();
-    io_uring_prep_link_timeout(sqe2, &ts_, 0);
-    io_uring_sqe_set_data(sqe2, nullptr);
+    op_.slot_data = slots.alloc(&op_);
+    op_.prepare_fn(&op_, sqes[0]);
+    io_uring_sqe_set_data(sqes[0], reinterpret_cast<void*>(op_.slot_data));
+    io_uring_sqe_set_flags(sqes[0], sqes[0]->flags | IOSQE_IO_LINK);
+
+    io_uring_prep_link_timeout(sqes[1], &ts_, 0);
+    io_uring_sqe_set_data(sqes[1], nullptr);
   }
 
   expected<int> await_resume() {
@@ -107,12 +106,12 @@ timeout_awaiter<Awaitable, Rep, Period> with_timeout(Awaitable op, std::chrono::
 namespace detail {
 
 /**
- * @brief shared state for when_all/when_any with N coroutines
+ * @brief state for when_all/when_any with N coroutines
  */
 template<typename... Ts>
 struct when_all_state {
   std::tuple<expected<Ts>...> results;
-  std::atomic<int> remaining;
+  int remaining;
   std::coroutine_handle<> continuation{nullptr};
 
   when_all_state() : remaining(sizeof...(Ts)) {}
@@ -121,15 +120,15 @@ struct when_all_state {
 template<typename... Ts>
 struct when_any_state {
   std::tuple<expected<Ts>...> results;
-  std::atomic<bool> done{false};
-  std::atomic<int> completed_index{-1};
+  bool done{false};
+  int completed_index{-1};
   std::coroutine_handle<> continuation{nullptr};
 
   when_any_state() = default;
 };
 
 template<size_t I, typename State, typename T>
-coro_t<void> when_all_task(std::shared_ptr<State> state, coro_t<T> coro, context_t& ctx) {
+coro_t<void> when_all_task(State* state, coro_t<T> coro, context_t& ctx) {
   try {
     if constexpr (std::is_void_v<T>) {
       co_await coro;
@@ -141,7 +140,7 @@ coro_t<void> when_all_task(std::shared_ptr<State> state, coro_t<T> coro, context
   } catch (...) {
     std::get<I>(state->results) = unexpected(ECANCELED, error_domain::internal);
   }
-  if (state->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+  if (--state->remaining == 0) {
     if (state->continuation) {
       ctx.spawn(state->continuation);
     }
@@ -150,7 +149,7 @@ coro_t<void> when_all_task(std::shared_ptr<State> state, coro_t<T> coro, context
 }
 
 template<size_t I, typename State, typename T>
-coro_t<void> when_any_task(std::shared_ptr<State> state, coro_t<T> coro, context_t& ctx) {
+coro_t<void> when_any_task(State* state, coro_t<T> coro, context_t& ctx) {
   try {
     if constexpr (std::is_void_v<T>) {
       co_await coro;
@@ -162,9 +161,9 @@ coro_t<void> when_any_task(std::shared_ptr<State> state, coro_t<T> coro, context
   } catch (...) {
     std::get<I>(state->results) = unexpected(ECANCELED, error_domain::internal);
   }
-  bool expected_val = false;
-  if (state->done.compare_exchange_strong(expected_val, true, std::memory_order_acq_rel)) {
-    state->completed_index.store(I, std::memory_order_release);
+  if (!state->done) {
+    state->done = true;
+    state->completed_index = I;
     if (state->continuation) {
       ctx.spawn(state->continuation);
     }
@@ -173,23 +172,13 @@ coro_t<void> when_any_task(std::shared_ptr<State> state, coro_t<T> coro, context
 }
 
 template<typename State, typename Tuple, size_t... Is>
-void launch_all_impl(std::shared_ptr<State>& state, Tuple& coros, context_t& ctx, std::index_sequence<Is...>) {
+void launch_all_impl(State* state, Tuple& coros, context_t& ctx, std::index_sequence<Is...>) {
   (ctx.spawn(when_all_task<Is>(state, std::move(std::get<Is>(coros)), ctx)), ...);
 }
 
 template<typename State, typename Tuple, size_t... Is>
-void launch_all(std::shared_ptr<State>& state, Tuple& coros, context_t& ctx, std::index_sequence<Is...>) {
-  launch_all_impl(state, coros, ctx, std::index_sequence<Is...>{});
-}
-
-template<typename State, typename Tuple, size_t... Is>
-void launch_any_impl(std::shared_ptr<State>& state, Tuple& coros, context_t& ctx, std::index_sequence<Is...>) {
+void launch_any_impl(State* state, Tuple& coros, context_t& ctx, std::index_sequence<Is...>) {
   (ctx.spawn(when_any_task<Is>(state, std::move(std::get<Is>(coros)), ctx)), ...);
-}
-
-template<typename State, typename Tuple, size_t... Is>
-void launch_any(std::shared_ptr<State>& state, Tuple& coros, context_t& ctx, std::index_sequence<Is...>) {
-  launch_any_impl(state, coros, ctx, std::index_sequence<Is...>{});
 }
 
 } // namespace detail
@@ -232,23 +221,23 @@ template<typename... Ts>
 auto when_all(coro_t<Ts>... coros) {
   struct awaiter {
     context_t& ctx_;
-    std::shared_ptr<detail::when_all_state<Ts...>> state_;
+    detail::when_all_state<Ts...> state_;
     std::tuple<coro_t<Ts>...> coros_;
 
     bool await_ready() { return false; }
 
     void await_suspend(std::coroutine_handle<> h) {
-      state_->continuation = h;
-      launch_all(state_, coros_, ctx_, std::index_sequence_for<Ts...>{});
+      state_.continuation = h;
+      detail::launch_all_impl(&state_, coros_, ctx_, std::index_sequence_for<Ts...>{});
     }
 
     when_all_result<Ts...> await_resume() {
-      return {std::move(state_->results)};
+      return {std::move(state_.results)};
     }
   };
 
   auto& ctx = context_t::current();
-  return awaiter{ctx, std::make_shared<detail::when_all_state<Ts...>>(), std::tuple{std::move(coros)...}};
+  return awaiter{ctx, {}, std::tuple{std::move(coros)...}};
 }
 
 /**
@@ -260,23 +249,23 @@ template<typename... Ts>
 auto when_any(coro_t<Ts>... coros) {
   struct awaiter {
     context_t& ctx_;
-    std::shared_ptr<detail::when_any_state<Ts...>> state_;
+    detail::when_any_state<Ts...> state_;
     std::tuple<coro_t<Ts>...> coros_;
 
     bool await_ready() { return false; }
 
     void await_suspend(std::coroutine_handle<> h) {
-      state_->continuation = h;
-      launch_any(state_, coros_, ctx_, std::index_sequence_for<Ts...>{});
+      state_.continuation = h;
+      detail::launch_any_impl(&state_, coros_, ctx_, std::index_sequence_for<Ts...>{});
     }
 
     when_any_result<Ts...> await_resume() {
-      return {std::move(state_->results), state_->completed_index.load(std::memory_order_acquire)};
+      return {std::move(state_.results), state_.completed_index};
     }
   };
 
   auto& ctx = context_t::current();
-  return awaiter{ctx, std::make_shared<detail::when_any_state<Ts...>>(), std::tuple{std::move(coros)...}};
+  return awaiter{ctx, {}, std::tuple{std::move(coros)...}};
 }
 
 } // namespace cornet

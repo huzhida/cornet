@@ -6,6 +6,7 @@
 #include "utask.h"
 #include "atask.h"
 #include "coro.h"
+#include "awaiters.h"
 #include "scheduler.h"
 #include "executor.h"
 #include "io_slot.h"

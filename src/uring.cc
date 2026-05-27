@@ -74,6 +74,27 @@ io_uring_sqe* uring_t::get_sqe() {
   return sqe;
 }
 
+void uring_t::get_sqes(io_uring_sqe** out, size_t n) {
+  if (metrics_) metrics_->get_sqe_calls += n;
+  // try to acquire all n SQEs without intermediate submit
+  for (size_t i = 0; i < n; ++i) {
+    out[i] = io_uring_get_sqe(uring.get());
+    if (!out[i]) {
+      // not enough space, submit pending and retry all from scratch
+      if (metrics_) metrics_->get_sqe_submit_forced++;
+      int ret = io_uring_submit(uring.get());
+      if (ret > 0) task_nr += ret;
+      for (size_t j = 0; j < n; ++j) {
+        out[j] = io_uring_get_sqe(uring.get());
+        if (!out[j]) {
+          CORNET_FATAL("failed to get {} sqes even after submit", n);
+        }
+      }
+      return;
+    }
+  }
+}
+
 int uring_t::submit() {
   if (metrics_) metrics_->submit_calls++;
   scoped_timer_t timer(metrics_ ? metrics_->submit_latency : dummy_latency_);
