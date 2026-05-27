@@ -39,6 +39,35 @@ socklen_t to_address(std::string_view path, sockaddr_storage& addr) {
   return sizeof(sockaddr_un);
 }
 
+coro_t<expected<resolved_address>> resolve(std::string_view host, uint16_t port, int family, int type) {
+  auto& ctx = context_t::current();
+  std::string host_str(host);
+  std::string port_str = std::to_string(port);
+
+  auto result = co_await ctx.async([host_str, port_str, family, type]() -> expected<resolved_address> {
+    struct addrinfo hints{};
+    struct addrinfo* res;
+    hints.ai_family = family;
+    hints.ai_socktype = type;
+    hints.ai_flags = AI_ADDRCONFIG | AI_V4MAPPED;
+
+    int n = getaddrinfo(host_str.c_str(), port_str.c_str(), &hints, &res);
+    if (n != 0) {
+      return unexpected(n, error_domain::resolve);
+    }
+    if (!res) {
+      return unexpected(EAI_NONAME, error_domain::resolve);
+    }
+    resolved_address r;
+    r.socklen = res->ai_addrlen;
+    std::memcpy(&r.addr, res->ai_addr, res->ai_addrlen);
+    freeaddrinfo(res);
+    return r;
+  });
+
+  co_return result;
+}
+
 socket_t::socket_t(int fd) : fd(fd) {
   if (fd < 0) {
     CORNET_FATAL("socket bad file descriptor");
@@ -126,6 +155,17 @@ socket_t::connect_awaiter::connect_awaiter(int fd, std::string_view path)
   };
 }
 
+socket_t::connect_awaiter::connect_awaiter(int fd, const resolved_address& resolved)
+  : fd_(fd) {
+  this->ctx = &context_t::current();
+  addr = resolved.addr;
+  socklen_ = resolved.socklen;
+  this->prepare_fn = [](utask_t* self, io_uring_sqe* sqe) {
+    auto* t = static_cast<connect_awaiter*>(self);
+    io_uring_prep_connect(sqe, t->fd_, (sockaddr*)&t->addr, t->socklen_);
+  };
+}
+
 socket_t::recv_awaiter::recv_awaiter(int fd, void* buf, size_t nbytes, int flag)
   : fd_(fd), buf_(buf), nbytes_(nbytes), flag_(flag) {
   this->ctx = &context_t::current();
@@ -165,8 +205,31 @@ socket_t::recvmsg_awaiter::recvmsg_awaiter(int fd, struct msghdr *msg, int flags
 cornet::close_awaiter socket_t::close() const {
   return close_awaiter{fd};
 }
-socket_t::connect_awaiter socket_t::connect(std::string_view ip, uint16_t port) const {
-  return connect_awaiter{fd, ip, port, domain, type};
+coro_t<expected<void>> socket_t::connect(std::string_view host, uint16_t port) const {
+  // fast path: numeric IP address, no DNS needed
+  resolved_address fast{};
+  fast.socklen = to_address(host, port, fast.addr, domain, type, AI_NUMERICHOST);
+  if (fast.socklen > 0) {
+    auto ret = co_await connect(fast);
+    if (!ret) {
+      co_return unexpected(ret.error());
+    }
+    co_return {};
+  }
+
+  // slow path: hostname, async DNS resolve via thread pool
+  auto resolved = co_await resolve(host, port, domain, type);
+  if (!resolved) {
+    co_return unexpected(resolved.error());
+  }
+  auto ret = co_await connect(*resolved);
+  if (!ret) {
+    co_return unexpected(ret.error());
+  }
+  co_return {};
+}
+socket_t::connect_awaiter socket_t::connect(const resolved_address& resolved) const {
+  return connect_awaiter{fd, resolved};
 }
 socket_t::recv_awaiter socket_t::recv(void* buf, size_t nbytes, int flag) const {
   return recv_awaiter{fd, buf, nbytes, flag};

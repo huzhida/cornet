@@ -139,3 +139,92 @@ TEST_F(combinators, when_any_basic) {
   ctx->spawn(test(*ctx));
   ctx->run();
 }
+
+TEST_F(combinators, canceler_before_io) {
+  auto test = [](context_t& ctx) -> coro_t<void> {
+    canceler_t canceler;
+    canceler.cancel();  // cancel before any IO
+
+    tcp::v4::socket_t server_sock;
+    server_sock.address_reuse(true);
+    EXPECT_TRUE(server_sock.listen("127.0.0.1", 23460).has_value());
+
+    // should return ECANCELED immediately without submitting IO
+    auto result = co_await with_cancel(server_sock.accept(nullptr, nullptr, 0), canceler);
+    EXPECT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ECANCELED);
+    co_return;
+  };
+  ctx->spawn(test(*ctx));
+  ctx->run();
+}
+
+TEST_F(combinators, canceler_during_io) {
+  auto test = [](context_t& ctx) -> coro_t<void> {
+    canceler_t canceler;
+
+    tcp::v4::socket_t server_sock;
+    server_sock.address_reuse(true);
+    EXPECT_TRUE(server_sock.listen("127.0.0.1", 23461).has_value());
+
+    // spawn a coroutine that cancels after a short delay
+    auto cancel_task = [&canceler]() -> coro_t<void> {
+      co_await sleep(std::chrono::milliseconds(50));
+      canceler.cancel();
+    };
+    ctx.spawn(cancel_task());
+
+    // accept will block until cancelled
+    auto result = co_await with_cancel(server_sock.accept(nullptr, nullptr, 0), canceler);
+    EXPECT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ECANCELED);
+    co_return;
+  };
+  ctx->spawn(test(*ctx));
+  ctx->run();
+}
+
+TEST_F(combinators, canceler_hierarchical) {
+  auto test = [](context_t& ctx) -> coro_t<void> {
+    canceler_t parent;
+    canceler_t child(parent);
+
+    tcp::v4::socket_t server_sock;
+    server_sock.address_reuse(true);
+    EXPECT_TRUE(server_sock.listen("127.0.0.1", 23462).has_value());
+
+    // cancel parent after delay, should propagate to child
+    auto cancel_task = [&parent]() -> coro_t<void> {
+      co_await sleep(std::chrono::milliseconds(50));
+      parent.cancel();
+    };
+    ctx.spawn(cancel_task());
+
+    auto result = co_await with_cancel(server_sock.accept(nullptr, nullptr, 0), child);
+    EXPECT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ECANCELED);
+    EXPECT_TRUE(child.is_cancelled());
+    EXPECT_TRUE(parent.is_cancelled());
+    co_return;
+  };
+  ctx->spawn(test(*ctx));
+  ctx->run();
+}
+
+TEST_F(combinators, canceler_reset) {
+  auto test = [](context_t& ctx) -> coro_t<void> {
+    canceler_t canceler;
+    canceler.cancel();
+    EXPECT_TRUE(canceler.is_cancelled());
+
+    canceler.reset();
+    EXPECT_FALSE(canceler.is_cancelled());
+
+    // after reset, operations should work normally
+    auto ret = co_await with_cancel(sleep(std::chrono::milliseconds(10)), canceler);
+    EXPECT_TRUE(ret.has_value());
+    co_return;
+  };
+  ctx->spawn(test(*ctx));
+  ctx->run();
+}

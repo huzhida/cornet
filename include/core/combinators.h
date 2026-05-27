@@ -6,6 +6,142 @@
 
 namespace cornet {
 
+// forward declaration
+template<typename Awaitable>
+struct cancellable_awaiter;
+
+/**
+ * @brief canceler. Supports single-task cancellation and hierarchical propagation.
+ * Single-threaded, no atomic operations needed.
+ *
+ * Usage:
+ *   canceler_t canceler;
+ *   ctx.spawn(handle_client(sock, canceler));
+ *   canceler.cancel();  // cancel the client coroutine
+ *
+ * Hierarchical:
+ *   canceler_t parent;
+ *   canceler_t child(parent);
+ *   parent.cancel();  // propagates to child
+ */
+struct canceler_t {
+  canceler_t() : ctx_(&context_t::current()) {}
+
+  explicit canceler_t(canceler_t& parent)
+    : ctx_(parent.ctx_), parent_(&parent) {
+    next_sibling_ = parent.first_child_;
+    parent.first_child_ = this;
+  }
+
+  ~canceler_t() {
+    if (parent_) {
+      // unlink from parent's children list
+      auto** pp = &parent_->first_child_;
+      while (*pp && *pp != this) {
+        pp = &(*pp)->next_sibling_;
+      }
+      if (*pp) {
+        *pp = next_sibling_;
+      }
+    }
+  }
+
+  canceler_t(const canceler_t&) = delete;
+  canceler_t& operator=(const canceler_t&) = delete;
+
+  /**
+   * @brief cancel this canceler and all children.
+   * If an IO operation is currently inflight, issues io_uring cancel for it.
+   */
+  void cancel() {
+    if (cancelled_) return;
+    cancelled_ = true;
+
+    if (active_task_ && active_task_->slot_data != 0) {
+      auto* sqe = ctx_->io_uring().get_sqe();
+      io_uring_prep_cancel(sqe, reinterpret_cast<void*>(active_task_->slot_data), 0);
+      io_uring_sqe_set_data(sqe, nullptr);
+    }
+
+    for (auto* child = first_child_; child; child = child->next_sibling_) {
+      child->cancel();
+    }
+  }
+
+  /**
+   * @brief check if this canceler has been cancelled
+   */
+  CORNET_NODISCARD bool is_cancelled() const { return cancelled_; }
+
+  /**
+   * @brief reset canceler to reusable state
+   */
+  void reset() {
+    cancelled_ = false;
+    active_task_ = nullptr;
+  }
+
+private:
+  bool cancelled_{false};
+  utask_t* active_task_{nullptr};
+  context_t* ctx_{nullptr};
+  canceler_t* parent_{nullptr};
+  canceler_t* first_child_{nullptr};
+  canceler_t* next_sibling_{nullptr};
+
+  template<typename Awaitable>
+  friend struct cancellable_awaiter;
+};
+
+/**
+ * @brief wraps a utask_t-based awaitable with cancellation support.
+ * When the associated canceler is cancelled, the inflight io_uring operation
+ * is automatically cancelled and the coroutine resumes with ECANCELED.
+ *
+ * Usage: auto n = co_await with_cancel(sock.recv(buf, 4096), canceler);
+ */
+template<typename Awaitable>
+struct cancellable_awaiter {
+  Awaitable op_;
+  canceler_t& canceler_;
+  bool submitted_{false};
+
+  cancellable_awaiter(Awaitable op, canceler_t& canceler)
+    : op_(std::move(op)), canceler_(canceler) {}
+
+  bool await_ready() {
+    if (canceler_.is_cancelled()) return true;
+    return op_.await_ready();
+  }
+
+  bool await_suspend(std::coroutine_handle<> h) {
+    if (canceler_.is_cancelled()) return false;
+    canceler_.active_task_ = &op_;
+    op_.await_suspend(h);
+    submitted_ = true;
+    return true;
+  }
+
+  auto await_resume() -> decltype(op_.await_resume()) {
+    canceler_.active_task_ = nullptr;
+    if (!submitted_) {
+      return unexpected(ECANCELED);
+    }
+    return op_.await_resume();
+  }
+};
+
+/**
+ * @brief wrap any utask_t-derived awaiter with cancellation support
+ * @param op the io operation awaiter
+ * @param canceler the canceler to associate with
+ * @return cancellable awaiter
+ */
+template<typename Awaitable>
+cancellable_awaiter<Awaitable> with_cancel(Awaitable op, canceler_t& canceler) {
+  return {std::move(op), canceler};
+}
+
 /**
  * @brief sleep awaiter. Suspends the coroutine for the given duration using io_uring timeout.
  * Usage: co_await sleep(std::chrono::seconds(1));
