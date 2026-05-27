@@ -86,6 +86,11 @@ private:
 
   template<typename Awaitable, typename Rep, typename Period>
   friend struct timeout_awaiter;
+
+  friend struct canceler_t;
+
+  template<typename Awaitable>
+  friend struct cancellable_awaiter;
 };
 
 } // namespace cornet

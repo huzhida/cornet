@@ -13,6 +13,27 @@ socklen_t to_address(std::string_view address, uint16_t port, sockaddr_storage& 
                 int family = AF_UNSPEC, int type = SOCK_STREAM, int flag = AI_NUMERICHOST);
 socklen_t to_address(std::string_view path, sockaddr_storage& addr);
 
+/**
+ * @brief resolve result containing resolved address and its length
+ */
+struct resolved_address {
+  sockaddr_storage addr{};
+  socklen_t socklen{0};
+
+  explicit operator bool() const { return socklen > 0; }
+};
+
+/**
+ * @brief async DNS resolve. Offloads getaddrinfo to thread pool to avoid blocking the event loop.
+ * @param host hostname or IP address
+ * @param port port number
+ * @param family address family (AF_INET, AF_INET6, AF_UNSPEC)
+ * @param type socket type (SOCK_STREAM, SOCK_DGRAM)
+ * @return resolved address on success, error on failure
+ */
+coro_t<expected<resolved_address>> resolve(std::string_view host, uint16_t port,
+                                         int family = AF_UNSPEC, int type = SOCK_STREAM);
+
 class socket_t {
  public:
   /**
@@ -33,6 +54,7 @@ class socket_t {
   struct connect_awaiter : utask_t {
     connect_awaiter(int fd, std::string_view ip, uint16_t port, int domain, int type);
     connect_awaiter(int fd, std::string_view path);
+    connect_awaiter(int fd, const resolved_address& resolved);
 
     CORNET_NODISCARD CORNET_MAYBE_UNUSED expected<void> await_resume() const {
       if (value < 0) return unexpected(-value);
@@ -117,11 +139,20 @@ class socket_t {
   /**
    * @brief async close socket
    */
-  cornet::close_awaiter close() const;
+  close_awaiter close() const;
   /**
-   * @brief async connect to ip:port
+   * @brief async connect with async DNS resolve.
+   * @param host hostname or IP address
+   * @param port port number
+   * @return expected<void> on success, error on failure
    */
-  connect_awaiter connect(std::string_view address, uint16_t port) const;
+  coro_t<expected<void>> connect(std::string_view host, uint16_t port) const;
+  /**
+   * @brief async connect to pre-resolved address.
+   * @param resolved resolve result from cornet::resolve()
+   * @return connect_awaiter
+   */
+  connect_awaiter connect(const resolved_address& resolved) const;
   /**
    * @brief async recv from peer
    */
