@@ -30,17 +30,23 @@ Cornet 是一个基于 C++20 协程和 Linux io_uring 的高性能异步网络�
 
 ### 构建
 
+**一键搭建（推荐）：**
+
 ```bash
-# 克隆项目
+git clone https://github.com/user/cornet.git && cd cornet
+./setup.sh
+```
+
+脚本会自动完成：内核版本检查、系统依赖安装（含 liburing）、vcpkg 安装、项目构建。
+
+**手动构建：**
+
+```bash
 git clone https://github.com/user/cornet.git && cd cornet
 
-# 安装 liburing（如果系统未安装）
-git clone https://github.com/axboe/liburing.git
-cd liburing && ./configure --prefix=/usr/local && make -j$(nproc) && sudo make install && cd ..
-
-# 构建
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build
+# 确保已安装 vcpkg 并设置 VCPKG_ROOT
+cmake --preset release
+cmake --build --preset release
 ```
 
 ### 最简示例：TCP Echo Server

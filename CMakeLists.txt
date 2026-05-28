@@ -1,44 +1,123 @@
-cmake_minimum_required(VERSION 3.10)
-
-set(CORNET cornet)
-project(${CORNET})
+cmake_minimum_required(VERSION 3.16)
+project(cornet VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-
-if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
-    add_compile_options(-O2 -Ofast -ffast-math -funroll-loops -march=native)
-else()
-    add_compile_options(-fsanitize=address -g)
-    add_link_options(-fsanitize=address)
-endif()
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 if(NOT UNIX)
-    message(FATAL_ERROR "only support to be build on Unix system")
+    message(FATAL_ERROR "Only Unix is supported")
 endif()
 
+# ─── 依赖 ───
 find_package(spdlog CONFIG REQUIRED)
 find_package(tomlplusplus CONFIG REQUIRED)
+
+# ─── 核心库 ───
+add_library(cornet STATIC
+    src/logging.cc
+    src/task.cc
+    src/executor.cc
+    src/scheduler.cc
+    src/context.cc
+    src/uring.cc
+    src/awaiters.cc
+    src/socket.cc
+)
+add_library(cornet::cornet ALIAS cornet)
+target_include_directories(
+    cornet PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(
+    cornet PUBLIC
+    uring
+    spdlog::spdlog
+    tomlplusplus::tomlplusplus
+)
+target_compile_options(
+    cornet PRIVATE
+    $<$<NOT:$<CONFIG:Debug>>:-O2 -funroll-loops -march=native>
+    $<$<CONFIG:Debug>:-fsanitize=address -g>
+)
+target_link_options(
+    cornet PUBLIC
+    $<$<CONFIG:Debug>:-fsanitize=address>
+)
+
+# ─── 主程序 ───
+add_executable(hello-cornet main.cc)
+target_link_libraries(hello-cornet PRIVATE cornet)
+
+# ─── Benchmark ───
 find_package(asio CONFIG REQUIRED)
 find_package(concurrentqueue CONFIG REQUIRED)
 find_package(libuv CONFIG REQUIRED)
 
-file(GLOB_RECURSE CORNET_SRC CONFIGURE_DEPENDS src/*.cc src/*.hpp)
+add_executable(bench EXCLUDE_FROM_ALL bench/benchmark.cc)
+target_include_directories(bench PRIVATE bench)
+target_link_libraries(
+    bench PRIVATE
+    cornet
+    asio::asio
+    concurrentqueue::concurrentqueue
+    $<IF:$<TARGET_EXISTS:libuv::uv_a>,libuv::uv_a,libuv::uv>
+)
 
-add_executable(${CORNET} main.cc ${CORNET_SRC})
-target_link_libraries(${CORNET} uring spdlog::spdlog tomlplusplus::tomlplusplus)
-target_include_directories(${CORNET} PUBLIC include)
-
-add_executable(bench bench/benchmark.cc ${CORNET_SRC})
-target_link_libraries(bench PRIVATE uring spdlog::spdlog tomlplusplus::tomlplusplus asio::asio concurrentqueue::concurrentqueue $<IF:$<TARGET_EXISTS:libuv::uv_a>,libuv::uv_a,libuv::uv>)
-target_include_directories(bench PUBLIC include bench)
-
-file(GLOB_RECURSE CORNET_TEST_SRC CONFIGURE_DEPENDS tests/*.cc)
+# ─── 测试 ───
 enable_testing()
 find_package(GTest CONFIG REQUIRED)
 include(GoogleTest)
-add_executable(unit_test ${CORNET_TEST_SRC} ${CORNET_SRC})
-target_include_directories(unit_test PUBLIC include)
-target_link_libraries(unit_test PRIVATE uring spdlog::spdlog tomlplusplus::tomlplusplus asio::asio concurrentqueue::concurrentqueue
-        GTest::gtest GTest::gtest_main GTest::gmock GTest::gmock_main)
+
+add_executable(unit_test EXCLUDE_FROM_ALL
+    tests/socket.cc
+    tests/expected.cc
+    tests/io_slot.cc
+    tests/generic_io.cc
+    tests/async.cc
+    tests/combinators.cc
+)
+target_link_libraries(unit_test PRIVATE
+    cornet
+    asio::asio
+    concurrentqueue::concurrentqueue
+    GTest::gtest_main
+    GTest::gmock
+)
+gtest_discover_tests(unit_test)
+
+# ─── 安装 ───
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+
+install(
+    TARGETS cornet
+    EXPORT cornetTargets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+)
+install(
+    DIRECTORY include/ 
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(
+    EXPORT cornetTargets
+    NAMESPACE cornet::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/cornet
+)
+
+configure_package_config_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/cmake/cornetConfig.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/cornetConfig.cmake
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/cornet
+)
+write_basic_package_version_file(
+    ${CMAKE_CURRENT_BINARY_DIR}/cornetConfigVersion.cmake
+    COMPATIBILITY SameMajorVersion
+)
+install(FILES
+    ${CMAKE_CURRENT_BINARY_DIR}/cornetConfig.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/cornetConfigVersion.cmake
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/cornet
+)
+
+# cmake --build --preset debug/release
