@@ -2,6 +2,7 @@
   "dependencies": [
     "spdlog",
     "tomlplusplus",
+    "liburing",
     "asio",
     "gtest",
     "concurrentqueue",
