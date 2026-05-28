@@ -11,6 +11,7 @@ namespace bench {
 inline result_t run_cornet(const scenario_t& scenario, cornet::scheduler_type_t sched_type) {
   using namespace cornet;
   std::atomic<bool> server_running{true};
+  std::atomic<bool> server_ready{false};
   latency_collector_t collector;
   collector.reserve(scenario.total_messages);
 
@@ -32,6 +33,7 @@ inline result_t run_cornet(const scenario_t& scenario, cornet::scheduler_type_t 
     listener.port_reuse(true);
     listener.address_reuse(true);
     listener.listen("127.0.0.1", 9876);
+    server_ready.store(true, std::memory_order_release);
     while (server_running) {
       sockaddr_storage addr{};
       socklen_t len{};
@@ -72,7 +74,9 @@ inline result_t run_cornet(const scenario_t& scenario, cornet::scheduler_type_t 
     ctx.run();
   });
 
-  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  while (!server_ready.load(std::memory_order_acquire)) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
 
   size_t rss_before = get_current_rss_kb();
   auto start = std::chrono::steady_clock::now();

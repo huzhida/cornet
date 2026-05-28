@@ -2,6 +2,9 @@
 #define CORNET_CONTEXT_H
 
 #include "uring.h"
+#ifndef IORING_ASYNC_CANCEL_ANY
+#define IORING_ASYNC_CANCEL_ANY (1U << 2)
+#endif
 #include "task.h"
 #include "utask.h"
 #include "atask.h"
@@ -196,25 +199,43 @@ struct context_t {
 
   /**
    * @brief cancel all pending io_uring operations.
-   * @param user_data target to cancel (depends on flags)
-   * @param flags IORING_ASYNC_CANCEL_* flags
+   * Uses IORING_ASYNC_CANCEL_ANY on 5.19+ kernels, falls back to
+   * per-slot cancellation on older kernels.
    * @return expected<int>: canceled task count on success, error on failure
    */
-  inline coro_t<expected<int>> cancel_pending_io(void* user_data = nullptr, int flags = IORING_ASYNC_CANCEL_ANY) {
+  inline coro_t<expected<int>> cancel_pending_io() {
     int canceled_nr = 0;
-    while(!uring.idle()) {
-      auto ret = co_await cancel_awaiter{*this, user_data, flags};
-      if (!ret) {
-        if (ret.error().code == ENOENT) {
-          co_return canceled_nr;
+
+    // Try CANCEL_ANY first (5.19+)
+    if (!uring.idle()) {
+      auto ret = co_await cancel_awaiter{*this, nullptr, IORING_ASYNC_CANCEL_ANY};
+      if (!ret && ret.error().code == EINVAL) {
+        // Kernel doesn't support CANCEL_ANY, fallback to per-slot cancel
+        std::vector<uint64_t> active;
+        slots.for_each_active([&](uint64_t sd) { active.push_back(sd); });
+        for (auto sd : active) {
+          auto r = co_await cancel_awaiter{*this, reinterpret_cast<void*>(sd), 0};
+          if (r && *r > 0) canceled_nr += *r;
         }
-        co_return ret;
-      }
-      int val = *ret;
-      if (val == 0) {
         co_return canceled_nr;
       }
-      canceled_nr += val;
+      // CANCEL_ANY supported
+      if (!ret) {
+        if (ret.error().code == ENOENT) co_return canceled_nr;
+        co_return ret;
+      }
+      if (*ret > 0) canceled_nr += *ret;
+    }
+
+    // Continue with CANCEL_ANY
+    while (!uring.idle()) {
+      auto ret = co_await cancel_awaiter{*this, nullptr, IORING_ASYNC_CANCEL_ANY};
+      if (!ret) {
+        if (ret.error().code == ENOENT) co_return canceled_nr;
+        co_return ret;
+      }
+      if (*ret == 0) co_return canceled_nr;
+      canceled_nr += *ret;
     }
     co_return canceled_nr;
   }
