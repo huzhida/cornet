@@ -101,6 +101,15 @@ class io_slot_table_t {
     return slot.task;
   }
 
+  template<typename F>
+  void for_each_active(F&& fn) const {
+    for (uint32_t i = 0; i < slots_.size(); ++i) {
+      if (slots_[i].task) {
+        fn(encode_slot(i, slots_[i].generation));
+      }
+    }
+  }
+
  private:
   std::vector<io_slot_t> slots_;
   std::vector<uint32_t> free_list_;
