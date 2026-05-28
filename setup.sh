@@ -10,6 +10,13 @@ info()  { echo -e "${GREEN}[INFO]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 error() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
 
+SUDO=""
+if [ "$(id -u)" -ne 0 ]; then
+    SUDO="sudo"
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # ─── 内核版本检查 ───
 KVER=$(uname -r | cut -d. -f1-2)
 KVER_MAJOR=$(echo "$KVER" | cut -d. -f1)
@@ -22,19 +29,19 @@ info "内核版本 $(uname -r) ✓"
 # ─── 系统依赖 ───
 info "安装系统依赖..."
 if command -v apt-get &>/dev/null; then
-    sudo apt-get update
-    sudo apt-get install -y build-essential gcc g++ cmake ninja-build \
-        git curl zip unzip tar pkg-config liburing-dev
+    $SUDO apt-get update
+    $SUDO apt-get install -y build-essential gcc g++ cmake ninja-build \
+        git curl zip unzip tar pkg-config
 elif command -v dnf &>/dev/null; then
-    sudo dnf groupinstall -y "Development Tools"
-    sudo dnf install -y gcc gcc-c++ cmake ninja-build \
-        git curl zip unzip tar pkgconf-pkg-config liburing-devel
+    $SUDO dnf groupinstall -y "Development Tools"
+    $SUDO dnf install -y gcc gcc-c++ cmake ninja-build \
+        git curl zip unzip tar pkgconf-pkg-config
 elif command -v yum &>/dev/null; then
-    sudo yum groupinstall -y "Development Tools"
-    sudo yum install -y gcc gcc-c++ cmake ninja-build \
-        git curl zip unzip tar pkgconfig liburing-devel
+    $SUDO yum groupinstall -y "Development Tools"
+    $SUDO yum install -y gcc gcc-c++ cmake ninja-build \
+        git curl zip unzip tar pkgconfig
 else
-    error "不支持的包管理器，请手动安装: gcc 11+, cmake 3.16+, ninja, git, pkg-config, liburing-dev"
+    error "不支持的包管理器，请手动安装: gcc 11+, cmake 3.16+, ninja, git, pkg-config"
 fi
 info "系统依赖已就绪 ✓"
 
@@ -45,18 +52,20 @@ if [ "$GCC_VER" -lt 11 ]; then
 fi
 info "GCC $(gcc -dumpversion) ✓"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
 # ─── vcpkg ───
 info "检查 vcpkg..."
+VCPKG_DIR="$SCRIPT_DIR/.vcpkg"
 if command -v vcpkg &>/dev/null; then
     info "vcpkg 已在 PATH 中 ✓"
     export VCPKG_ROOT="${VCPKG_ROOT:-$(dirname "$(command -v vcpkg)")}"
 elif [ -n "$VCPKG_ROOT" ] && [ -x "$VCPKG_ROOT/vcpkg" ]; then
     info "vcpkg 已存在于 VCPKG_ROOT=$VCPKG_ROOT ✓"
     export PATH="$VCPKG_ROOT:$PATH"
+elif [ -x "$VCPKG_DIR/vcpkg" ]; then
+    info "vcpkg 已存在于 $VCPKG_DIR ✓"
+    export VCPKG_ROOT="$VCPKG_DIR"
+    export PATH="$VCPKG_ROOT:$PATH"
 else
-    VCPKG_DIR="$SCRIPT_DIR/.vcpkg"
     warn "未检测到 vcpkg，正在安装到 $VCPKG_DIR..."
     git clone https://github.com/microsoft/vcpkg.git "$VCPKG_DIR"
     "$VCPKG_DIR/bootstrap-vcpkg.sh" -disableMetrics
@@ -68,11 +77,16 @@ fi
 # ─── 构建 cornet ───
 cd "$SCRIPT_DIR"
 
-info "开始构建 cornet（Release）..."
-cmake --preset release
-cmake --build --preset release
+BUILD_TYPE="${1:-release}"
+if [ "$BUILD_TYPE" != "debug" ] && [ "$BUILD_TYPE" != "release" ]; then
+    error "用法: ./setup.sh [debug|release]"
+fi
+
+info "开始构建 cornet（$BUILD_TYPE）..."
+cmake --preset "$BUILD_TYPE"
+cmake --build --preset "$BUILD_TYPE"
 
 info "========================================="
 info " cornet 环境搭建完成！"
-info " 构建产物位于: cmake-build-release/"
+info " 构建产物位于: cmake-build-$BUILD_TYPE/"
 info "========================================="

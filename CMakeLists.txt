@@ -12,6 +12,8 @@ endif()
 # ─── 依赖 ───
 find_package(spdlog CONFIG REQUIRED)
 find_package(tomlplusplus CONFIG REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(LIBURING REQUIRED IMPORTED_TARGET liburing)
 
 # ─── 核心库 ───
 add_library(cornet STATIC
@@ -32,7 +34,7 @@ target_include_directories(
 )
 target_link_libraries(
     cornet PUBLIC
-    uring
+    PkgConfig::LIBURING
     spdlog::spdlog
     tomlplusplus::tomlplusplus
 )
