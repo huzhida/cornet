@@ -140,7 +140,7 @@ coro_t<void> context_t::signal_watch_loop() {
 
 void context_t::wakeup() {
   uint64_t val = 1;
-  ::write(wakeup_fd, &val, sizeof(val));
+  auto _ = ::write(wakeup_fd, &val, sizeof(val));
 }
 
 void context_t::set_scheduler_type(scheduler_type_t type) {
