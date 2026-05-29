@@ -65,6 +65,26 @@ auto result = co_await ctx.async([] {
 });
 ```
 
+### 跨线程投递（spawn_remote）
+
+```cpp
+// 从任意线程向目标 context 投递协程
+other_ctx->spawn_remote([data = std::move(data)]() -> coro_t<void> {
+    co_await process(data);
+});
+```
+
+callable 必须返回 `coro_t<void>`，在目标线程创建并执行协程。详见 [runtime.md](runtime.md)。
+
+### keep_alive 模式
+
+```cpp
+// 防止 context 在无用户任务时自动退出（runtime_t 内部使用）
+ctx.set_keep_alive(true);
+```
+
+启用后 `user_idle()` 始终返回 false，context 不会自动进入 Canceling 状态。
+
 ### 关闭流程
 
 ```cpp

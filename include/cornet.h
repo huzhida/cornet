@@ -3,6 +3,7 @@
 
 #include "core/socket.h"
 #include "core/combinators.h"
+#include "core/runtime.h"
 #include "utils/config.h"
 #include "utils/logging.h"
 

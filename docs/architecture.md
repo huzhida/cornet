@@ -98,6 +98,8 @@ child coroutine                  return child_handle (symmetric transfer)
 
 ## 线程模型
 
+### 单线程模式（默认）
+
 ```
 ┌────────────────────────────────────┐
 │          Main Thread               │
@@ -117,6 +119,29 @@ child coroutine                  return child_handle (symmetric transfer)
                 ▼
            协程在 Main Thread 恢复
 ```
+
+### 多线程模式（runtime_t）
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                       runtime_t                              │
+│                                                             │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐     │
+│  │   thread 0   │  │   thread 1   │  │   thread N   │     │
+│  │  context_t   │  │  context_t   │  │  context_t   │     │
+│  │  io_uring    │  │  io_uring    │  │  io_uring    │     │
+│  │  scheduler   │  │  scheduler   │  │  scheduler   │     │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘     │
+│         │                  │                  │             │
+│         └───── spawn_remote (MPSC queue) ─────┘             │
+│                   + eventfd 唤醒                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+核心原则：
+- **Shared-Nothing**：每个线程独立 context，无共享状态，无锁
+- **协程不迁移**：协程从创建到结束在同一线程执行
+- **跨线程通信仅通过 `spawn_remote`**：投递 callable 到目标线程执行
 
 ## 关键设计决策
 
