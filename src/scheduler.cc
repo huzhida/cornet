@@ -48,6 +48,9 @@ uint32_t scheduler_t::flush_io(context_t& ctx, std::chrono::nanoseconds wait_tim
   // collect executor completions first, may fill ready_tasks
   process_async_tasks(ctx);
 
+  // drain cross-thread task submissions
+  ctx.drain_remote_queue();
+
   uint32_t cqes = 0;
   if (!uring.user_idle()) {
     // user IO tasks inflight, try to harvest completions

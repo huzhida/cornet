@@ -12,6 +12,7 @@ endif()
 # ─── 依赖 ───
 find_package(spdlog CONFIG REQUIRED)
 find_package(tomlplusplus CONFIG REQUIRED)
+find_package(concurrentqueue CONFIG REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBURING REQUIRED IMPORTED_TARGET liburing)
 
@@ -25,6 +26,7 @@ add_library(cornet STATIC
     src/uring.cc
     src/awaiters.cc
     src/socket.cc
+    src/runtime.cc
 )
 add_library(cornet::cornet ALIAS cornet)
 target_include_directories(
@@ -37,6 +39,7 @@ target_link_libraries(
     PkgConfig::LIBURING
     spdlog::spdlog
     tomlplusplus::tomlplusplus
+    concurrentqueue::concurrentqueue
 )
 target_compile_options(
     cornet PRIVATE
@@ -54,7 +57,6 @@ target_link_libraries(hello-cornet PRIVATE cornet)
 
 # ─── Benchmark ───
 find_package(asio CONFIG REQUIRED)
-find_package(concurrentqueue CONFIG REQUIRED)
 find_package(libuv CONFIG REQUIRED)
 
 add_executable(bench EXCLUDE_FROM_ALL bench/benchmark.cc)
@@ -79,6 +81,7 @@ add_executable(unit_test EXCLUDE_FROM_ALL
     tests/generic_io.cc
     tests/async.cc
     tests/combinators.cc
+    tests/runtime.cc
 )
 target_link_libraries(unit_test PRIVATE
     cornet

@@ -15,8 +15,24 @@
 #include "io_slot.h"
 #include "utils/metrics.h"
 #include <functional>
+#include <concurrentqueue/moodycamel/concurrentqueue.h>
+#ifdef BLOCK_SIZE
+#undef BLOCK_SIZE
+#endif
 
 namespace cornet {
+
+namespace detail {
+/**
+ * @brief wrapper coroutine that moves a callable into its coroutine frame,
+ * then co_awaits the coroutine produced by the callable.
+ * This ensures the callable (and its captures) outlives the inner coroutine.
+ */
+template<typename F>
+coro_t<void> spawn_remote_runner(F f) {
+  co_await f();
+}
+} // namespace detail
 
 struct context_t {
   /**
@@ -72,6 +88,30 @@ struct context_t {
   }
 
   /**
+   * @brief submit a coroutine factory to be executed on this context's thread.
+   * Thread-safe: can be called from any thread.
+   * The callable is invoked on this context's owner thread to produce a coroutine,
+   * which is then spawned into the scheduler.
+   * Uses a wrapper coroutine to move the callable into the coroutine frame,
+   * preventing the lambda coroutine lifetime issue (dangling this).
+   * @tparam F callable type that returns coro_t<void>
+   * @param fn callable to invoke on this context's thread
+   */
+  template<typename F>
+  void spawn_remote(F&& fn) {
+    remote_queue_.enqueue([this, f = std::decay_t<F>(std::forward<F>(fn))]() mutable {
+      this->spawn(detail::spawn_remote_runner(std::move(f)));
+    });
+    wakeup();
+  }
+
+  /**
+   * @brief drain all pending remote tasks into the scheduler.
+   * Called from the scheduler during flush_io. Single-consumer (owner thread only).
+   */
+  void drain_remote_queue();
+
+  /**
    * @brief awaiter for executing a callable on the thread pool.
    * On await_suspend, submits work to executor. On completion, the scheduler
    * picks it up and resumes the coroutine with the result.
@@ -119,7 +159,7 @@ struct context_t {
    * Thread-safe: can be called from any thread.
    * @param timeout max time to wait for existing work to finish before force-canceling
    */
-  void shutdown(std::chrono::nanoseconds timeout = std::chrono::seconds(5));
+  void shutdown(std::chrono::nanoseconds timeout = std::chrono::seconds(1));
 
   /**
    * @brief force stop immediately (no drain, no timeout).
@@ -204,9 +244,12 @@ struct context_t {
   }
 
   /**
-   * @brief set context scheduler type, new scheduler will take over schedule.
-   * @param type new scheduler type.
+   * @brief set keep-alive mode. When true, the context will not auto-exit
+   * when user tasks are idle. Only explicit shutdown()/stop() will terminate it.
+   * Used by runtime_t to keep worker threads alive waiting for spawn_remote.
+   * @param enabled whether to enable keep-alive
    */
+  void set_keep_alive(bool enabled) { keep_alive_ = enabled; }
   void set_scheduler_type(scheduler_type_t type);
 
   /**
@@ -244,9 +287,11 @@ struct context_t {
   /**
    * @brief whether all user tasks are done (only persistent watchers remain).
    * Used to trigger the Terminated state transition.
+   * When keep_alive is set, always returns false to prevent auto-exit.
    * @return true if no user IO inflight and no ready tasks
    */
   CORNET_NODISCARD inline bool user_idle() {
+    if (keep_alive_) return false;
     if (executor && !executor->idle()) return false;
     return scheduler->idle() && uring.user_idle();
   }
@@ -404,15 +449,17 @@ private:
   int signal_fd{-1};
   // per-signal handler callbacks
   std::unordered_map<int, std::function<void(int)>> signal_handlers;
-  // shutdown timeout
-  std::chrono::nanoseconds shutdown_timeout{std::chrono::seconds(5)};
+  // MPSC queue for cross-thread task submission
+  moodycamel::ConcurrentQueue<std::function<void()>> remote_queue_;
+  // keep-alive flag: prevents auto-exit when user tasks are idle
+  bool keep_alive_{false};
 
   // internal: signal watch coroutine
   coro_t<void> signal_watch_loop();
   // internal: wakeup eventfd watch coroutine
   coro_t<void> wakeup_watch_loop();
   // internal: shutdown coroutine (drain → cancel → terminate)
-  coro_t<void> shutdown_sequence();
+  coro_t<void> shutdown_sequence(std::chrono::nanoseconds timeout);
 };
 
 } // cornet

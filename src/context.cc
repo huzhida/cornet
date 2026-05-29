@@ -68,10 +68,16 @@ void context_t::run() {
 }
 
 void context_t::shutdown(std::chrono::nanoseconds timeout) {
-  shutdown_timeout = timeout;
-  auto expected = state_t::Running;
-  if (state.compare_exchange_strong(expected, state_t::Draining, std::memory_order_acq_rel)) {
-    spawn(shutdown_sequence());
+  auto current = state.load(std::memory_order_acquire);
+  if (current == state_t::Running) {
+    switch_to(state_t::Draining);
+    if (std::this_thread::get_id() == owner) {
+      spawn(shutdown_sequence(timeout));
+    } else {
+      remote_queue_.enqueue([this, timeout]() {
+        spawn(shutdown_sequence(timeout));
+      });
+    }
   }
   wakeup();
 }
@@ -85,8 +91,8 @@ void context_t::stop() {
   wakeup();
 }
 
-coro_t<void> context_t::shutdown_sequence() {
-  co_await sleep(shutdown_timeout);
+coro_t<void> context_t::shutdown_sequence(std::chrono::nanoseconds timeout) {
+  co_await sleep(timeout);
 
   // Only transition if still in Draining (may have been superseded by stop() or user_idle)
   auto current = state.load(std::memory_order_acquire);
@@ -161,6 +167,13 @@ coro_t<void> context_t::wakeup_watch_loop() {
 void context_t::wakeup() {
   uint64_t val = 1;
   auto _ = ::write(wakeup_fd, &val, sizeof(val));
+}
+
+void context_t::drain_remote_queue() {
+  std::function<void()> fn;
+  while (remote_queue_.try_dequeue(fn)) {
+    fn();
+  }
 }
 
 void context_t::set_scheduler_type(scheduler_type_t type) {
