@@ -65,13 +65,10 @@ struct nop_awaiter : utask_t {
 };
 
 /**
- * @brief async close a file descriptor via io_uring.
- * Convenience coroutine wrapping close_awaiter, suitable for spawn().
- * Usage: ctx.spawn(async_close(fd));
+ * @brief fire-and-forget close via io_uring (no coroutine overhead).
+ * Usage: async_close(fd);
  */
-inline coro_t<void> async_close(int fd) {
-  co_await close_awaiter(fd);
-}
+void async_close(int fd);
 
 } // namespace cornet
 

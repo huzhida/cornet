@@ -77,7 +77,7 @@ socket_t::~socket_t() {
   if (fd != -1) {
     auto& ctx = context_t::current();
     if (std::this_thread::get_id() == ctx.owner_thread()) {
-      ctx.spawn(async_close(fd));
+      async_close(fd);
     } else {
       ::close(fd);
     }
@@ -95,7 +95,7 @@ socket_t& socket_t::operator=(socket_t&& s) noexcept {
     if (this->fd != -1) {
       auto& ctx = context_t::current();
       if (std::this_thread::get_id() == ctx.owner_thread()) {
-        ctx.spawn(async_close(this->fd));
+        async_close(this->fd);
       } else {
         ::close(this->fd);
       }

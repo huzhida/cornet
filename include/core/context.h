@@ -70,6 +70,31 @@ struct context_t {
   }
 
   /**
+   * @brief awaiter for executing a callable on the thread pool.
+   * On await_suspend, submits work to executor. On completion, the scheduler
+   * picks it up and resumes the coroutine with the result.
+   * @tparam F callable type
+   * @tparam R return type (deduced from F)
+   */
+  template<typename F, typename R = std::invoke_result_t<F>>
+  struct async_awaiter {
+    context_t& ctx_;
+    typed_atask_t<std::decay_t<F>, R> task_;
+    explicit async_awaiter(context_t& ctx, F&& f)
+      : ctx_(ctx), task_(std::forward<F>(f)) {}
+    bool await_ready() { return false; }
+    void await_suspend(std::coroutine_handle<> h) {
+      task_.handle = h;
+      ctx_.ensure_executor();
+      ctx_.executor->add(&task_);
+    }
+    R await_resume() {
+      if (task_.exception) std::rethrow_exception(task_.exception);
+      if constexpr (!std::is_void_v<R>) return std::move(task_.result_);
+    }
+  };
+
+  /**
    * @brief execute a callable on the thread pool and co_await the result.
    * Usage: auto result = co_await ctx.async([] { return heavy_work(); });
    * @tparam F callable type
@@ -77,7 +102,9 @@ struct context_t {
    * @return async_awaiter that yields the callable's return value
    */
   template<typename F>
-  auto async(F&& f);
+  auto async(F&& f) {
+    return async_awaiter<F>{*this, std::forward<F>(f)};
+  }
 
   /**
    * @brief context start to resume task and wait io, run until tasks all complete or stop() called.
@@ -124,6 +151,22 @@ struct context_t {
   void on_signal(std::initializer_list<int> signals, std::function<void(int)> handler);
 
   /**
+   * @brief generic io_uring awaiter that accepts any prep function.
+   * Stores the prep callable and invokes it when the SQE is allocated.
+   * @tparam F callable type with signature void(io_uring_sqe*)
+   */
+  template<typename F>
+  struct generic_io_awaiter : utask_t {
+    std::decay_t<F> prep_;
+    generic_io_awaiter(context_t& ctx, F&& f) : prep_(std::forward<F>(f)) {
+      this->ctx = &ctx;
+      this->prepare_fn = [](utask_t* self, io_uring_sqe* sqe) {
+        static_cast<generic_io_awaiter*>(self)->prep_(sqe);
+      };
+    }
+  };
+
+  /**
    * @brief submit a generic io_uring operation via a user-provided prep function.
    * Enables any io_uring op without framework changes.
    * Usage: auto result = co_await ctx.io([fd, buf, n](io_uring_sqe* sqe) {
@@ -133,7 +176,22 @@ struct context_t {
    * @return generic_io_awaiter<F>
    */
   template<typename F>
-  auto io(F&& f);
+  auto io(F&& f) {
+    return generic_io_awaiter<F>{*this, std::forward<F>(f)};
+  }
+
+  /**
+   * @brief fire-and-forget io_uring operation (no coroutine overhead).
+   * Submits an SQE with user_data=nullptr, CQE result is silently discarded.
+   * Usage: ctx.io_detach([](io_uring_sqe* sqe) { io_uring_prep_close(sqe, fd); });
+   * @param f callable that fills the io_uring_sqe
+   */
+  template<typename F>
+  void io_detach(F&& f) {
+    auto* sqe = uring.get_sqe();
+    f(sqe);
+    io_uring_sqe_set_data(sqe, nullptr);
+  }
 
   /**
    * @brief set context scheduler type, new scheduler will take over schedule.
@@ -329,68 +387,11 @@ private:
 
   // internal: signal watch coroutine
   coro_t<void> signal_watch_loop();
+  // internal: wakeup eventfd watch coroutine
+  coro_t<void> wakeup_watch_loop();
   // internal: shutdown coroutine (drain → cancel → terminate)
   coro_t<void> shutdown_sequence();
 };
-
-/**
- * @brief generic io_uring awaiter that accepts any prep function.
- * @tparam F callable type with signature void(io_uring_sqe*)
- */
-template<typename F>
-struct generic_io_awaiter : utask_t {
-  F prep_;
-
-  generic_io_awaiter(context_t& ctx, F&& f) : prep_(std::forward<F>(f)) {
-    this->ctx = &ctx;
-    this->prepare_fn = [](utask_t* self, io_uring_sqe* sqe) {
-      static_cast<generic_io_awaiter*>(self)->prep_(sqe);
-    };
-  }
-};
-
-template<typename F>
-auto context_t::io(F&& f) {
-  return generic_io_awaiter<std::decay_t<F>>{*this, std::forward<F>(f)};
-}
-
-/**
- * @brief awaiter for executing a callable on the thread pool.
- * On await_suspend, submits work to executor. On completion, the scheduler
- * picks it up and resumes the coroutine with the result.
- * @tparam F callable type
- * @tparam R return type
- */
-template<typename F, typename R = std::invoke_result_t<F>>
-struct async_awaiter {
-  context_t& ctx_;
-  typed_atask_t<F, R> task_;
-
-  explicit async_awaiter(context_t& ctx, F&& f)
-    : ctx_(ctx), task_(std::forward<F>(f)) {}
-
-  bool await_ready() { return false; }
-
-  void await_suspend(std::coroutine_handle<> h) {
-    task_.handle = h;
-    ctx_.ensure_executor();
-    ctx_.executor->add(&task_);
-  }
-
-  R await_resume() {
-    if (task_.exception) {
-      std::rethrow_exception(task_.exception);
-    }
-    if constexpr (!std::is_void_v<R>) {
-      return std::move(task_.result_);
-    }
-  }
-};
-
-template<typename F>
-auto context_t::async(F&& f) {
-  return async_awaiter<std::decay_t<F>>{*this, std::forward<F>(f)};
-}
 
 } // cornet
 
