@@ -29,6 +29,8 @@ struct context_t {
     Draining,
     // context is canceling all pending io
     Canceling,
+    // cancel_pending_io has been spawned, waiting for completion
+    Terminating,
     // context terminated, all tasks done
     Terminated
   };
@@ -142,6 +144,14 @@ struct context_t {
   }
 
   /**
+   * @brief whether the context has terminated (run loop exited).
+   * @return true if terminated
+   */
+  CORNET_NODISCARD inline bool is_terminated() const {
+    return state.load(std::memory_order_acquire) == state_t::Terminated;
+  }
+
+  /**
    * @brief register a callback for one or more signals.
    * Uses signalfd + io_uring for async signal delivery.
    * Must be called before run().
@@ -232,8 +242,19 @@ struct context_t {
   }
 
   /**
-   * @brief context idle or not
-   * @return true for idle / false for busy
+   * @brief whether all user tasks are done (only persistent watchers remain).
+   * Used to trigger the Terminated state transition.
+   * @return true if no user IO inflight and no ready tasks
+   */
+  CORNET_NODISCARD inline bool user_idle() {
+    if (executor && !executor->idle()) return false;
+    return scheduler->idle() && uring.user_idle();
+  }
+
+  /**
+   * @brief whether the context is truly idle (nothing at all remains).
+   * Used as the run loop exit condition.
+   * @return true if no IO inflight (including persistent) and no ready tasks
    */
   CORNET_NODISCARD inline bool idle() {
     if (executor && !executor->idle()) return false;
@@ -331,6 +352,7 @@ struct context_t {
       case state_t::Running: return "Running";
       case state_t::Draining: return "Draining";
       case state_t::Canceling: return "Canceling";
+      case state_t::Terminating: return "Terminating";
       case state_t::Terminated: return "Terminated";
     }
     return "Unknown";

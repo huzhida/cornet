@@ -96,7 +96,7 @@ struct ringbuffer_t {
    * @return true for success / false for failed
    */
   template <typename... Args>
-  bool emplace(Args... args) {
+  bool emplace(Args&&... args) {
     size_t w = write.load(std::memory_order_relaxed);
     auto next_w = (w + 1) & (N - 1);
 

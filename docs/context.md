@@ -78,10 +78,35 @@ ctx.stop();
 状态机：
 
 ```
-Running ──shutdown()──→ Draining ──timeout──→ Canceling ──all cancelled──→ Terminated
-   │                                              ▲
-   └──────────────stop()──────────────────────────┘
+Running ──shutdown()──→ Draining ──timeout/user_idle──→ Canceling ──spawn cancel──→ Terminating ──idle()──→ Terminated
+   │                       │                                ▲
+   │                       └────────user_idle()─────────────┘
+   └──────────────stop()────────────────────────────────────┘
 ```
+
+各状态说明：
+
+| 状态 | 说明 |
+|------|------|
+| Running | 正常运行，接受新连接和任务 |
+| Draining | 优雅关闭中，不再接受新连接，等待现有任务完成 |
+| Canceling | spawn `cancel_pending_io()` 取消所有 inflight IO（含 persistent watcher） |
+| Terminating | cancel 协程已在运行，等待所有操作完成（包括 persistent IO drain） |
+| Terminated | `run()` 已返回，context 完全干净可复用 |
+
+### idle 语义
+
+| 方法 | 含义 | 用途 |
+|------|------|------|
+| `user_idle()` | 用户任务全部完成，只剩 persistent watcher | 触发状态切换到 Canceling |
+| `idle()` | 真正空闲，`task_nr == 0` | run loop 退出条件 |
+
+run loop 保证：`idle()` 为 true 时所有 IO（含 persistent）已彻底 drain，context 可安全复用。
+
+### shutdown / stop 线程安全
+
+`shutdown()` 和 `stop()` 均使用 `compare_exchange_strong` 保证状态转换的原子性，
+多线程并发调用不会导致重复 spawn 或状态回退。
 
 ### 指标监控
 

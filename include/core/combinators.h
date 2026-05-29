@@ -3,6 +3,7 @@
 
 #include "context.h"
 #include <tuple>
+#include <memory>
 
 namespace cornet {
 
@@ -259,12 +260,14 @@ struct when_any_state {
   bool done{false};
   int completed_index{-1};
   std::coroutine_handle<> continuation{nullptr};
+  canceler_t* canceler{nullptr};
 
   when_any_state() = default;
+  explicit when_any_state(canceler_t* c) : canceler(c) {}
 };
 
 template<size_t I, typename State, typename T>
-coro_t<void> when_all_task(State* state, coro_t<T> coro, context_t& ctx) {
+coro_t<void> when_all_task(std::shared_ptr<State> state, coro_t<T> coro, context_t& ctx) {
   try {
     if constexpr (std::is_void_v<T>) {
       co_await coro;
@@ -285,35 +288,39 @@ coro_t<void> when_all_task(State* state, coro_t<T> coro, context_t& ctx) {
 }
 
 template<size_t I, typename State, typename T>
-coro_t<void> when_any_task(State* state, coro_t<T> coro, context_t& ctx) {
+coro_t<void> when_any_task(std::shared_ptr<State> state, coro_t<T> coro, context_t& ctx) {
   try {
     if constexpr (std::is_void_v<T>) {
       co_await coro;
+      if (state->done) co_return;
       std::get<I>(state->results) = expected<void>{};
     } else {
       auto result = co_await coro;
+      if (state->done) co_return;
       std::get<I>(state->results) = std::move(result);
     }
   } catch (...) {
+    if (state->done) co_return;
     std::get<I>(state->results) = unexpected(ECANCELED, error_domain::internal);
   }
-  if (!state->done) {
-    state->done = true;
-    state->completed_index = I;
-    if (state->continuation) {
-      ctx.spawn(state->continuation);
-    }
+  state->done = true;
+  state->completed_index = I;
+  if (state->canceler) {
+    state->canceler->cancel();
+  }
+  if (state->continuation) {
+    ctx.spawn(state->continuation);
   }
   co_return;
 }
 
 template<typename State, typename Tuple, size_t... Is>
-void launch_all_impl(State* state, Tuple& coros, context_t& ctx, std::index_sequence<Is...>) {
+void launch_all_impl(std::shared_ptr<State> state, Tuple& coros, context_t& ctx, std::index_sequence<Is...>) {
   (ctx.spawn(when_all_task<Is>(state, std::move(std::get<Is>(coros)), ctx)), ...);
 }
 
 template<typename State, typename Tuple, size_t... Is>
-void launch_any_impl(State* state, Tuple& coros, context_t& ctx, std::index_sequence<Is...>) {
+void launch_any_impl(std::shared_ptr<State> state, Tuple& coros, context_t& ctx, std::index_sequence<Is...>) {
   (ctx.spawn(when_any_task<Is>(state, std::move(std::get<Is>(coros)), ctx)), ...);
 }
 
@@ -357,27 +364,34 @@ template<typename... Ts>
 auto when_all(coro_t<Ts>... coros) {
   struct awaiter {
     context_t& ctx_;
-    detail::when_all_state<Ts...> state_;
+    std::shared_ptr<detail::when_all_state<Ts...>> state_;
     std::tuple<coro_t<Ts>...> coros_;
+
+    ~awaiter() {
+      if (state_) {
+        state_->continuation = nullptr;
+      }
+    }
 
     bool await_ready() { return false; }
 
     void await_suspend(std::coroutine_handle<> h) {
-      state_.continuation = h;
-      detail::launch_all_impl(&state_, coros_, ctx_, std::index_sequence_for<Ts...>{});
+      state_->continuation = h;
+      detail::launch_all_impl(state_, coros_, ctx_, std::index_sequence_for<Ts...>{});
     }
 
     when_all_result<Ts...> await_resume() {
-      return {std::move(state_.results)};
+      return {std::move(state_->results)};
     }
   };
 
   auto& ctx = context_t::current();
-  return awaiter{ctx, {}, std::tuple{std::move(coros)...}};
+  return awaiter{ctx, std::make_shared<detail::when_all_state<Ts...>>(), std::tuple{std::move(coros)...}};
 }
 
 /**
  * @brief await any coroutine concurrently, resume when the first one completes.
+ * Remaining coroutines continue running but their results are discarded.
  * Usage: auto result = co_await when_any(coro1(), coro2());
  * @return when_any_result containing all results (only the completed one is valid)
  */
@@ -385,23 +399,69 @@ template<typename... Ts>
 auto when_any(coro_t<Ts>... coros) {
   struct awaiter {
     context_t& ctx_;
-    detail::when_any_state<Ts...> state_;
+    std::shared_ptr<detail::when_any_state<Ts...>> state_;
     std::tuple<coro_t<Ts>...> coros_;
+
+    ~awaiter() {
+      if (state_) {
+        state_->continuation = nullptr;
+      }
+    }
 
     bool await_ready() { return false; }
 
     void await_suspend(std::coroutine_handle<> h) {
-      state_.continuation = h;
-      detail::launch_any_impl(&state_, coros_, ctx_, std::index_sequence_for<Ts...>{});
+      state_->continuation = h;
+      detail::launch_any_impl(state_, coros_, ctx_, std::index_sequence_for<Ts...>{});
     }
 
     when_any_result<Ts...> await_resume() {
-      return {std::move(state_.results), state_.completed_index};
+      return {std::move(state_->results), state_->completed_index};
     }
   };
 
   auto& ctx = context_t::current();
-  return awaiter{ctx, {}, std::tuple{std::move(coros)...}};
+  return awaiter{ctx, std::make_shared<detail::when_any_state<Ts...>>(), std::tuple{std::move(coros)...}};
+}
+
+/**
+ * @brief await any coroutine concurrently with cancellation support.
+ * When the first coroutine completes, the provided canceler is triggered,
+ * cancelling any inflight IO operations that use with_cancel(op, canceler).
+ * Usage:
+ *   canceler_t canceler;
+ *   auto result = co_await when_any(canceler, task_with_cancel(canceler), task_with_cancel(canceler));
+ * @param canceler canceler to trigger on first completion
+ * @return when_any_result containing all results (only the completed one is valid)
+ */
+template<typename... Ts>
+auto when_any(canceler_t& canceler, coro_t<Ts>... coros) {
+  struct awaiter {
+    context_t& ctx_;
+    std::shared_ptr<detail::when_any_state<Ts...>> state_;
+    std::tuple<coro_t<Ts>...> coros_;
+
+    ~awaiter() {
+      if (state_) {
+        state_->continuation = nullptr;
+      }
+    }
+
+    bool await_ready() { return false; }
+
+    void await_suspend(std::coroutine_handle<> h) {
+      state_->continuation = h;
+      detail::launch_any_impl(state_, coros_, ctx_, std::index_sequence_for<Ts...>{});
+    }
+
+    when_any_result<Ts...> await_resume() {
+      return {std::move(state_->results), state_->completed_index};
+    }
+  };
+
+  auto& ctx = context_t::current();
+  auto state = std::make_shared<detail::when_any_state<Ts...>>(&canceler);
+  return awaiter{ctx, std::move(state), std::tuple{std::move(coros)...}};
 }
 
 } // namespace cornet

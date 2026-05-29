@@ -18,6 +18,11 @@ context_t::context_t()
   }
   scheduler = scheduler_t::scheduler(scheduler_type);
 
+  wakeup_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+  if (wakeup_fd < 0) {
+    CORNET_FATAL("failed to create eventfd: {}", strerror(errno));
+  }
+
   std::lock_guard<std::mutex> guard(contexts_mutex);
   contexts[std::this_thread::get_id()] = this;
 }
@@ -45,44 +50,48 @@ void context_t::run() {
   spawn(wakeup_watch_loop());
   switch_to(state_t::Running);
   state_t current_state;
-  while ((current_state = state.load(std::memory_order_acquire)) != state_t::Terminated) {
+  while (!idle()) {
+    current_state = state.load(std::memory_order_acquire);
 
     if (current_state == state_t::Canceling) {
       spawn(cancel_pending_io());
+      switch_to(state_t::Terminating);
     }
 
     scheduler->sched(*this);
 
-    if (idle()) {
-      switch_to(state_t::Terminated);
+    if (current_state <= state_t::Draining && user_idle()) {
+      switch_to(state_t::Canceling);
     }
   }
+  switch_to(state_t::Terminated);
 }
 
 void context_t::shutdown(std::chrono::nanoseconds timeout) {
   shutdown_timeout = timeout;
-  auto current = state.load(std::memory_order_acquire);
-  if (current == state_t::Running) {
-    switch_to(state_t::Draining);
+  auto expected = state_t::Running;
+  if (state.compare_exchange_strong(expected, state_t::Draining, std::memory_order_acq_rel)) {
     spawn(shutdown_sequence());
   }
   wakeup();
 }
 
 void context_t::stop() {
-  state.store(state_t::Canceling, std::memory_order_release);
+  auto expected = state_t::Running;
+  if (!state.compare_exchange_strong(expected, state_t::Canceling, std::memory_order_acq_rel)) {
+    expected = state_t::Draining;
+    state.compare_exchange_strong(expected, state_t::Canceling, std::memory_order_acq_rel);
+  }
   wakeup();
 }
 
 coro_t<void> context_t::shutdown_sequence() {
-  // wait for existing work to finish, or timeout
   co_await sleep(shutdown_timeout);
 
-  // timeout expired, force cancel remaining io
-  if (!idle()) {
+  // Only transition if still in Draining (may have been superseded by stop() or user_idle)
+  auto current = state.load(std::memory_order_acquire);
+  if (current == state_t::Draining && !user_idle()) {
     switch_to(state_t::Canceling);
-  } else {
-    switch_to(state_t::Terminated);
   }
   co_return;
 }
@@ -134,12 +143,6 @@ coro_t<void> context_t::signal_watch_loop() {
 }
 
 coro_t<void> context_t::wakeup_watch_loop() {
-  if (wakeup_fd < 0) {
-    wakeup_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-    if (wakeup_fd < 0) {
-      CORNET_FATAL("failed to create eventfd: {}", strerror(errno));
-    }
-  }
   uint64_t buf;
   while (true) {
     uring.add_persistent();
@@ -150,6 +153,7 @@ coro_t<void> context_t::wakeup_watch_loop() {
       SPDLOG_ERROR("wakeup_watch_loop read failed: {}", ret.error().message());
       break;
     }
+    if (is_draining()) break;
   }
   co_return;
 }

@@ -110,11 +110,19 @@ class uring_t {
   inline io_uring* raw() { return uring.get(); }
 
   /**
-   * @brief check if there are no pending tasks (excluding persistent watchers)
-   * @return true if task count equals persistent count (only watchers remain)
+   * @brief check if all user IO is done (only persistent watchers remain)
+   * @return true if task count equals persistent count
+   */
+  inline bool user_idle() const {
+    return task_nr <= persistent_task_nr;
+  }
+
+  /**
+   * @brief check if truly idle (no IO at all, including persistent)
+   * @return true if no tasks inflight
    */
   inline bool idle() const {
-    return task_nr <= persistent_task_nr;
+    return task_nr == 0;
   }
 
   /**

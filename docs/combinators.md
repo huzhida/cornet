@@ -96,6 +96,12 @@ for_each_error(result, [](auto& r) {
 });
 ```
 
+### 安全性
+
+`when_all` 内部使用 `shared_ptr` 管理状态生命周期。即使 parent 协程被外部取消
+（如在 `when_any` 中输掉），子任务仍可安全完成而不会触发 use-after-free。
+awaiter 析构时自动置空 continuation，防止已销毁的协程被误调度。
+
 ## when_any
 
 并发执行多个协程，**第一个** 完成时立即返回。
@@ -125,9 +131,34 @@ when_any_result<Ts...> {
 
 ### 注意事项
 
-- 第一个协程完成后，**其他协程仍会继续运行**直到自然结束
-- 当前版本不会自动取消未完成的协程
+- 第一个协程完成后，**其他协程仍会继续运行**直到自然结束（结果被安全丢弃）
+- 内部使用 `shared_ptr` 管理状态生命周期，无 use-after-free 风险
+- awaiter 析构时自动置空 continuation，防止已销毁的协程被误调度
 - 适合实现竞争策略（racing）和超时兜底
+
+### 带取消的 when_any
+
+传入 `canceler_t` 可在第一个完成时自动取消剩余协程的 inflight IO：
+
+```cpp
+canceler_t canceler;
+
+coro_t<Data> cancellable_fetch(const std::string& url, canceler_t& c) {
+    auto sock = co_await connect(url);
+    auto n = co_await with_cancel(sock.recv(buf, 4096), c);
+    if (!n) co_return Data{};
+    co_return parse(buf, *n);
+}
+
+// 第一个完成时，canceler 自动触发，取消其他协程的 IO
+auto result = co_await when_any(canceler,
+    cancellable_fetch("server-a", canceler),
+    cancellable_fetch("server-b", canceler)
+);
+```
+
+当 `canceler.cancel()` 被触发后，其他协程中使用 `with_cancel` 包裹的 IO 操作
+会收到 `ECANCELED`，从而快速退出。
 
 ### 手动超时模式
 

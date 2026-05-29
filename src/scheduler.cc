@@ -45,18 +45,21 @@ uint32_t scheduler_t::flush_io(context_t& ctx, std::chrono::nanoseconds wait_tim
   auto& uring = ctx.io_uring();
   uring.submit();
 
+  // collect executor completions first, may fill ready_tasks
+  process_async_tasks(ctx);
+
   uint32_t cqes = 0;
-  size_t inflight = uring.running_task_nr();
-  if (inflight > 0) {
-    cqes = uring.peek_cqes(utask_t::process_utask, ctx, inflight);
+  if (!uring.user_idle()) {
+    // user IO tasks inflight, try to harvest completions
+    cqes = uring.peek_cqes(utask_t::process_utask, ctx, uring.running_task_nr());
     if (cqes == 0 && ready_tasks.empty()) {
       cqes = uring.wait_cqes(utask_t::process_utask, ctx, 1, wait_timeout);
     }
   } else if (ready_tasks.empty()) {
-    std::this_thread::yield();
+    // no user IO, no CPU tasks. bounded wait to avoid hot-loop
+    cqes = uring.wait_cqes(utask_t::process_utask, ctx, 1, wait_timeout);
   }
 
-  process_async_tasks(ctx);
   return cqes;
 }
 
@@ -68,7 +71,7 @@ time_slice_scheduler_t::time_slice_scheduler_t() {
   io_budget = config_t::to_nanoseconds(conf["io_budget"].value_or("1ms"));
 }
 void time_slice_scheduler_t::sched(context_t& ctx) {
-  scoped_timer_t timer(ctx.metrics().sched_latency);
+  scoped_timer_t timer(&ctx.metrics().sched_latency);
   ctx.metrics().sched_cycles++;
   auto start = std::chrono::steady_clock::now();
 
@@ -88,7 +91,7 @@ bool time_slice_scheduler_t::cpu_timeout(std::chrono::steady_clock::time_point& 
 
 CORNET_REGISTER_SCHEDULER(scheduler_type_t::RoundRobin, round_robin_scheduler_t);
 void round_robin_scheduler_t::sched(context_t& ctx) {
-  scoped_timer_t timer(ctx.metrics().sched_latency);
+  scoped_timer_t timer(&ctx.metrics().sched_latency);
   ctx.metrics().sched_cycles++;
 
   while (!ready_tasks.empty()) {
@@ -106,7 +109,7 @@ batch_scheduler_t::batch_scheduler_t() {
   }
 }
 void batch_scheduler_t::sched(context_t& ctx) {
-  scoped_timer_t timer(ctx.metrics().sched_latency);
+  scoped_timer_t timer(&ctx.metrics().sched_latency);
   ctx.metrics().sched_cycles++;
   size_t processed = 0;
 
@@ -120,7 +123,7 @@ void batch_scheduler_t::sched(context_t& ctx) {
 
 CORNET_REGISTER_SCHEDULER(scheduler_type_t::Adaptive, adaptive_scheduler_t);
 void adaptive_scheduler_t::sched(context_t& ctx) {
-  scoped_timer_t timer(ctx.metrics().sched_latency);
+  scoped_timer_t timer(&ctx.metrics().sched_latency);
   ctx.metrics().sched_cycles++;
 
   size_t resumed = 0;

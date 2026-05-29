@@ -61,8 +61,14 @@ Cornet 围绕三个核心原则设计：
    - 协程挂起
 
 3. Scheduler::sched() 周期
-   - flush_io(): uring.submit() 提交所有 pending SQE
-   - uring.peek_cqes() 或 wait_cqes() 收割 CQE
+   - flush_io():
+     → uring.submit() 提交所有 pending SQE
+     → process_async_tasks(): 收割线程池完成的任务
+     → 若有用户 IO inflight (!uring.user_idle()):
+       peek_cqes() 非阻塞收割
+       若无 CQE 且无 ready task: wait_cqes(timeout) 限时等待
+     → 若无用户 IO 且无 ready task:
+       wait_cqes(timeout) 限时等待（避免空转）
    - 对每个 CQE: process_utask()
      → slot_table.lookup(user_data)
      → task->complete()
