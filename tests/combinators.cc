@@ -77,7 +77,7 @@ TEST_F(combinators, with_timeout_expires) {
     auto client_task = [](context_t& ctx) -> coro_t<void> {
       tcp::v4::socket_t sock;
       co_await sock.connect("127.0.0.1", 23457);
-      co_await sleep(std::chrono::seconds(5));
+      co_await sleep(std::chrono::milliseconds(200));
     };
     ctx.spawn(client_task(ctx));
 
@@ -223,6 +223,187 @@ TEST_F(combinators, canceler_reset) {
     // after reset, operations should work normally
     auto ret = co_await with_cancel(sleep(std::chrono::milliseconds(10)), canceler);
     EXPECT_TRUE(ret.has_value());
+    co_return;
+  };
+  ctx->spawn(test(*ctx));
+  ctx->run();
+}
+
+TEST_F(combinators, task_scope_basic) {
+  auto test = [](context_t& ctx) -> coro_t<void> {
+    int count = 0;
+
+    auto result = co_await task_scope([&](scope_t& scope) -> coro_t<void> {
+      scope.spawn([&count]() -> coro_t<void> {
+        co_await sleep(std::chrono::milliseconds(10));
+        count++;
+      });
+      scope.spawn([&count]() -> coro_t<void> {
+        co_await sleep(std::chrono::milliseconds(20));
+        count++;
+      });
+      scope.spawn([&count]() -> coro_t<void> {
+        co_await sleep(std::chrono::milliseconds(30));
+        count++;
+      });
+      co_return;
+    });
+
+    // all three tasks must have completed
+    EXPECT_TRUE(result.has_value());
+    EXPECT_EQ(count, 3);
+    co_return;
+  };
+  ctx->spawn(test(*ctx));
+  ctx->run();
+}
+
+TEST_F(combinators, task_scope_cancel) {
+  auto test = [](context_t& ctx) -> coro_t<void> {
+    int completed = 0;
+
+    auto result = co_await task_scope([&](scope_t& scope) -> coro_t<void> {
+      // fast task completes normally
+      scope.spawn([&completed]() -> coro_t<void> {
+        co_await sleep(std::chrono::milliseconds(10));
+        completed++;
+      });
+      // slow task uses with_cancel so it can be cancelled
+      scope.spawn([&completed, &scope]() -> coro_t<void> {
+        auto ret = co_await with_cancel(sleep(std::chrono::milliseconds(500)), scope.canceler());
+        if (ret.has_value()) completed++;
+      });
+      // cancel scope after short delay
+      scope.spawn([&scope]() -> coro_t<void> {
+        co_await sleep(std::chrono::milliseconds(50));
+        scope.cancel();
+      });
+      co_return;
+    });
+
+    // fast task and cancel task completed; slow task was cancelled
+    EXPECT_EQ(completed, 1);
+    co_return;
+  };
+  ctx->spawn(test(*ctx));
+  ctx->run();
+}
+
+TEST_F(combinators, task_scope_with_parent_canceler) {
+  auto test = [](context_t& ctx) -> coro_t<void> {
+    canceler_t parent;
+    int completed = 0;
+
+    // cancel from outside the scope
+    auto cancel_task = [&parent]() -> coro_t<void> {
+      co_await sleep(std::chrono::milliseconds(50));
+      parent.cancel();
+    };
+    ctx.spawn(cancel_task());
+
+    auto result = co_await task_scope(parent, [&](scope_t& scope) -> coro_t<void> {
+      scope.spawn([&completed, &scope]() -> coro_t<void> {
+        auto ret = co_await with_cancel(sleep(std::chrono::milliseconds(500)), scope.canceler());
+        if (ret.has_value()) completed++;
+      });
+      co_return;
+    });
+
+    // parent canceler propagated to scope's canceler, child was cancelled
+    EXPECT_EQ(completed, 0);
+    EXPECT_TRUE(parent.is_cancelled());
+    co_return;
+  };
+  ctx->spawn(test(*ctx));
+  ctx->run();
+}
+
+TEST_F(combinators, task_scope_no_children) {
+  auto test = [](context_t& ctx) -> coro_t<void> {
+    auto result = co_await task_scope([](scope_t& scope) -> coro_t<void> {
+      // body does nothing, spawns no children
+      co_return;
+    });
+    EXPECT_TRUE(result.has_value());
+    co_return;
+  };
+  ctx->spawn(test(*ctx));
+  ctx->run();
+}
+
+TEST_F(combinators, task_scope_spawn_with_result) {
+  auto test = [](context_t& ctx) -> coro_t<void> {
+    int r1 = 0, r2 = 0;
+
+    auto compute = [](int x) -> coro_t<int> {
+      co_await sleep(std::chrono::milliseconds(10));
+      co_return x * 2;
+    };
+
+    auto result = co_await task_scope([&](scope_t& scope) -> coro_t<void> {
+      scope.spawn(compute(21), r1);
+      scope.spawn(compute(11), r2);
+      co_return;
+    });
+
+    EXPECT_TRUE(result.has_value());
+    EXPECT_EQ(r1, 42);
+    EXPECT_EQ(r2, 22);
+    co_return;
+  };
+  ctx->spawn(test(*ctx));
+  ctx->run();
+}
+
+TEST_F(combinators, task_scope_spawn_with_expected) {
+  auto test = [](context_t& ctx) -> coro_t<void> {
+    expected<int> r1, r2;
+
+    auto succeed = []() -> coro_t<int> {
+      co_await sleep(std::chrono::milliseconds(10));
+      co_return 100;
+    };
+    auto fail = []() -> coro_t<int> {
+      co_await sleep(std::chrono::milliseconds(10));
+      throw std::runtime_error("deliberate failure");
+      co_return 0;
+    };
+
+    auto result = co_await task_scope([&](scope_t& scope) -> coro_t<void> {
+      scope.spawn(succeed(), r1);
+      scope.spawn(fail(), r2);
+      co_return;
+    });
+
+    // r1 should have the value
+    EXPECT_TRUE(r1.has_value());
+    EXPECT_EQ(r1.value(), 100);
+    // r2 should have an error (exception caught)
+    EXPECT_FALSE(r2.has_value());
+    EXPECT_EQ(r2.error().domain, error_domain::exception);
+    co_return;
+  };
+  ctx->spawn(test(*ctx));
+  ctx->run();
+}
+
+TEST_F(combinators, task_scope_spawn_non_void_discard) {
+  auto test = [](context_t& ctx) -> coro_t<void> {
+    int side_effect = 0;
+
+    auto task_with_result = [&side_effect]() -> coro_t<int> {
+      co_await sleep(std::chrono::milliseconds(10));
+      side_effect = 1;
+      co_return 999;  // result discarded by scope
+    };
+
+    auto result = co_await task_scope([&](scope_t& scope) -> coro_t<void> {
+      scope.spawn(task_with_result());  // spawn coro_t<int> without collecting result
+      co_return;
+    });
+
+    EXPECT_TRUE(result.has_value());
+    EXPECT_EQ(side_effect, 1);  // task did run to completion
     co_return;
   };
   ctx->spawn(test(*ctx));

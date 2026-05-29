@@ -15,6 +15,7 @@ enum class error_domain : uint8_t {
   system,     // errno (POSIX system call errors)
   resolve,    // EAI_* (getaddrinfo errors)
   internal,   // framework internal errors
+  exception,  // unexpected exception thrown from coroutine
 };
 
 /**
@@ -34,6 +35,7 @@ struct error_t {
       case error_domain::system: return strerror(code);
       case error_domain::resolve: return gai_strerror(code);
       case error_domain::internal: return "internal error";
+      case error_domain::exception: return "unexpected exception in coroutine";
       default: return "no error";
     }
   }
