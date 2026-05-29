@@ -140,3 +140,74 @@ io_uring 的 user_data 是 64-bit 整数。直接存指针有 use-after-free 风
 - spawn 时仅入队，不递归执行
 - 调度器可以批量处理多个协程
 - 避免深度递归的栈溢出风险
+
+## 错误处理约定
+
+Cornet 采用 **`expected<T>` 为唯一正常错误通道，异常为 bug 安全网** 的原则。
+
+### 错误域
+
+```cpp
+enum class error_domain : uint8_t {
+  none,       // 无错误
+  system,     // errno (POSIX 系统调用错误)
+  resolve,    // EAI_* (DNS 解析错误)
+  internal,   // 框架内部错误
+  exception,  // 协程中抛出的未预期异常
+};
+```
+
+### 返回类型约定
+
+| 层级 | 返回类型 | 示例 |
+|------|----------|------|
+| IO awaiter (utask_t 基类) | `expected<int>` | `co_await sock.recv(buf, n)` |
+| void 操作 awaiter | `expected<void>` | `co_await sock.close()` / `co_await sleep(1s)` |
+| 高层组合 API | `coro_t<expected<T>>` | `co_await sock.connect(host, port)` |
+| timeout 包装 | `expected<int>` | `co_await with_timeout(op, 5s)` |
+
+### 使用方式
+
+所有 IO 操作统一用 `if (!result)` 检查错误，**无需 try-catch**：
+
+```cpp
+coro_t<void> handle(tcp::socket_t& sock) {
+    auto n = co_await sock.recv(buf, 4096);
+    if (!n) {
+        // n.error().code    → errno 值
+        // n.error().domain  → 错误域
+        // n.error().message() → 可读描述
+        co_return;
+    }
+    use_data(buf, *n);
+}
+```
+
+### 异常的角色
+
+异常**不是**正常的错误通道。它仅作为"编程 bug 的安全网"存在：
+- `coro_t` 的 `unhandled_exception()` 会捕获异常并存储
+- `co_await` 父协程时会 rethrow
+- `when_all` / `when_any` / `task_scope` 中的异常被记录日志并转为 `error_domain::exception`
+
+框架保证：**所有公开 API 的 IO 操作不抛异常，错误一律通过 expected 返回。**
+
+### 错误域区分
+
+```cpp
+auto result = co_await some_operation();
+if (!result) {
+    switch (result.error().domain) {
+        case error_domain::system:
+            // POSIX errno，如 ECONNREFUSED, EPIPE
+            break;
+        case error_domain::resolve:
+            // DNS 解析错误，如 EAI_NONAME
+            break;
+        case error_domain::exception:
+            // 子协程内部 bug（不应出现在正常逻辑中）
+            break;
+        default: break;
+    }
+}
+```

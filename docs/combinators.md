@@ -202,7 +202,7 @@ coro_t<void> fetch_with_global_timeout() {
 
 ## canceler_t（取消器）
 
-支持单任务级取消和层级取消传播。基于 io_uring cancel 实现，取消 inflight 的内核 IO 操作。
+支持多任务级取消和层级取消传播。基于 io_uring cancel 实现，取消 inflight 的内核 IO 操作。
 
 ### 基本使用
 
@@ -229,9 +229,24 @@ ctx.spawn(handle_client(std::move(client), canceler));
 canceler.cancel();
 ```
 
+### 多任务并发取消
+
+一个 canceler 可以同时关联多个 IO 操作（跨多个协程）。取消时所有关联的 inflight IO 都会收到 cancel：
+
+```cpp
+canceler_t canceler;
+
+// 协程 A 和 B 共享同一个 canceler
+ctx.spawn(reader(sock1, canceler));
+ctx.spawn(writer(sock2, canceler));
+
+// 取消时，sock1 和 sock2 的 IO 同时被 cancel
+canceler.cancel();
+```
+
 ### 层级取消
 
-子 canceler 在父 canceler 取消时自动传播：
+子 canceler 在父 canceler 取消时自动传播。子 canceler 析构时从父链表 **O(1) 摘除**（双向链表）：
 
 ```cpp
 canceler_t server_canceler;
@@ -240,7 +255,7 @@ canceler_t server_canceler;
 canceler_t client1_canceler(server_canceler);
 canceler_t client2_canceler(server_canceler);
 
-// 取消所有客户端
+// 取消所有客户端（迭代式传播，无递归栈溢出风险）
 server_canceler.cancel();
 // client1_canceler.is_cancelled() == true
 // client2_canceler.is_cancelled() == true
@@ -277,11 +292,152 @@ co_await with_cancel(sleep(5s), canceler);
 co_await with_cancel(close_awaiter(fd), canceler);
 ```
 
+### 实现细节
+
+- 双向链表管理子 canceler，析构 unlink O(1)
+- `cancel_node` 侵入式链表跟踪多个 active IO，link/unlink O(1)
+- `cancel()` 使用迭代式 DFS 遍历子树，避免递归栈溢出
+- 编译期 `static_assert` 约束：`with_cancel` 只能包装返回 `expected` 的 awaiter
+
 ### 注意事项
 
 - `canceler_t` 不可拷贝
-- 析构时自动从父 canceler 的子链表摘除
 - 单线程使用，无原子操作开销
 - `cancel()` 仅 prep SQE，不立即 submit（下轮调度 flush_io 时提交）
-- 适合配合 `when_any` 使用：第一个完成后 cancel 其他
+- 适合配合 `when_any` 或 `task_scope` 使用
+
+## task_scope（结构化并发）
+
+提供 Structured Concurrency 保证：所有通过 scope 启动的子任务在 scope 退出前必然完成或被取消。
+
+### 核心保证
+
+- **无逃逸**：子任务的生命周期不超过 scope
+- **异常传播**：任一子任务异常 → 自动 cancel 所有兄弟任务
+- **外部取消**：支持通过父 canceler 取消整个 scope
+- **阻塞等待**：scope 退出时自动 join 所有子任务
+
+### 基本使用
+
+```cpp
+co_await task_scope([&](scope_t& scope) -> coro_t<void> {
+    scope.spawn(handle_client(client1));
+    scope.spawn(handle_client(client2));
+    scope.spawn(handle_client(client3));
+    co_return;
+});
+// 到这里，所有 handle_client 必然已经完成
+```
+
+### spawn 重载
+
+#### 1. spawn(callable) — 推荐，避免 lambda 生命周期陷阱
+
+```cpp
+scope.spawn([&data]() -> coro_t<void> {
+    co_await sleep(100ms);
+    data.process();
+});
+```
+
+callable 被 move 进协程帧，生命周期安全。**这是推荐的用法。**
+
+#### 2. spawn(coro_t\<T\>) — 传入已构造的协程
+
+```cpp
+auto task = make_task(args);  // 返回 coro_t<T>
+scope.spawn(std::move(task)); // 结果被丢弃
+```
+
+#### 3. spawn(coro_t\<T\>, T& out) — 收集结果
+
+```cpp
+int result1, result2;
+co_await task_scope([&](scope_t& scope) -> coro_t<void> {
+    scope.spawn(compute(21), result1);
+    scope.spawn(compute(11), result2);
+    co_return;
+});
+// result1, result2 在此安全可用（scope 保证子任务已完成）
+```
+
+#### 4. spawn(coro_t\<T\>, expected\<T\>& out) — 结果 + 错误处理
+
+```cpp
+expected<int> r1, r2;
+co_await task_scope([&](scope_t& scope) -> coro_t<void> {
+    scope.spawn(may_succeed(), r1);
+    scope.spawn(may_fail(), r2);
+    co_return;
+});
+if (r1) { use(*r1); }
+if (!r2) { log_error(r2.error()); }
+```
+
+### scope 内取消
+
+```cpp
+co_await task_scope([&](scope_t& scope) -> coro_t<void> {
+    scope.spawn([&scope]() -> coro_t<void> {
+        auto ret = co_await with_cancel(long_io(), scope.canceler());
+        // ret 可能是 ECANCELED
+    });
+    scope.spawn([&scope]() -> coro_t<void> {
+        co_await sleep(1s);
+        scope.cancel();  // 取消 scope 内所有使用 with_cancel 的 IO
+    });
+    co_return;
+});
+```
+
+### 外部取消（父 canceler）
+
+```cpp
+canceler_t parent;
+
+// 外部某处触发取消
+ctx.spawn([&parent]() -> coro_t<void> {
+    co_await sleep(5s);
+    parent.cancel();  // 传播到 scope 内部
+}());
+
+co_await task_scope(parent, [&](scope_t& scope) -> coro_t<void> {
+    scope.spawn([&scope]() -> coro_t<void> {
+        auto ret = co_await with_cancel(very_long_io(), scope.canceler());
+        // parent.cancel() 传播到 scope.canceler()，此 IO 被取消
+    });
+    co_return;
+});
+```
+
+### 错误处理
+
+scope 返回 `expected<void>`：
+
+```cpp
+auto result = co_await task_scope([&](scope_t& scope) -> coro_t<void> {
+    scope.spawn(task_that_throws());
+    co_return;
+});
+if (!result) {
+    // result.error().domain == error_domain::exception
+    // 某个子任务抛出了异常
+}
+```
+
+### 注意事项
+
+- **避免临时 lambda 陷阱**：使用 `scope.spawn(lambda)` 而非 `scope.spawn(lambda())`
+
+  ```cpp
+  // 正确：lambda 被 move 进协程帧
+  scope.spawn([&]() -> coro_t<void> { ... });
+
+  // 危险！临时 lambda 析构后协程帧内 this 悬垂
+  scope.spawn([&]() -> coro_t<void> { ... }());
+  ```
+
+- scope body 本身也是协程，需要 `co_return`
+- `scope.spawn` 只能在 body 内调用（scope 退出后不可再 spawn）
+- task_scope 内部使用 `unique_ptr<scope_t>` 管理 scope 生命周期
 
