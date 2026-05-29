@@ -1,5 +1,6 @@
 #include "core/awaiters.h"
 #include "core/context.h"
+#include <unistd.h>
 
 namespace cornet {
 
@@ -37,9 +38,14 @@ nop_awaiter::nop_awaiter() {
 }
 
 void async_close(int fd) {
-  context_t::current().io_detach([fd](io_uring_sqe* sqe) {
-    io_uring_prep_close(sqe, fd);
-  });
+  auto& ctx = context_t::current();
+  if (ctx.is_draining() || ctx.owner_thread() != std::this_thread::get_id()) {
+    ::close(fd);
+  } else {
+    ctx.io_detach([fd](io_uring_sqe* sqe) {
+      io_uring_prep_close(sqe, fd);
+    });
+  }
 }
 
 } // cornet

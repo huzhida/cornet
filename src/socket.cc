@@ -75,12 +75,7 @@ socket_t::socket_t(int fd) : fd(fd) {
 }
 socket_t::~socket_t() {
   if (fd != -1) {
-    auto& ctx = context_t::current();
-    if (std::this_thread::get_id() == ctx.owner_thread()) {
-      async_close(fd);
-    } else {
-      ::close(fd);
-    }
+    async_close(fd);
     fd = -1;
   }
 }

@@ -38,18 +38,22 @@ struct latency_stats_t {
 
 /**
  * @brief RAII timer that records elapsed time into a latency_stats_t on destruction.
+ * If stats is nullptr, no timing is performed (zero overhead).
  */
 struct scoped_timer_t {
-  latency_stats_t& stats;
+  latency_stats_t* stats;
   std::chrono::steady_clock::time_point start;
 
-  explicit scoped_timer_t(latency_stats_t& s)
-    : stats(s), start(std::chrono::steady_clock::now()) {}
+  explicit scoped_timer_t(latency_stats_t* s)
+    : stats(s), start(s ? std::chrono::steady_clock::now()
+                        : std::chrono::steady_clock::time_point{}) {}
 
   ~scoped_timer_t() {
-    auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
-      std::chrono::steady_clock::now() - start).count();
-    stats.record(elapsed);
+    if (stats) {
+      auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - start).count();
+      stats->record(elapsed);
+    }
   }
 };
 

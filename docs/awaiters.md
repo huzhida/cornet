@@ -9,14 +9,25 @@
 异步关闭文件描述符。
 
 ```cpp
-// 直接使用
+// 协程中使用（等待关闭完成）
 co_await close_awaiter(fd);
-
-// 便捷协程（适合 fire-and-forget）
-ctx.spawn(async_close(fd));
 ```
 
 返回 `expected<void>`。
+
+## async_close
+
+Fire-and-forget 异步关闭。自动根据 context 状态选择策略：
+
+- context 正常运行（Running）→ 通过 `io_detach` 异步关闭，下次 flush_io 提交
+- context 非正常运行（Draining/Canceling/Terminating/Terminated）或非 owner 线程调用 → 降级为同步 `::close(fd)`
+
+降级条件使用 `is_draining()`（state != Running），避免在关闭流程中 io_detach 的 SQE 被
+`cancel_pending_io` 取消导致 fd 泄漏。
+
+```cpp
+async_close(fd);  // 无需 co_await，fire-and-forget
+```
 
 ## read_awaiter
 

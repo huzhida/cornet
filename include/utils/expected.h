@@ -81,7 +81,8 @@ class expected {
     }
   }
 
-  expected(expected&& other) noexcept : err_(other.err_), ok_(other.ok_) {
+  expected(expected&& other) noexcept(std::is_nothrow_move_constructible_v<T>)
+    : err_(other.err_), ok_(other.ok_) {
     if (ok_) {
       new (&storage_) T(std::move(*reinterpret_cast<T*>(&other.storage_)));
     }
@@ -97,7 +98,7 @@ class expected {
     return *this;
   }
 
-  expected& operator=(expected&& other) noexcept {
+  expected& operator=(expected&& other) noexcept(std::is_nothrow_move_constructible_v<T>) {
     if (this != &other) {
       if (ok_) reinterpret_cast<T*>(&storage_)->~T();
       ok_ = other.ok_;

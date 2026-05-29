@@ -4,8 +4,6 @@
 
 namespace cornet {
 
-static latency_stats_t dummy_latency_;
-
 uring_t::uring_t(uint32_t entries_nr, uint32_t flags)
   : uring(std::make_unique<io_uring>()) {
   if (io_uring_queue_init(entries_nr, uring.get(), flags) < 0) {
@@ -97,7 +95,7 @@ void uring_t::get_sqes(io_uring_sqe** out, size_t n) {
 
 int uring_t::submit() {
   if (metrics_) metrics_->submit_calls++;
-  scoped_timer_t timer(metrics_ ? metrics_->submit_latency : dummy_latency_);
+  scoped_timer_t timer(metrics_ ? &metrics_->submit_latency : nullptr);
   int submit_nr = io_uring_submit(uring.get());
   if (submit_nr < 0) {
     if (metrics_) metrics_->submit_failures++;
@@ -122,7 +120,7 @@ uint32_t uring_t::process_cqes(int (*process_fn)(context_t &, cqe_t), context_t 
 
 uint32_t uring_t::wait_cqes(int (*process_fn)(context_t &, cqe_t), context_t &ctx, uint32_t wait_nr, sigset_t *mask) {
   if (metrics_) metrics_->wait_calls++;
-  scoped_timer_t timer(metrics_ ? metrics_->wait_latency : dummy_latency_);
+  scoped_timer_t timer(metrics_ ? &metrics_->wait_latency : nullptr);
   cqe_t cqe;
   if (io_uring_wait_cqes(uring.get(), &cqe, wait_nr, nullptr, mask) < 0) {
     if (metrics_) metrics_->wait_timeouts++;
