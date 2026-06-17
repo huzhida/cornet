@@ -233,6 +233,9 @@ socket_t::recvfrom_awaiter::recvfrom_awaiter(int fd, void* buf, size_t nbytes, s
 cornet::close_awaiter socket_t::close() const {
   return close_awaiter{fd};
 }
+cornet::shutdown_awaiter socket_t::shutdown(int how) const {
+  return shutdown_awaiter{fd, how};
+}
 coro_t<expected<void>> socket_t::connect(std::string_view host, uint16_t port) const {
   // fast path: numeric IP address, no DNS needed
   resolved_address fast{};

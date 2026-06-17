@@ -90,9 +90,25 @@ int bytes_sent = *sent;
 // 异步关闭（通过 io_uring）
 co_await sock.close();
 
+// 半关闭（shutdown）
+co_await sock.shutdown(SHUT_WR);   // 关闭写端，通知对端 EOF
+co_await sock.shutdown(SHUT_RD);   // 关闭读端
+
 // 析构时自动异步关闭：
 // - 同线程：ctx.spawn(async_close(fd))
 // - 跨线程：同步 ::close(fd)
+```
+
+### 带超时/取消的 connect
+
+```cpp
+// 带超时
+auto ret = co_await sock.connect("example.com", 80, std::chrono::seconds(5));
+
+// 带取消
+canceler_t canceler;
+auto ret = co_await sock.connect("example.com", 80, canceler);
+// 其他协程中调用 canceler.cancel() 可取消连接
 ```
 
 ## UDP

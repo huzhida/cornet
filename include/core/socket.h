@@ -173,6 +173,11 @@ class socket_t {
    */
   close_awaiter close() const;
   /**
+   * @brief async shutdown socket (half-close).
+   * @param how SHUT_RD, SHUT_WR, or SHUT_RDWR
+   */
+  shutdown_awaiter shutdown(int how) const;
+  /**
    * @brief async connect with async DNS resolve.
    * @param host hostname or IP address
    * @param port port number

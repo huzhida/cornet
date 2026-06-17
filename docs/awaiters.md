@@ -81,17 +81,176 @@ co_await nop_awaiter();
 auto ret = co_await ctx.io([fd, buf, n](io_uring_sqe* sqe) {
     io_uring_prep_readv(sqe, fd, iovs, nr_iovs, 0);
 });
+```
 
-// statx
+## shutdown_awaiter
+
+异步半关闭 socket。
+
+```cpp
+co_await shutdown_awaiter(fd, SHUT_WR);   // 关闭写端
+co_await shutdown_awaiter(fd, SHUT_RD);   // 关闭读端
+co_await shutdown_awaiter(fd, SHUT_RDWR); // 关闭读写
+```
+
+返回 `expected<void>`。
+
+## openat_awaiter
+
+异步打开文件。
+
+```cpp
+// 打开已有文件
+auto fd = co_await openat_awaiter(AT_FDCWD, "/path/to/file", O_RDONLY);
+
+// 创建新文件
+auto fd = co_await openat_awaiter(AT_FDCWD, "/tmp/out.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+```
+
+参数：
+- `dirfd` — 目录 fd（`AT_FDCWD` 表示当前目录）
+- `path` — 文件路径
+- `flags` — open flags（O_RDONLY, O_WRONLY, O_CREAT 等）
+- `mode` — 文件权限（默认 0，仅 O_CREAT 时有效）
+
+返回 `expected<int>`（新 fd）。
+
+## splice_awaiter
+
+零拷贝在两个 fd 之间传输数据（至少一端必须是 pipe）。
+
+```cpp
+int pipefd[2];
+pipe(pipefd);
+
+// file → pipe
+auto n = co_await splice_awaiter(file_fd, file_offset, pipefd[1], -1, 4096, SPLICE_F_MOVE);
+
+// pipe → socket
+co_await splice_awaiter(pipefd[0], -1, socket_fd, -1, *n, SPLICE_F_MOVE);
+```
+
+参数：
+- `fd_in` / `fd_out` — 源/目标 fd
+- `off_in` / `off_out` — 偏移（-1 表示用 fd 当前偏移，pipe 必须传 -1）
+- `nbytes` — 传输字节数
+- `flags` — splice flags
+
+返回 `expected<int>`（实际传输字节数）。
+
+## splice_forward
+
+基于 splice 的零拷贝转发，自动管理内部 pipe。
+
+```cpp
+// 把文件内容零拷贝发给 socket（等效 sendfile）
+auto total = co_await splice_forward(file_fd, socket_fd);
+
+// 自定义 chunk 大小
+auto total = co_await splice_forward(fd_in, fd_out, 131072);
+```
+
+返回 `expected<size_t>`（总传输字节数）。
+
+## poll_add_awaiter
+
+等待 fd 上有事件就绪。
+
+```cpp
+// 等待可读
+auto mask = co_await poll_add_awaiter(eventfd, POLLIN);
+
+// 等待可写
+auto mask = co_await poll_add_awaiter(fd, POLLOUT);
+```
+
+返回 `expected<int>`（触发的事件 mask）。
+
+## statx_awaiter
+
+异步获取文件元信息。
+
+```cpp
 struct statx stx{};
-auto ret = co_await ctx.io([fd, &stx](io_uring_sqe* sqe) {
-    io_uring_prep_statx(sqe, fd, "", AT_EMPTY_PATH, STATX_SIZE, &stx);
-});
+co_await statx_awaiter(AT_FDCWD, "/path/to/file", 0, STATX_ALL, &stx);
+// stx.stx_size, stx.stx_mode 等
+```
 
-// mkdir
-auto ret = co_await ctx.io([](io_uring_sqe* sqe) {
-    io_uring_prep_mkdirat(sqe, AT_FDCWD, "/tmp/mydir", 0755);
-});
+返回 `expected<void>`。
+
+## unlinkat_awaiter
+
+异步删除文件或目录。
+
+```cpp
+// 删除文件
+co_await unlinkat_awaiter(AT_FDCWD, "/tmp/file.txt", 0);
+
+// 删除空目录
+co_await unlinkat_awaiter(AT_FDCWD, "/tmp/dir", AT_REMOVEDIR);
+```
+
+返回 `expected<void>`。
+
+## renameat_awaiter
+
+异步重命名/移动文件。
+
+```cpp
+co_await renameat_awaiter(AT_FDCWD, "/tmp/old.txt", AT_FDCWD, "/tmp/new.txt", 0);
+```
+
+返回 `expected<void>`。
+
+## mkdirat_awaiter
+
+异步创建目录。
+
+```cpp
+co_await mkdirat_awaiter(AT_FDCWD, "/tmp/newdir", 0755);
+```
+
+返回 `expected<void>`。
+
+## fsync_awaiter
+
+异步刷盘。
+
+```cpp
+// 完整 fsync
+co_await fsync_awaiter(fd);
+
+// 仅同步数据（不含元数据），等效 fdatasync
+co_await fsync_awaiter(fd, IORING_FSYNC_DATASYNC);
+```
+
+返回 `expected<void>`。
+
+## async_* 便捷函数
+
+所有 awaiter 都有对应的 `async_*` 自由函数包装，省去 `AT_FDCWD` 等样板参数：
+
+```cpp
+// 文件操作
+auto fd = co_await async_open("/path/to/file", O_RDONLY);
+auto n  = co_await async_read(fd, buf, sizeof(buf));
+auto w  = co_await async_write(fd, data, len);
+co_await async_fsync(fd);
+async_close(fd);
+
+// 文件系统
+struct statx stx{};
+co_await async_statx("/path", STATX_ALL, &stx);
+co_await async_mkdir("/tmp/newdir");
+co_await async_rename("/tmp/old.txt", "/tmp/new.txt");
+co_await async_unlink("/tmp/file.txt");
+
+// 网络
+co_await async_shutdown(sock_fd, SHUT_WR);
+auto mask = co_await async_poll(fd, POLLIN);
+
+// 零拷贝
+auto n = co_await async_splice(fd_in, -1, fd_out, -1, 4096);
 ```
 
 ## 自定义 Awaiter

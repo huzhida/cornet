@@ -82,6 +82,7 @@ add_executable(unit_test EXCLUDE_FROM_ALL
     tests/async.cc
     tests/combinators.cc
     tests/runtime.cc
+    tests/fs_io.cc
 )
 target_link_libraries(unit_test PRIVATE
     cornet
