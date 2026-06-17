@@ -3,6 +3,8 @@
 
 #include <filesystem>
 
+#include "core/combinators.h"
+
 using namespace cornet;
 
 coro_t<int> server(context_t& ctx) {
@@ -55,6 +57,31 @@ coro_t<int> client(context_t& ctx) {
   co_return 0;
 }
 
+coro_t<expected<void>> connect_baidu()
+{
+  tcp::v4::socket_t s;
+  auto ok = co_await s.connect("www.baidu.com", 80, std::chrono::milliseconds(500));
+
+  if (!ok)
+  {
+    SPDLOG_ERROR("failed to connect: {}", ok.error().message());
+    co_return unexpected(ok.error());
+  }
+  auto sent = co_await s.send("GET / HTTP/1.1\r\nHost: www.baidu.com\r\nConnection: close\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\n\r\n",
+    strlen("GET / HTTP/1.1\r\nHost: www.baidu.com\r\nConnection: close\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\n\r\n"));
+  if (!sent)
+  {
+    SPDLOG_ERROR("failed to send: {}", sent.error().message());
+    co_return unexpected(sent.error());
+  }
+  char buf[4096] = {0};
+  expected<int> recieved;
+  do {
+    recieved = co_await s.recv(buf, sizeof(buf));
+    SPDLOG_INFO("{}", buf);
+  } while (recieved.value() != 0);
+}
+
 int main(int argc, char* argv[]) {
   cornet::config_t::load("conf/default.toml");
   cornet::logging::init();
@@ -69,4 +96,8 @@ int main(int argc, char* argv[]) {
   ctx.spawn(server(ctx));
   ctx.run();
   client_thread.join();
+
+  ctx.spawn(connect_baidu());
+  ctx.run();
+  return 0;
 }

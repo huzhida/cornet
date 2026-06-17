@@ -3,7 +3,7 @@
 
 namespace cornet {
 
-socklen_t to_address(std::string_view ip, uint16_t port, sockaddr_storage& addr, int family, int type, int flag) {
+expected<socklen_t> to_address(std::string_view ip, uint16_t port, sockaddr_storage& addr, int family, int type, int flag) {
   struct addrinfo hints{};
   struct addrinfo* res;
 
@@ -16,8 +16,7 @@ socklen_t to_address(std::string_view ip, uint16_t port, sockaddr_storage& addr,
 
   int n = getaddrinfo(ip_str.c_str(), port_str.c_str(), &hints, &res);
   if (n != 0) {
-    SPDLOG_ERROR("get {}:{} address info failed, with error:{}", ip, port, gai_strerror(n));
-    return 0;
+    return unexpected(n, error_domain::resolve);
   }
   if (res) {
     socklen_t ret = res->ai_addrlen;
@@ -28,11 +27,11 @@ socklen_t to_address(std::string_view ip, uint16_t port, sockaddr_storage& addr,
   return 0;
 }
 
-socklen_t to_address(std::string_view path, sockaddr_storage& addr) {
+expected<socklen_t> to_address(std::string_view path, sockaddr_storage& addr) {
   auto* u = (sockaddr_un*)&addr;
   if (path.size() > sizeof(u->sun_path) - 1) {
     SPDLOG_ERROR("path length overflow unix local socket permit range.");
-    return 0;
+    return unexpected(ENAMETOOLONG);
   }
   u->sun_family = AF_UNIX;
   std::memcpy(u->sun_path, path.data(), path.size());
@@ -125,10 +124,10 @@ socket_t::accept_awaiter::accept_awaiter(int fd, sockaddr* addr, socklen_t* len,
 socket_t::connect_awaiter::connect_awaiter(int fd, std::string_view ip, uint16_t port, int domain, int type)
   : fd_(fd) {
   this->ctx = &context_t::current();
-  socklen_ = to_address(ip, port, addr, domain, type, AI_ADDRCONFIG | AI_V4MAPPED);
-  if (socklen_ == 0) {
+  auto socklen = to_address(ip, port, addr, domain, type, AI_ADDRCONFIG | AI_V4MAPPED);
+  if (!socklen) {
     this->completed = true;
-    this->value = -EINVAL;
+    this->value = socklen.error().code;
     return;
   }
   this->prepare_fn = [](utask_t* self, io_uring_sqe* sqe) {
@@ -139,12 +138,13 @@ socket_t::connect_awaiter::connect_awaiter(int fd, std::string_view ip, uint16_t
 socket_t::connect_awaiter::connect_awaiter(int fd, std::string_view path)
   : fd_(fd) {
   this->ctx = &context_t::current();
-  socklen_ = to_address(path, addr);
-  if (socklen_ == 0) {
+  auto socklen = to_address(path, addr);
+  if (!socklen) {
     this->completed = true;
-    this->value = -EINVAL;
+    this->value = socklen.error().code;
     return;
   }
+  socklen_ = *socklen;
   this->prepare_fn = [](utask_t* self, io_uring_sqe* sqe) {
     auto* t = static_cast<connect_awaiter*>(self);
     io_uring_prep_connect(sqe, t->fd_, (sockaddr*)&t->addr, t->socklen_);
@@ -239,8 +239,9 @@ cornet::shutdown_awaiter socket_t::shutdown(int how) const {
 coro_t<expected<void>> socket_t::connect(std::string_view host, uint16_t port) const {
   // fast path: numeric IP address, no DNS needed
   resolved_address fast{};
-  fast.socklen = to_address(host, port, fast.addr, domain, type, AI_NUMERICHOST);
-  if (fast.socklen > 0) {
+  auto socklen = to_address(host, port, fast.addr, domain, type, AI_NUMERICHOST);
+  if (socklen) {
+    fast.socklen = socklen.value();
     co_return co_await connect(fast);
   }
 
@@ -255,8 +256,9 @@ coro_t<expected<void>> socket_t::connect(std::string_view host, uint16_t port) c
 coro_t<expected<void>> socket_t::connect(std::string_view host, uint16_t port, canceler_t& canceler) const {
   // fast path: numeric IP address, no DNS needed
   resolved_address fast{};
-  fast.socklen = to_address(host, port, fast.addr, domain, type, AI_NUMERICHOST);
-  if (fast.socklen > 0) {
+  auto socklen = to_address(host, port, fast.addr, domain, type, AI_NUMERICHOST);
+  if (socklen) {
+    fast.socklen = socklen.value();
     co_return co_await with_cancel(connect(fast), canceler);
   }
 
@@ -274,8 +276,9 @@ coro_t<expected<void>> socket_t::connect(std::string_view host, uint16_t port, c
 coro_t<expected<void>> socket_t::connect(std::string_view host, uint16_t port, std::chrono::nanoseconds timeout) const {
   // fast path: numeric IP address, no DNS needed
   resolved_address fast{};
-  fast.socklen = to_address(host, port, fast.addr, domain, type, AI_NUMERICHOST);
-  if (fast.socklen > 0) {
+  auto socklen = to_address(host, port, fast.addr, domain, type, AI_NUMERICHOST);
+  if (socklen) {
+    fast.socklen = socklen.value();
     auto ret = co_await with_timeout(connect(fast), timeout);
     if (!ret) co_return unexpected(ret.error());
     co_return {};
@@ -304,15 +307,17 @@ expected<void> socket_t::bind(std::string_view address, uint16_t port) const {
   socklen_t socklen;
   if (this->domain == AF_UNIX) {
     ::unlink(std::string(address).c_str());
-    socklen = to_address(address, addr);
-    if (socklen == 0) {
-      return unexpected(EINVAL);
+    auto socklen_ = to_address(address, addr);
+    if (!socklen_) {
+      return unexpected(socklen_.error());
     }
+    socklen = socklen_.value();
   } else {
-    socklen = to_address(address, port, addr, domain, type, AI_PASSIVE | AI_NUMERICHOST);
-    if (socklen == 0) {
-      return unexpected(EINVAL);
+    auto socklen_ = to_address(address, port, addr, domain, type, AI_PASSIVE | AI_NUMERICHOST);
+    if (!socklen_) {
+      return unexpected(socklen_.error());
     }
+    socklen = socklen_.value();
   }
 
   if (::bind(fd, (sockaddr*)&addr, socklen) < 0) {
