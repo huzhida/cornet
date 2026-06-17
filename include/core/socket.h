@@ -12,9 +12,9 @@ namespace cornet {
 
 struct canceler_t;
 
-socklen_t to_address(std::string_view address, uint16_t port, sockaddr_storage& addr,
+expected<socklen_t> to_address(std::string_view address, uint16_t port, sockaddr_storage& addr,
                 int family = AF_UNSPEC, int type = SOCK_STREAM, int flag = AI_NUMERICHOST);
-socklen_t to_address(std::string_view path, sockaddr_storage& addr);
+expected<socklen_t> to_address(std::string_view path, sockaddr_storage& addr);
 
 /**
  * @brief resolve result containing resolved address and its length

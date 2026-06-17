@@ -322,49 +322,6 @@ struct context_t {
   };
 
   /**
-   * @brief cancel all pending io_uring operations.
-   * Uses IORING_ASYNC_CANCEL_ANY on 5.19+ kernels, falls back to
-   * per-slot cancellation on older kernels.
-   * @return expected<int>: canceled task count on success, error on failure
-   */
-  inline coro_t<expected<int>> cancel_pending_io() {
-    int canceled_nr = 0;
-
-    // Try CANCEL_ANY first (5.19+)
-    if (!uring.idle()) {
-      auto ret = co_await cancel_awaiter{*this, nullptr, IORING_ASYNC_CANCEL_ANY};
-      if (!ret && ret.error().code == EINVAL) {
-        // Kernel doesn't support CANCEL_ANY, fallback to per-slot cancel
-        std::vector<uint64_t> active;
-        slots.for_each_active([&](uint64_t sd) { active.push_back(sd); });
-        for (auto sd : active) {
-          auto r = co_await cancel_awaiter{*this, reinterpret_cast<void*>(sd), 0};
-          if (r && *r > 0) canceled_nr += *r;
-        }
-        co_return canceled_nr;
-      }
-      // CANCEL_ANY supported
-      if (!ret) {
-        if (ret.error().code == ENOENT) co_return canceled_nr;
-        co_return ret;
-      }
-      if (*ret > 0) canceled_nr += *ret;
-    }
-
-    // Continue with CANCEL_ANY
-    while (!uring.idle()) {
-      auto ret = co_await cancel_awaiter{*this, nullptr, IORING_ASYNC_CANCEL_ANY};
-      if (!ret) {
-        if (ret.error().code == ENOENT) co_return canceled_nr;
-        co_return ret;
-      }
-      if (*ret == 0) co_return canceled_nr;
-      canceled_nr += *ret;
-    }
-    co_return canceled_nr;
-  }
-
-  /**
    * @brief return current thread's context (thread-local singleton)
    * @return thread-local context reference
    */
@@ -460,6 +417,48 @@ private:
   coro_t<void> wakeup_watch_loop();
   // internal: shutdown coroutine (drain → cancel → terminate)
   coro_t<void> shutdown_sequence(std::chrono::nanoseconds timeout);
+  /**
+ * @brief cancel all pending io_uring operations.
+ * Uses IORING_ASYNC_CANCEL_ANY on 5.19+ kernels, falls back to
+ * per-slot cancellation on older kernels.
+ * @return expected<int>: canceled task count on success, error on failure
+ */
+  inline coro_t<expected<int>> cancel_pending_io() {
+    int canceled_nr = 0;
+
+    // Try CANCEL_ANY first (5.19+)
+    if (!uring.idle()) {
+      auto ret = co_await cancel_awaiter{*this, nullptr, IORING_ASYNC_CANCEL_ANY};
+      if (!ret && ret.error().code == EINVAL) {
+        // Kernel doesn't support CANCEL_ANY, fallback to per-slot cancel
+        std::vector<uint64_t> active;
+        slots.for_each_active([&](uint64_t sd) { active.push_back(sd); });
+        for (auto sd : active) {
+          auto r = co_await cancel_awaiter{*this, reinterpret_cast<void*>(sd), 0};
+          if (r && *r > 0) canceled_nr += *r;
+        }
+        co_return canceled_nr;
+      }
+      // CANCEL_ANY supported
+      if (!ret) {
+        if (ret.error().code == ENOENT) co_return canceled_nr;
+        co_return ret;
+      }
+      if (*ret > 0) canceled_nr += *ret;
+    }
+
+    // Continue with CANCEL_ANY
+    while (!uring.idle()) {
+      auto ret = co_await cancel_awaiter{*this, nullptr, IORING_ASYNC_CANCEL_ANY};
+      if (!ret) {
+        if (ret.error().code == ENOENT) co_return canceled_nr;
+        co_return ret;
+      }
+      if (*ret == 0) co_return canceled_nr;
+      canceled_nr += *ret;
+    }
+    co_return canceled_nr;
+  }
 };
 
 } // cornet

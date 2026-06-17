@@ -21,7 +21,8 @@ protected:
 
 TEST_F(socket, to_address_ipv4) {
   sockaddr_storage addr{};
-  const socklen_t socklen = to_address("127.0.0.1", 12345, addr, AF_UNSPEC, SOCK_STREAM, AI_NUMERICHOST);
+  auto socklen_ = to_address("127.0.0.1", 12345, addr, AF_UNSPEC, SOCK_STREAM, AI_NUMERICHOST);
+  socklen_t socklen = socklen_.value();
   EXPECT_EQ(socklen, sizeof(sockaddr_in));
   EXPECT_EQ(addr.ss_family, AF_INET);
 
@@ -32,7 +33,8 @@ TEST_F(socket, to_address_ipv4) {
 
 TEST_F(socket, to_address_ipv6) {
   sockaddr_storage addr{};
-  const socklen_t socklen = to_address("::1", 12345, addr, AF_UNSPEC, SOCK_STREAM, AI_NUMERICHOST);
+  auto socklen_ = to_address("::1", 12345, addr, AF_UNSPEC, SOCK_STREAM, AI_NUMERICHOST);
+  socklen_t socklen = socklen_.value();
   EXPECT_EQ(socklen, sizeof(sockaddr_in6));
   EXPECT_EQ(addr.ss_family, AF_INET6);
 
@@ -44,7 +46,8 @@ TEST_F(socket, to_address_ipv6) {
 TEST_F(socket, to_address_unix_path) {
   sockaddr_storage addr{};
   const std::string path = "/tmp/test.sock";
-  socklen_t len = to_address(path, addr);
+  auto len_ = to_address(path, addr);
+  socklen_t len = len_.value();
   EXPECT_EQ(len, sizeof(sockaddr_un));
   EXPECT_EQ(addr.ss_family, AF_UNIX);
 
@@ -240,7 +243,8 @@ TEST_F(socket, udpv4_sendto_recvfrom) {
   auto client = [](context_t& ctx) -> coro_t<void> {
     udp::v4::socket_t sock;
     sockaddr_storage addr{sizeof(addr)};
-    auto socklen = to_address("127.0.0.1", 12345, addr, AF_INET, SOCK_DGRAM);
+    auto socklen_ = to_address("127.0.0.1", 12345, addr, AF_INET, SOCK_DGRAM);
+    auto socklen = socklen_.value();
     char buffer[16] = {"hello world."};
     for (int i = 0; i < 8; ++i) {
       auto sent = co_await sock.sendto(buffer, strlen(buffer), (sockaddr*)&addr, socklen);
@@ -282,7 +286,8 @@ TEST_F(socket, udpv6_sendto_recvfrom) {
   auto client = [](context_t& ctx) -> coro_t<void> {
     udp::v6::socket_t sock;
     sockaddr_storage addr{sizeof(addr)};
-    auto socklen = to_address("::1", 12345, addr, AF_INET6, SOCK_DGRAM);
+    auto socklen_ = to_address("::1", 12345, addr, AF_INET6, SOCK_DGRAM);
+    auto socklen = socklen_.value();
     char buffer[16] = {"hello world."};
     for (int i = 0; i < 8; ++i) {
       auto sent = co_await sock.sendto(buffer, strlen(buffer), (sockaddr*)&addr, socklen);
@@ -326,7 +331,8 @@ TEST_F(socket, udp_local_sendto_recvfrom) {
     auto path = "/tmp/cornet.sock";
     auto self = "/tmp/cornet.client.sock";
     EXPECT_TRUE(sock.bind(self).has_value());
-    auto socklen = to_address(path, addr);
+    auto socklen_ = to_address(path, addr);
+    auto socklen = socklen_.value();
     char buffer[16] = {"hello world."};
     for (int i = 0; i < 8; ++i) {
       auto sent = co_await sock.sendto(buffer, strlen(buffer), (sockaddr*)&addr, socklen);
