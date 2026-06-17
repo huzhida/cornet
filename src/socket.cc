@@ -1,4 +1,5 @@
 #include "core/socket.h"
+#include "core/combinators.h"
 
 namespace cornet {
 
@@ -197,6 +198,38 @@ socket_t::recvmsg_awaiter::recvmsg_awaiter(int fd, struct msghdr *msg, int flags
   };
 }
 
+socket_t::sendto_awaiter::sendto_awaiter(int fd, void* buf, size_t nbytes, sockaddr* addr, socklen_t socklen, int flag)
+  : fd_(fd) {
+  this->ctx = &context_t::current();
+  iov_ = {buf, nbytes};
+  msg_ = {};
+  msg_.msg_name = addr;
+  msg_.msg_namelen = socklen;
+  msg_.msg_iov = &iov_;
+  msg_.msg_iovlen = 1;
+  this->prepare_fn = [](utask_t* self, io_uring_sqe* sqe) {
+    auto* t = static_cast<sendto_awaiter*>(self);
+    t->msg_.msg_iov = &t->iov_;
+    io_uring_prep_sendmsg(sqe, t->fd_, &t->msg_, 0);
+  };
+}
+
+socket_t::recvfrom_awaiter::recvfrom_awaiter(int fd, void* buf, size_t nbytes, sockaddr* addr, socklen_t* socklen, int flag)
+  : fd_(fd), user_socklen_(socklen) {
+  this->ctx = &context_t::current();
+  iov_ = {buf, nbytes};
+  msg_ = {};
+  msg_.msg_name = addr;
+  msg_.msg_namelen = *socklen;
+  msg_.msg_iov = &iov_;
+  msg_.msg_iovlen = 1;
+  this->prepare_fn = [](utask_t* self, io_uring_sqe* sqe) {
+    auto* t = static_cast<recvfrom_awaiter*>(self);
+    t->msg_.msg_iov = &t->iov_;
+    io_uring_prep_recvmsg(sqe, t->fd_, &t->msg_, 0);
+  };
+}
+
 cornet::close_awaiter socket_t::close() const {
   return close_awaiter{fd};
 }
@@ -205,10 +238,43 @@ coro_t<expected<void>> socket_t::connect(std::string_view host, uint16_t port) c
   resolved_address fast{};
   fast.socklen = to_address(host, port, fast.addr, domain, type, AI_NUMERICHOST);
   if (fast.socklen > 0) {
-    auto ret = co_await connect(fast);
-    if (!ret) {
-      co_return unexpected(ret.error());
-    }
+    co_return co_await connect(fast);
+  }
+
+  // slow path: hostname, async DNS resolve via thread pool
+  auto resolved = co_await resolve(host, port, domain, type);
+  if (!resolved) {
+    co_return unexpected(resolved.error());
+  }
+  co_return co_await connect(*resolved);
+}
+
+coro_t<expected<void>> socket_t::connect(std::string_view host, uint16_t port, canceler_t& canceler) const {
+  // fast path: numeric IP address, no DNS needed
+  resolved_address fast{};
+  fast.socklen = to_address(host, port, fast.addr, domain, type, AI_NUMERICHOST);
+  if (fast.socklen > 0) {
+    co_return co_await with_cancel(connect(fast), canceler);
+  }
+
+  // slow path: hostname, async DNS resolve via thread pool
+  auto resolved = co_await resolve(host, port, domain, type);
+  if (!resolved) {
+    co_return unexpected(resolved.error());
+  }
+  if (canceler.is_cancelled()) {
+    co_return unexpected(ECANCELED);
+  }
+  co_return co_await with_cancel(connect(*resolved), canceler);
+}
+
+coro_t<expected<void>> socket_t::connect(std::string_view host, uint16_t port, std::chrono::nanoseconds timeout) const {
+  // fast path: numeric IP address, no DNS needed
+  resolved_address fast{};
+  fast.socklen = to_address(host, port, fast.addr, domain, type, AI_NUMERICHOST);
+  if (fast.socklen > 0) {
+    auto ret = co_await with_timeout(connect(fast), timeout);
+    if (!ret) co_return unexpected(ret.error());
     co_return {};
   }
 
@@ -217,10 +283,8 @@ coro_t<expected<void>> socket_t::connect(std::string_view host, uint16_t port) c
   if (!resolved) {
     co_return unexpected(resolved.error());
   }
-  auto ret = co_await connect(*resolved);
-  if (!ret) {
-    co_return unexpected(ret.error());
-  }
+  auto ret = co_await with_timeout(connect(*resolved), timeout);
+  if (!ret) co_return unexpected(ret.error());
   co_return {};
 }
 socket_t::connect_awaiter socket_t::connect(const resolved_address& resolved) const {
@@ -267,19 +331,19 @@ expected<void> socket_t::listen(std::string_view address, uint16_t port) const {
   }
   return {};
 }
+socket_t::tcp_accept_awaiter::tcp_accept_awaiter(int fd, int flag)
+  : fd_(fd), flag_(flag) {
+  this->ctx = &context_t::current();
+  this->prepare_fn = [](utask_t* self, io_uring_sqe* sqe) {
+    auto* t = static_cast<tcp_accept_awaiter*>(self);
+    io_uring_prep_accept(sqe, t->fd_, (sockaddr*)&t->addr_, &t->len_, t->flag_);
+  };
+}
 socket_t::accept_awaiter socket_t::accept(sockaddr* addr, socklen_t* socklen, int flag) const {
   return accept_awaiter{fd, addr, socklen, flag};
 }
-coro_t<expected<socket_t>> socket_t::accept(int flag) const {
-  sockaddr_storage addr{};
-  socklen_t len{};
-  auto result = co_await accept((sockaddr*)&addr, &len, flag);
-  if (!result) {
-    co_return unexpected(result.error());
-  }
-  auto socket = tcp::socket_t(*result);
-  socket.domain = addr.ss_family;
-  co_return socket;
+socket_t::tcp_accept_awaiter socket_t::accept(int flag) const {
+  return tcp_accept_awaiter{fd, flag};
 }
 } // cornet::tcp
 
@@ -288,40 +352,16 @@ socket_t::socket_t(int fd) : cornet::socket_t(fd) {
   type = SOCK_DGRAM;
   protocol = IPPROTO_UDP;
 }
-coro_t<expected<int>> socket_t::sendto(void *buf, size_t nbytes, sockaddr *addr, socklen_t socklen, int flag) const {
-  struct iovec iov{};
-  struct msghdr msg{};
-
-  iov.iov_base = buf;
-  iov.iov_len = nbytes;
-  msg.msg_name = addr;
-  msg.msg_namelen = socklen;
-  msg.msg_iov = &iov;
-  msg.msg_iovlen = 1;
-
-  co_return co_await sendmsg_awaiter(fd, &msg, flag);
+socket_t::sendto_awaiter socket_t::sendto(void *buf, size_t nbytes, sockaddr *addr, socklen_t socklen, int flag) const {
+  return sendto_awaiter{fd, buf, nbytes, addr, socklen, flag};
 }
-coro_t<expected<int>> socket_t::recvfrom(void *buf, size_t nbytes, sockaddr *addr, socklen_t *socklen, int flag) const {
-  struct iovec iov{};
-  struct msghdr msg{};
-
-  iov.iov_base = buf;
-  iov.iov_len = nbytes;
-  msg.msg_name = addr;
-  msg.msg_namelen = *socklen;
-  msg.msg_iov = &iov;
-  msg.msg_iovlen = 1;
-  auto ret = co_await recvmsg_awaiter(fd, &msg, flag);
-  if (!ret) {
-    co_return ret;
-  }
-  *socklen = msg.msg_namelen;
-  co_return *ret;
+socket_t::recvfrom_awaiter socket_t::recvfrom(void *buf, size_t nbytes, sockaddr *addr, socklen_t *socklen, int flag) const {
+  return recvfrom_awaiter{fd, buf, nbytes, addr, socklen, flag};
 }
-auto socket_t::sendmsg(struct msghdr *msg, int flags) const {
+socket_t::sendmsg_awaiter socket_t::sendmsg(struct msghdr *msg, int flags) const {
   return sendmsg_awaiter{fd, msg, flags};
 }
-auto socket_t::recvmsg(struct msghdr *msg, int flags) const {
+socket_t::recvmsg_awaiter socket_t::recvmsg(struct msghdr *msg, int flags) const {
   return recvmsg_awaiter{fd, msg, flags};
 }
 } // cornet::udp
