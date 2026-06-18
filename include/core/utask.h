@@ -15,7 +15,6 @@ struct context_t;
  * Subclasses store operation parameters and set prepare_fn to fill the SQE at submission time.
  */
 struct utask_t : task_t {
-  using callback_t = void(*)(context_t&, void*);
   using prepare_fn_t = void(*)(utask_t*, io_uring_sqe*);
 
   utask_t() = default;
@@ -77,10 +76,6 @@ protected:
   context_t* ctx{nullptr};
 
 private:
-  // callback, will be called on complete
-  callback_t callback{nullptr};
-  // callback user data
-  void* user_data{nullptr};
   // encoded slot data (index + generation) for safe lifetime tracking
   uint64_t slot_data{0};
 

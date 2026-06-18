@@ -68,16 +68,16 @@ void context_t::run() {
 }
 
 void context_t::shutdown(std::chrono::nanoseconds timeout) {
-  auto current = state.load(std::memory_order_acquire);
-  if (current == state_t::Running) {
-    switch_to(state_t::Draining);
-    if (std::this_thread::get_id() == owner) {
+  auto expected = state_t::Running;
+  if (!state.compare_exchange_strong(expected, state_t::Draining, std::memory_order_acq_rel)) {
+    return;
+  }
+  if (std::this_thread::get_id() == owner) {
+    spawn(shutdown_sequence(timeout));
+  } else {
+    remote_queue_.enqueue([this, timeout]() {
       spawn(shutdown_sequence(timeout));
-    } else {
-      remote_queue_.enqueue([this, timeout]() {
-        spawn(shutdown_sequence(timeout));
-      });
-    }
+    });
   }
   wakeup();
 }

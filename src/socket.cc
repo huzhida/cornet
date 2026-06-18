@@ -127,9 +127,10 @@ socket_t::connect_awaiter::connect_awaiter(int fd, std::string_view ip, uint16_t
   auto socklen = to_address(ip, port, addr, domain, type, AI_ADDRCONFIG | AI_V4MAPPED);
   if (!socklen) {
     this->completed = true;
-    this->value = socklen.error().code;
+    this->value = -socklen.error().code;
     return;
   }
+  socklen_ = *socklen;
   this->prepare_fn = [](utask_t* self, io_uring_sqe* sqe) {
     auto* t = static_cast<connect_awaiter*>(self);
     io_uring_prep_connect(sqe, t->fd_, (sockaddr*)&t->addr, t->socklen_);
@@ -141,7 +142,7 @@ socket_t::connect_awaiter::connect_awaiter(int fd, std::string_view path)
   auto socklen = to_address(path, addr);
   if (!socklen) {
     this->completed = true;
-    this->value = socklen.error().code;
+    this->value = -socklen.error().code;
     return;
   }
   socklen_ = *socklen;
@@ -236,7 +237,7 @@ cornet::close_awaiter socket_t::close() const {
 cornet::shutdown_awaiter socket_t::shutdown(int how) const {
   return shutdown_awaiter{fd, how};
 }
-coro_t<expected<void>> socket_t::connect(std::string_view host, uint16_t port) const {
+ccoro_t<expected<void>> socket_t::connect(std::string_view host, uint16_t port) const {
   // fast path: numeric IP address, no DNS needed
   resolved_address fast{};
   auto socklen = to_address(host, port, fast.addr, domain, type, AI_NUMERICHOST);

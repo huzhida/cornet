@@ -111,6 +111,10 @@ auto ret = co_await sock.connect("example.com", 80, canceler);
 // 其他协程中调用 canceler.cancel() 可取消连接
 ```
 
+> **注意**：不带超时/取消参数的 `connect(host, port)` 返回 `ccoro_t<expected<void>>`，
+> 支持通过协程级 `with_cancel` / `with_timeout` 自动传播取消。
+> 带超时/取消参数的重载返回普通 `coro_t<expected<void>>`。
+
 ## UDP
 
 ### 基本使用

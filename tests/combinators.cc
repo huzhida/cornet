@@ -413,11 +413,11 @@ TEST_F(combinators, task_scope_spawn_non_void_discard) {
 // --- await_transform automatic cancellation tests ---
 
 TEST_F(combinators, await_transform_propagates_cancel) {
-  // canceler injected into coro_t's promise automatically cancels internal IO
+  // canceler injected into cancelable_coro_t's promise automatically cancels internal IO
   auto test = [](context_t& ctx) -> coro_t<void> {
     canceler_t canceler;
 
-    auto io_task = [](context_t& ctx) -> coro_t<expected<void>> {
+    auto io_task = [](context_t& ctx) -> cancelable_coro_t<expected<void>> {
       tcp::v4::socket_t server_sock;
       server_sock.address_reuse(true);
       EXPECT_TRUE(server_sock.listen("127.0.0.1", 23470).has_value());
@@ -468,7 +468,7 @@ TEST_F(combinators, coro_with_cancel_basic) {
   auto test = [](context_t& ctx) -> coro_t<void> {
     canceler_t canceler;
 
-    auto long_task = [](context_t& ctx) -> coro_t<expected<int>> {
+    auto long_task = [](context_t& ctx) -> cancelable_coro_t<expected<int>> {
       tcp::v4::socket_t server_sock;
       server_sock.address_reuse(true);
       EXPECT_TRUE(server_sock.listen("127.0.0.1", 23471).has_value());
@@ -495,7 +495,7 @@ TEST_F(combinators, coro_with_cancel_basic) {
 
 TEST_F(combinators, coro_with_timeout_expires) {
   auto test = [](context_t& ctx) -> coro_t<void> {
-    auto long_task = [](context_t& ctx) -> coro_t<expected<int>> {
+    auto long_task = [](context_t& ctx) -> cancelable_coro_t<expected<int>> {
       tcp::v4::socket_t server_sock;
       server_sock.address_reuse(true);
       EXPECT_TRUE(server_sock.listen("127.0.0.1", 23472).has_value());
@@ -515,7 +515,7 @@ TEST_F(combinators, coro_with_timeout_expires) {
 
 TEST_F(combinators, coro_with_timeout_completes_before_timeout) {
   auto test = [](context_t& ctx) -> coro_t<void> {
-    auto fast_task = []() -> coro_t<expected<void>> {
+    auto fast_task = []() -> cancelable_coro_t<expected<void>> {
       co_await sleep(std::chrono::milliseconds(10));
       co_return expected<void>{};
     };
@@ -530,7 +530,7 @@ TEST_F(combinators, coro_with_timeout_completes_before_timeout) {
 
 TEST_F(combinators, coro_with_timeout_void_expires) {
   auto test = [](context_t& ctx) -> coro_t<void> {
-    auto long_task = [](context_t& ctx) -> coro_t<void> {
+    auto long_task = [](context_t& ctx) -> cancelable_coro_t<void> {
       tcp::v4::socket_t server_sock;
       server_sock.address_reuse(true);
       EXPECT_TRUE(server_sock.listen("127.0.0.1", 23473).has_value());

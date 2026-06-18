@@ -166,13 +166,15 @@ struct cancellable_awaiter {
     : op_(std::move(op)), canceler_(&canceler) {}
 
   bool await_ready() {
-    if (canceler_ && canceler_->is_cancelled()) return true;
+    if (canceler_) [[likely]] {
+      if (canceler_->is_cancelled()) return true;
+    }
     return op_.await_ready();
   }
 
   bool await_suspend(std::coroutine_handle<> h) {
-    if (canceler_ && canceler_->is_cancelled()) return false;
-    if (canceler_) {
+    if (canceler_) [[likely]] {
+      if (canceler_->is_cancelled()) return false;
       node_.task = &op_;
       canceler_->link_node(&node_);
     }
@@ -182,11 +184,9 @@ struct cancellable_awaiter {
   }
 
   auto await_resume() -> decltype(op_.await_resume()) {
-    if (canceler_ && submitted_) {
+    if (canceler_) [[likely]] {
+      if (!submitted_) return unexpected(ECANCELED);
       canceler_->unlink_node(&node_);
-    }
-    if (canceler_ && !submitted_) {
-      return unexpected(ECANCELED);
     }
     return op_.await_resume();
   }

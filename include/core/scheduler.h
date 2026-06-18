@@ -1,11 +1,52 @@
 #ifndef CORNET_SCHEDULER_H
 #define CORNET_SCHEDULER_H
 
-#include <queue>
+#include <vector>
 #include "task.h"
 
 
 namespace cornet {
+
+/**
+ * @brief cache-friendly ring buffer queue for coroutine handles.
+ * Contiguous memory layout for optimal cache performance on the hot scheduling path.
+ * Power-of-2 capacity for branchless index wrapping via bitmask.
+ */
+struct ring_queue_t {
+  ring_queue_t() : buf_(1024), mask_(1023), head_(0), tail_(0) {}
+
+  void push(std::coroutine_handle<> h) {
+    if (size() == buf_.size()) [[unlikely]] grow();
+    buf_[tail_ & mask_] = h;
+    tail_++;
+  }
+
+  std::coroutine_handle<> front() const {
+    return buf_[head_ & mask_];
+  }
+
+  void pop() { head_++; }
+
+  CORNET_NODISCARD bool empty() const { return head_ == tail_; }
+  CORNET_NODISCARD size_t size() const { return tail_ - head_; }
+
+private:
+  void grow() {
+    size_t old_cap = buf_.size();
+    size_t new_cap = old_cap * 2;
+    std::vector<std::coroutine_handle<>> new_buf(new_cap);
+    for (size_t i = head_; i != tail_; i++) {
+      new_buf[i & (new_cap - 1)] = buf_[i & mask_];
+    }
+    buf_ = std::move(new_buf);
+    mask_ = new_cap - 1;
+  }
+
+  std::vector<std::coroutine_handle<>> buf_;
+  size_t mask_;
+  size_t head_;
+  size_t tail_;
+};
 
 #define CORNET_REGISTER_SCHEDULER(name, cls) \
 struct register_##cls { \
@@ -42,7 +83,7 @@ inline const char* scheduler_name(scheduler_type_t type) {
  * @brief context scheduler, schedule and process task
  */
 struct scheduler_t {
-  using queue_t = std::queue<std::coroutine_handle<>>;
+  using queue_t = ring_queue_t;
 
   virtual ~scheduler_t() = default;
 

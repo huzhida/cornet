@@ -183,7 +183,7 @@ class socket_t {
    * @param port port number
    * @return expected<void> on success, error on failure
    */
-  coro_t<expected<void>> connect(std::string_view host, uint16_t port) const;
+  ccoro_t<expected<void>> connect(std::string_view host, uint16_t port) const;
   /**
    * @brief async connect with timeout.
    */

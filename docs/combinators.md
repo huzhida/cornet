@@ -294,10 +294,10 @@ co_await with_cancel(close_awaiter(fd), canceler);
 
 ### 协程级 with_cancel
 
-`with_cancel(coro_t<V>, canceler)` 将 canceler 注入到协程的 promise 中，使其内部所有 `co_await utask_t` 操作自动获得取消能力（通过 `await_transform`）：
+`with_cancel(ccoro_t<V>, canceler)` 将 canceler 注入到协程的 promise 中，使其内部所有 `co_await utask_t` 操作自动获得取消能力（通过 `await_transform`）：
 
 ```cpp
-coro_t<expected<int>> long_io_task() {
+ccoro_t<expected<int>> long_io_task() {
     tcp::v4::socket_t sock;
     auto conn = co_await sock.connect("server", 80);  // 自动可取消
     auto n = co_await sock.recv(buf, 4096);            // 自动可取消
@@ -309,15 +309,33 @@ auto result = co_await with_cancel(long_io_task(), canceler);
 // canceler.cancel() 会取消 long_io_task 内部正在执行的任意 IO
 ```
 
-无需在每个 `co_await` 处手动添加 `with_cancel`，canceler 通过 `await_transform` 自动传播。
+> **注意**：协程级 `with_cancel` 仅适用于 `cancelable_coro_t<V>`（别名 `ccoro_t<V>`），因为只有该类型的 promise 才有 `await_transform` 自动传播取消。普通 `coro_t<V>` 无此能力。
+
+无需在每个 `co_await` 处手动添加 `with_cancel`，canceler 通过 `await_transform` 自动传播。**嵌套的 `ccoro_t` 会自动级联**：外层 canceler 自动注入到内层 `ccoro_t` 的 promise，取消递归传播到任意深度。
+
+```cpp
+ccoro_t<expected<void>> inner() {
+    co_await sock.recv(buf, n);  // 自动继承外层 canceler
+    co_return {};
+}
+
+ccoro_t<expected<void>> outer() {
+    co_await inner();  // canceler 自动级联到 inner
+    co_return {};
+}
+
+canceler_t canceler;
+co_await with_cancel(outer(), canceler);
+// cancel 传播: outer → inner → inner 的所有 IO
+```
 
 ### 协程级 with_timeout
 
-`with_timeout(coro_t<V>, duration)` 为整个协程设置超时，内部 IO 在超时后自动取消：
+`with_timeout(ccoro_t<V>, duration)` 为整个协程设置超时，内部 IO 在超时后自动取消：
 
 ```cpp
 // 返回 expected<T> 的协程：超时时返回 unexpected(ETIMEDOUT)
-coro_t<expected<int>> fetch_data() {
+ccoro_t<expected<int>> fetch_data() {
     auto conn = co_await sock.connect("server", 80);
     auto n = co_await sock.recv(buf, 4096);
     co_return n;
@@ -331,6 +349,8 @@ if (!result) {
 }
 ```
 
+> **注意**：协程级 `with_timeout` 仅适用于 `cancelable_coro_t<V>`（别名 `ccoro_t<V>`）。
+
 #### 工作原理
 
 1. 创建一个 `shared_ptr<canceler_t>` 并注入到协程 promise
@@ -342,10 +362,10 @@ if (!result) {
 
 | 协程返回类型 | with_timeout 返回类型 | 超时行为 |
 |---|---|---|
-| `coro_t<expected<T>>` | `coro_t<expected<T>>` | 返回 `unexpected(ETIMEDOUT)` |
-| `coro_t<expected<void>>` | `coro_t<expected<void>>` | 返回 `unexpected(ETIMEDOUT)` |
-| `coro_t<void>` | `coro_t<void>` | 协程被取消，IO 返回 ECANCELED |
-| `coro_t<int>` | `coro_t<int>` | 协程被取消，IO 抛异常 |
+| `coro_t<expected<T>>` | `ccoro_t<expected<T>>` | 返回 `unexpected(ETIMEDOUT)` |
+| `coro_t<expected<void>>` | `ccoro_t<expected<void>>` | 返回 `unexpected(ETIMEDOUT)` |
+| `coro_t<void>` | `ccoro_t<void>` | 协程被取消，IO 返回 ECANCELED |
+| `coro_t<int>` | `ccoro_t<int>` | 协程被取消，IO 抛异常 |
 
 推荐协程返回 `expected<T>` 以获得最佳超时体验（ETIMEDOUT 自动展平）。
 
