@@ -100,20 +100,21 @@ struct timeout_awaiter {
  * @return awaitable that returns ETIMEDOUT on timeout
  */
 template<typename Awaitable, typename Rep, typename Period>
+requires std::derived_from<Awaitable, utask_t>
 timeout_awaiter<Awaitable, Rep, Period> with_timeout(Awaitable op, std::chrono::duration<Rep, Period> duration) {
   return {std::move(op), duration};
 }
 
 /**
- * @brief coroutine-level with_cancel. Injects a canceler into coro_t's promise
+ * @brief coroutine-level with_cancel. Injects a canceler into cancelable_coro_t's promise
  * so all internal utask_t operations are automatically cancellable.
  */
 template<typename V>
 struct coro_cancellable_awaiter {
-  coro_t<V> coro_;
+  cancelable_coro_t<V> coro_;
   canceler_t& canceler_;
 
-  coro_cancellable_awaiter(coro_t<V> coro, canceler_t& canceler)
+  coro_cancellable_awaiter(cancelable_coro_t<V> coro, canceler_t& canceler)
     : coro_(std::move(coro)), canceler_(canceler) {}
 
   bool await_ready() { return coro_.done(); }
@@ -129,7 +130,7 @@ struct coro_cancellable_awaiter {
 };
 
 template<typename V>
-coro_cancellable_awaiter<V> with_cancel(coro_t<V> coro, canceler_t& canceler) {
+coro_cancellable_awaiter<V> with_cancel(cancelable_coro_t<V> coro, canceler_t& canceler) {
   return {std::move(coro), canceler};
 }
 
@@ -146,7 +147,7 @@ namespace detail {
 }
 
 template<typename V, typename Rep, typename Period>
-coro_t<V> with_timeout(coro_t<V> coro, std::chrono::duration<Rep, Period> duration) {
+cancelable_coro_t<V> with_timeout(cancelable_coro_t<V> coro, std::chrono::duration<Rep, Period> duration) {
   auto canceler = std::make_shared<canceler_t>();
   coro.native_handle().promise().canceler_ = canceler.get();
 

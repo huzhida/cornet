@@ -14,11 +14,9 @@ utask_t::~utask_t() {
 
 utask_t::utask_t(utask_t&& other) noexcept {
   this->prepare_fn = other.prepare_fn;
-  this->callback = other.callback;
   this->completed = other.completed;
   this->value = other.value;
   this->handle = other.handle;
-  this->user_data = other.user_data;
   this->ctx = other.ctx;
   this->slot_data = other.slot_data;
   other.ctx = nullptr;
@@ -60,10 +58,6 @@ void utask_t::complete(context_t& ctx, cqe_t cqe) {
     ctx.metrics().tasks_failed++;
   } else {
     ctx.metrics().tasks_completed++;
-  }
-
-  if (callback) {
-    callback(ctx, user_data);
   }
 
   if (handle) {

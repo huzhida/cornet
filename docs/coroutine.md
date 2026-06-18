@@ -1,8 +1,32 @@
 # 协程与错误处理
 
-## coro_t\<T\>
+## 协程类型体系
 
-`coro_t<T>` 是 Cornet 的核心协程类型，封装 C++20 coroutine handle 并管理其生命周期。
+Cornet 提供两种协程类型，通过 CRTP（`basic_coro_t`）共享公共实现，未来修改只需改动基类：
+
+| 类型 | 别名 | 开销 | 用途 |
+|------|------|------|------|
+| `coro_t<V>` | — | 零额外开销 | 通用协程，不需要取消能力 |
+| `cancelable_coro_t<V>` | `ccoro_t<V>` | `await_transform` 包装 | 需要自动取消传播的协程 |
+
+### 设计原则
+
+- **零开销原则**：`coro_t<V>` 没有 `await_transform`，`co_await` IO 操作时不附加任何取消逻辑
+- **按需付费**：只有 `cancelable_coro_t<V>`（或 `ccoro_t<V>`）才通过 `await_transform` 自动包装 IO
+- **代码复用**：两者继承 `basic_coro_t<V, Derived>`，析构、移动、`co_await`、`resume`、`detach` 等操作只有一份实现
+
+### CRTP 架构
+
+```
+basic_coro_t<V, Derived>   ← 公共实现（析构、移动、co_await、resume、detach、value）
+    ├── coro_t<V>          ← 零开销，plain promise_type
+    └── cancelable_coro_t<V> (ccoro_t<V>)  ← 带 await_transform 的 promise_type
+```
+
+## coro_t\<V\>
+
+`coro_t<V>` 是 Cornet 的基础协程类型，封装 C++20 coroutine handle 并管理其生命周期。
+无 `await_transform`，无 canceler，纯粹的协程包装。
 
 ### 定义协程
 
@@ -46,6 +70,108 @@ ctx.spawn(coro);  // 左值，不 detach
 - 父协程挂起时直接跳转到子协程，无栈帧开销
 - 子协程完成时直接跳回父协程
 - 避免了递归 resume 导致的栈溢出
+
+---
+
+## cancelable_coro_t\<V\> / ccoro_t\<V\>
+
+`cancelable_coro_t<V>`（简写 `ccoro_t<V>`）是带自动取消传播能力的协程类型。其 promise_type 包含 `canceler_t*` 指针和 `await_transform`，使内部所有 `utask_t` 派生的 IO 操作自动获得取消能力。
+
+### 使用场景
+
+需要整个协程被 `with_cancel` 或 `with_timeout` 包装时使用：
+
+```cpp
+// 使用 ccoro_t 声明需要取消能力的协程
+ccoro_t<expected<int>> long_io_task() {
+    tcp::v4::socket_t sock;
+    auto conn = co_await sock.connect("server", 80);   // 自动可取消
+    auto n = co_await sock.recv(buf, 4096);             // 自动可取消
+    co_return n;
+}
+
+// 协程级 with_cancel
+canceler_t canceler;
+auto result = co_await with_cancel(long_io_task(), canceler);
+
+// 协程级 with_timeout
+auto result = co_await with_timeout(long_io_task(), 5s);
+```
+
+### await_transform 原理
+
+```cpp
+// cancelable_coro_t 的 promise_type 内部
+canceler_t* canceler_{nullptr};
+
+// 1. utask_t 派生的 IO 操作 → 包装 cancellable_awaiter
+template<typename T>
+requires std::derived_from<std::decay_t<T>, utask_t>
+cancellable_awaiter<std::decay_t<T>> await_transform(T&& op) {
+    return {std::forward<T>(op), canceler_};
+}
+
+// 2. 子 ccoro_t → 自动级联 canceler（取消传播到子协程）
+template<typename T>
+requires requires { typename std::decay_t<T>::promise_type::canceler_tag; }
+auto await_transform(T&& coro) {
+    if (canceler_) coro.native_handle().promise().canceler_ = canceler_;
+    return std::move(coro).operator co_await();
+}
+
+// 3. 其他 awaitable → 直接透传
+template<typename T>
+requires (!std::derived_from<std::decay_t<T>, utask_t>
+          && !requires { typename std::decay_t<T>::promise_type::canceler_tag; })
+T&& await_transform(T&& op) {
+    return std::forward<T>(op);
+}
+```
+
+### 行为
+
+- `canceler_` 被注入后：所有 IO 自动关联取消器，cancel 时自动取消 inflight IO
+- `ccoro_t` 内 `co_await` 另一个 `ccoro_t` 时：canceler 自动级联到子协程（无需手动传递）
+- 普通 `coro_t` 或 `suspend_always` 等其他 awaitable：正常透传，不受影响
+
+### 自动级联取消
+
+当 `ccoro_t` 嵌套 `ccoro_t` 时，外层的 canceler 自动传播到内层所有 IO：
+
+```cpp
+ccoro_t<expected<void>> inner_task() {
+    co_await sock.recv(buf, n);   // 自动继承父 canceler
+    co_await sock.send(buf, n);   // 同样自动可取消
+    co_return {};
+}
+
+ccoro_t<expected<void>> outer_task() {
+    co_await inner_task();  // canceler 自动注入 inner_task 的 promise
+    co_return {};
+}
+
+canceler_t canceler;
+co_await with_cancel(outer_task(), canceler);
+// canceler.cancel() → outer_task 和 inner_task 中的 IO 全部取消
+```
+
+级联是递归的：`outer → inner → deeper` 层层传播，无需手动在每层添加 `with_cancel`。
+
+### 与 coro_t 的选择
+
+```cpp
+// 不需要取消 → 用 coro_t（零开销）
+coro_t<void> simple_handler() {
+    co_await sock.recv(buf, n);  // 直接调用，无包装
+    co_return;
+}
+
+// 需要取消/超时 → 用 ccoro_t
+ccoro_t<expected<void>> cancellable_handler() {
+    co_await sock.recv(buf, n);  // await_transform 自动包装
+    co_return {};
+}
+```
 
 ---
 
@@ -117,39 +243,12 @@ return unexpected(ECANCELED, error_domain::internal);  // 内部错误
 
 ## 自动取消传播（await_transform）
 
-`coro_t<T>` 的 `promise_type` 通过 `await_transform` 机制，自动为内部所有 `co_await utask_t` 操作附加取消能力。
+> **注意**：此机制仅在 `cancelable_coro_t<V>` / `ccoro_t<V>` 中生效。`coro_t<V>` 没有 `await_transform`，IO 操作不会被包装。
 
-### 原理
-
-```cpp
-// promise_type 内部
-canceler_t* canceler_{nullptr};
-
-template<typename T>
-requires std::derived_from<std::decay_t<T>, utask_t>
-cancellable_awaiter<std::decay_t<T>> await_transform(T&& op) {
-    return {std::forward<T>(op), canceler_};  // canceler_ 可能为 nullptr
-}
-
-template<typename T>
-requires (!std::derived_from<std::decay_t<T>, utask_t>)
-T&& await_transform(T&& op) {
-    return std::forward<T>(op);  // 非 utask_t 直接透传
-}
-```
-
-### 行为
-
-- 当 `canceler_` 为 nullptr（默认）：`cancellable_awaiter` 退化为直接透传，零额外开销
-- 当 `canceler_` 被注入（通过 `with_cancel` 或 `with_timeout`）：所有 IO 自动关联取消器
-- 非 `utask_t` 的 awaitable（如 `co_await other_coro()`）不受影响，正常透传
-
-### 使用方式
-
-不需要手动使用 `await_transform`。通过 `with_cancel` 或 `with_timeout` 包装协程时自动生效：
+当 `ccoro_t` 通过 `with_cancel` 或 `with_timeout` 包装时，canceler 被注入到 promise，内部所有 IO 自动可取消：
 
 ```cpp
-coro_t<expected<void>> my_handler() {
+ccoro_t<expected<void>> my_handler() {
     auto conn = co_await sock.connect("server", 80);  // 自动可取消
     auto n = co_await sock.recv(buf, 4096);            // 自动可取消
     auto sub = co_await compute_something();           // coro_t，不受影响
