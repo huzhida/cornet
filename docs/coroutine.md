@@ -115,6 +115,53 @@ return unexpected(ECANCELED, error_domain::internal);  // 内部错误
 
 ---
 
+## 自动取消传播（await_transform）
+
+`coro_t<T>` 的 `promise_type` 通过 `await_transform` 机制，自动为内部所有 `co_await utask_t` 操作附加取消能力。
+
+### 原理
+
+```cpp
+// promise_type 内部
+canceler_t* canceler_{nullptr};
+
+template<typename T>
+requires std::derived_from<std::decay_t<T>, utask_t>
+cancellable_awaiter<std::decay_t<T>> await_transform(T&& op) {
+    return {std::forward<T>(op), canceler_};  // canceler_ 可能为 nullptr
+}
+
+template<typename T>
+requires (!std::derived_from<std::decay_t<T>, utask_t>)
+T&& await_transform(T&& op) {
+    return std::forward<T>(op);  // 非 utask_t 直接透传
+}
+```
+
+### 行为
+
+- 当 `canceler_` 为 nullptr（默认）：`cancellable_awaiter` 退化为直接透传，零额外开销
+- 当 `canceler_` 被注入（通过 `with_cancel` 或 `with_timeout`）：所有 IO 自动关联取消器
+- 非 `utask_t` 的 awaitable（如 `co_await other_coro()`）不受影响，正常透传
+
+### 使用方式
+
+不需要手动使用 `await_transform`。通过 `with_cancel` 或 `with_timeout` 包装协程时自动生效：
+
+```cpp
+coro_t<expected<void>> my_handler() {
+    auto conn = co_await sock.connect("server", 80);  // 自动可取消
+    auto n = co_await sock.recv(buf, 4096);            // 自动可取消
+    auto sub = co_await compute_something();           // coro_t，不受影响
+    co_return expected<void>{};
+}
+
+canceler_t canceler;
+co_await with_cancel(my_handler(), canceler);  // 注入 canceler 到 promise
+```
+
+---
+
 ## IO 操作的返回值约定
 
 | 操作 | 返回类型 | 成功值 | 失败值 |

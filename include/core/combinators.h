@@ -7,242 +7,6 @@
 
 namespace cornet {
 
-// forward declaration
-template<typename Awaitable>
-struct cancellable_awaiter;
-
-/**
- * @brief intrusive list node for tracking active IO operations in a canceler.
- * Embedded in cancellable_awaiter, lifetime matches the co_await duration.
- */
-struct cancel_node {
-  utask_t* task{nullptr};
-  cancel_node* prev{nullptr};
-  cancel_node* next{nullptr};
-};
-
-/**
- * @brief canceler. Supports multi-task cancellation and hierarchical propagation.
- * Single-threaded, no atomic operations needed.
- *
- * Features:
- * - O(1) child unlink via doubly-linked sibling list
- * - Multiple concurrent IO operations per canceler via cancel_node list
- * - Iterative cancel propagation (no recursion)
- *
- * Usage:
- *   canceler_t canceler;
- *   ctx.spawn(handle_client(sock, canceler));
- *   canceler.cancel();  // cancel all IO associated with this canceler
- *
- * Hierarchical:
- *   canceler_t parent;
- *   canceler_t child(parent);
- *   parent.cancel();  // propagates to child
- */
-struct canceler_t {
-  canceler_t() : ctx_(&context_t::current()) {}
-
-  explicit canceler_t(canceler_t& parent)
-    : ctx_(parent.ctx_), parent_(&parent) {
-    // insert at head of parent's children (doubly-linked)
-    next_sibling_ = parent.first_child_;
-    if (next_sibling_) {
-      next_sibling_->prev_sibling_ = this;
-    }
-    parent.first_child_ = this;
-  }
-
-  ~canceler_t() {
-    if (parent_) {
-      // O(1) unlink from parent's doubly-linked children list
-      if (prev_sibling_) {
-        prev_sibling_->next_sibling_ = next_sibling_;
-      } else {
-        parent_->first_child_ = next_sibling_;
-      }
-      if (next_sibling_) {
-        next_sibling_->prev_sibling_ = prev_sibling_;
-      }
-    }
-  }
-
-  canceler_t(const canceler_t&) = delete;
-  canceler_t& operator=(const canceler_t&) = delete;
-
-  /**
-   * @brief cancel this canceler and all descendants iteratively.
-   * Cancels all inflight IO operations associated with this canceler tree.
-   */
-  void cancel() {
-    if (cancelled_) return;
-    cancelled_ = true;
-
-    // cancel all active IO tasks on this canceler
-    cancel_active_tasks();
-
-    // iterative tree traversal (avoids recursion / stack overflow)
-    for (auto* child = first_child_; child; child = child->next_sibling_) {
-      child->cancel_subtree();
-    }
-  }
-
-  /**
-   * @brief check if this canceler has been cancelled
-   */
-  CORNET_NODISCARD bool is_cancelled() const { return cancelled_; }
-
-  /**
-   * @brief reset canceler to reusable state.
-   * Must only be called when no IO operations are in-flight.
-   */
-  void reset() {
-    cancelled_ = false;
-    active_head_ = nullptr;
-  }
-
-  /**
-   * @brief register an active IO task node with this canceler.
-   * Called by cancellable_awaiter on await_suspend.
-   */
-  void link_node(cancel_node* node) {
-    node->prev = nullptr;
-    node->next = active_head_;
-    if (active_head_) {
-      active_head_->prev = node;
-    }
-    active_head_ = node;
-  }
-
-  /**
-   * @brief unregister an active IO task node from this canceler.
-   * Called by cancellable_awaiter on await_resume. O(1).
-   */
-  void unlink_node(cancel_node* node) {
-    if (node->prev) {
-      node->prev->next = node->next;
-    } else {
-      active_head_ = node->next;
-    }
-    if (node->next) {
-      node->next->prev = node->prev;
-    }
-    node->prev = node->next = nullptr;
-  }
-
-private:
-  /**
-   * @brief cancel all active IO tasks on this canceler node.
-   */
-  void cancel_active_tasks() {
-    for (auto* node = active_head_; node; node = node->next) {
-      if (node->task && node->task->slot_data != 0) {
-        auto* sqe = ctx_->io_uring().get_sqe();
-        io_uring_prep_cancel(sqe, reinterpret_cast<void*>(node->task->slot_data), 0);
-        io_uring_sqe_set_data(sqe, nullptr);
-      }
-    }
-  }
-
-  /**
-   * @brief cancel this subtree iteratively (called on children).
-   * Uses depth-first traversal without recursion.
-   */
-  void cancel_subtree() {
-    // use iterative DFS with the sibling/child pointers
-    canceler_t* current = this;
-    while (current) {
-      if (!current->cancelled_) {
-        current->cancelled_ = true;
-        current->cancel_active_tasks();
-      }
-
-      // depth-first: go to first child if exists
-      if (current->first_child_) {
-        current = current->first_child_;
-      } else {
-        // backtrack: find next unvisited sibling or ancestor's sibling
-        while (current && current != this) {
-          if (current->next_sibling_) {
-            current = current->next_sibling_;
-            break;
-          }
-          current = current->parent_;
-        }
-        if (current == this) break;
-      }
-    }
-  }
-
-  bool cancelled_{false};
-  cancel_node* active_head_{nullptr};
-  context_t* ctx_{nullptr};
-  canceler_t* parent_{nullptr};
-  canceler_t* first_child_{nullptr};
-  canceler_t* next_sibling_{nullptr};
-  canceler_t* prev_sibling_{nullptr};
-
-  template<typename Awaitable>
-  friend struct cancellable_awaiter;
-};
-
-/**
- * @brief wraps a utask_t-based awaitable with cancellation support.
- * When the associated canceler is cancelled, the inflight io_uring operation
- * is automatically cancelled and the coroutine resumes with ECANCELED.
- * Supports multiple concurrent operations per canceler via cancel_node.
- *
- * Usage: auto n = co_await with_cancel(sock.recv(buf, 4096), canceler);
- */
-template<typename Awaitable>
-struct cancellable_awaiter {
-  static_assert(std::is_constructible_v<decltype(std::declval<Awaitable>().await_resume()), unexpected>,
-                "cancellable_awaiter requires Awaitable whose await_resume() return type is constructible from unexpected");
-
-  Awaitable op_;
-  canceler_t& canceler_;
-  cancel_node node_;
-  bool submitted_{false};
-
-  cancellable_awaiter(Awaitable op, canceler_t& canceler)
-    : op_(std::move(op)), canceler_(canceler) {}
-
-  bool await_ready() {
-    if (canceler_.is_cancelled()) return true;
-    return op_.await_ready();
-  }
-
-  bool await_suspend(std::coroutine_handle<> h) {
-    if (canceler_.is_cancelled()) return false;
-    node_.task = &op_;
-    canceler_.link_node(&node_);
-    op_.await_suspend(h);
-    submitted_ = true;
-    return true;
-  }
-
-  auto await_resume() -> decltype(op_.await_resume()) {
-    if (submitted_) {
-      canceler_.unlink_node(&node_);
-    }
-    if (!submitted_) {
-      return unexpected(ECANCELED);
-    }
-    return op_.await_resume();
-  }
-};
-
-/**
- * @brief wrap any utask_t-derived awaiter with cancellation support
- * @param op the io operation awaiter
- * @param canceler the canceler to associate with
- * @return cancellable awaiter
- */
-template<typename Awaitable>
-cancellable_awaiter<Awaitable> with_cancel(Awaitable op, canceler_t& canceler) {
-  return {std::move(op), canceler};
-}
-
 /**
  * @brief sleep awaiter. Suspends the coroutine for the given duration using io_uring timeout.
  * Usage: co_await sleep(std::chrono::seconds(1));
@@ -338,6 +102,79 @@ struct timeout_awaiter {
 template<typename Awaitable, typename Rep, typename Period>
 timeout_awaiter<Awaitable, Rep, Period> with_timeout(Awaitable op, std::chrono::duration<Rep, Period> duration) {
   return {std::move(op), duration};
+}
+
+/**
+ * @brief coroutine-level with_cancel. Injects a canceler into coro_t's promise
+ * so all internal utask_t operations are automatically cancellable.
+ */
+template<typename V>
+struct coro_cancellable_awaiter {
+  coro_t<V> coro_;
+  canceler_t& canceler_;
+
+  coro_cancellable_awaiter(coro_t<V> coro, canceler_t& canceler)
+    : coro_(std::move(coro)), canceler_(canceler) {}
+
+  bool await_ready() { return coro_.done(); }
+
+  std::coroutine_handle<> await_suspend(std::coroutine_handle<> parent) {
+    auto h = coro_.native_handle();
+    h.promise().canceler_ = &canceler_;
+    h.promise().continuation = parent;
+    return h;
+  }
+
+  V await_resume() { return coro_.value(); }
+};
+
+template<typename V>
+coro_cancellable_awaiter<V> with_cancel(coro_t<V> coro, canceler_t& canceler) {
+  return {std::move(coro), canceler};
+}
+
+/**
+ * @brief coroutine-level with_timeout. Injects a canceler into the coro's promise
+ * and races it against a timer. If timeout fires first, cancels the coro's IO.
+ * Returns coro_t<V> transparently — when V is expected<T>, timeout returns unexpected(ETIMEDOUT).
+ */
+
+namespace detail {
+  template<typename T> struct is_expected : std::false_type {};
+  template<typename T> struct is_expected<expected<T>> : std::true_type {};
+  template<> struct is_expected<expected<void>> : std::true_type {};
+}
+
+template<typename V, typename Rep, typename Period>
+coro_t<V> with_timeout(coro_t<V> coro, std::chrono::duration<Rep, Period> duration) {
+  auto canceler = std::make_shared<canceler_t>();
+  coro.native_handle().promise().canceler_ = canceler.get();
+
+  auto timer = [](std::shared_ptr<canceler_t> c, std::chrono::duration<Rep, Period> d) -> coro_t<void> {
+    sleep_awaiter sa{d};
+    auto ret = co_await with_cancel(std::move(sa), *c);
+    if (ret.has_value()) {
+      c->cancel();
+    }
+  }(canceler, duration);
+
+  auto& ctx = context_t::current();
+  ctx.spawn(std::move(timer));
+
+  if constexpr (std::is_void_v<V>) {
+    co_await coro;
+    canceler->cancel();
+  } else {
+    auto result = co_await coro;
+    canceler->cancel();
+    // if V is expected<T> and the result contains ECANCELED from timeout, convert to ETIMEDOUT
+    if constexpr (detail::is_expected<V>::value) {
+      if (!result && result.error().code == ECANCELED && canceler->is_cancelled()) {
+        co_return unexpected(ETIMEDOUT);
+      }
+    }
+    co_return std::move(result);
+  }
 }
 
 namespace detail {

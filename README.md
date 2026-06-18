@@ -13,6 +13,7 @@ Cornet 是一个基于 C++20 协程和 Linux io_uring 的高性能异步网络�
 - **异步 DNS 解析** — 域名解析自动卸载到线程池，IP 地址走快速路径
 - **并发组合器** — `when_all`、`when_any`、`sleep`、`with_timeout`、`with_cancel`
 - **任务级取消** — `canceler_t` 支持单任务取消和层级取消传播
+- **协程级取消与超时** — `with_cancel(coro_t)`、`with_timeout(coro_t)` 自动传播到内部所有 IO
 - **线程池 Executor** — `ctx.async()` 将阻塞操作卸载到工作线程
 - **信号处理** — 基于 signalfd + io_uring 的异步信号分发
 - **优雅关闭** — drain → timeout → cancel 三阶段关闭流程
@@ -101,6 +102,24 @@ coro_t<expected<void>> connect_with_timeout() {
 }
 ```
 
+### 协程级超时与取消
+
+```cpp
+// 整个协程设定超时，内部所有 IO 自动获得取消能力
+coro_t<expected<Data>> fetch_data() {
+    tcp::v4::socket_t sock;
+    auto conn = co_await sock.connect("server", 80);   // 自动可取消
+    if (!conn) co_return unexpected(conn.error());
+    auto n = co_await sock.recv(buf, 4096);            // 自动可取消
+    co_return parse(buf, *n);
+}
+
+auto result = co_await with_timeout(fetch_data(), 5s);
+if (!result && result.error().code == ETIMEDOUT) {
+    // 协程整体超时，内部 IO 已自动取消
+}
+```
+
 ### 并发等待
 
 ```cpp
@@ -156,10 +175,11 @@ cornet/
 ├── include/
 │   ├── core/
 │   │   ├── context.h      # 事件循环核心
-│   │   ├── coro.h         # 协程包装器
+│   │   ├── coro.h         # 协程包装器 (await_transform 自动取消传播)
+│   │   ├── cancel.h       # 取消器与 cancellable_awaiter
 │   │   ├── utask.h        # io_uring 任务基类
 │   │   ├── socket.h       # TCP/UDP Socket 抽象
-│   │   ├── combinators.h  # when_all/when_any/sleep/timeout
+│   │   ├── combinators.h  # when_all/when_any/sleep/timeout/协程级cancel
 │   │   ├── awaiters.h     # 通用 awaiter (close/read/write/nop)
 │   │   ├── scheduler.h    # 调度器接口与实现
 │   │   ├── executor.h     # 线程池

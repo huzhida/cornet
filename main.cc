@@ -60,8 +60,8 @@ coro_t<int> client(context_t& ctx) {
 coro_t<expected<void>> connect_baidu()
 {
   tcp::v4::socket_t s;
-  auto ok = co_await s.connect("www.baidu.com", 80, std::chrono::milliseconds(500));
-
+  // auto ok = co_await s.connect("www.baidu.com", 80, std::chrono::milliseconds(500));
+  auto ok = co_await with_timeout(s.connect("www.baidu.com", 10), std::chrono::milliseconds(500));
   if (!ok)
   {
     SPDLOG_ERROR("failed to connect: {}", ok.error().message());

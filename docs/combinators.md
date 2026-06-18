@@ -292,6 +292,63 @@ co_await with_cancel(sleep(5s), canceler);
 co_await with_cancel(close_awaiter(fd), canceler);
 ```
 
+### 协程级 with_cancel
+
+`with_cancel(coro_t<V>, canceler)` 将 canceler 注入到协程的 promise 中，使其内部所有 `co_await utask_t` 操作自动获得取消能力（通过 `await_transform`）：
+
+```cpp
+coro_t<expected<int>> long_io_task() {
+    tcp::v4::socket_t sock;
+    auto conn = co_await sock.connect("server", 80);  // 自动可取消
+    auto n = co_await sock.recv(buf, 4096);            // 自动可取消
+    co_return n;
+}
+
+canceler_t canceler;
+auto result = co_await with_cancel(long_io_task(), canceler);
+// canceler.cancel() 会取消 long_io_task 内部正在执行的任意 IO
+```
+
+无需在每个 `co_await` 处手动添加 `with_cancel`，canceler 通过 `await_transform` 自动传播。
+
+### 协程级 with_timeout
+
+`with_timeout(coro_t<V>, duration)` 为整个协程设置超时，内部 IO 在超时后自动取消：
+
+```cpp
+// 返回 expected<T> 的协程：超时时返回 unexpected(ETIMEDOUT)
+coro_t<expected<int>> fetch_data() {
+    auto conn = co_await sock.connect("server", 80);
+    auto n = co_await sock.recv(buf, 4096);
+    co_return n;
+}
+
+auto result = co_await with_timeout(fetch_data(), 5s);
+if (!result) {
+    if (result.error().code == ETIMEDOUT) {
+        // 协程整体超时
+    }
+}
+```
+
+#### 工作原理
+
+1. 创建一个 `shared_ptr<canceler_t>` 并注入到协程 promise
+2. 启动一个定时器协程，到期后调用 `canceler->cancel()`
+3. 协程完成后立即取消定时器（避免泄漏）
+4. 当 V 是 `expected<T>` 类型时，自动将 ECANCELED 转换为 ETIMEDOUT
+
+#### 返回类型
+
+| 协程返回类型 | with_timeout 返回类型 | 超时行为 |
+|---|---|---|
+| `coro_t<expected<T>>` | `coro_t<expected<T>>` | 返回 `unexpected(ETIMEDOUT)` |
+| `coro_t<expected<void>>` | `coro_t<expected<void>>` | 返回 `unexpected(ETIMEDOUT)` |
+| `coro_t<void>` | `coro_t<void>` | 协程被取消，IO 返回 ECANCELED |
+| `coro_t<int>` | `coro_t<int>` | 协程被取消，IO 抛异常 |
+
+推荐协程返回 `expected<T>` 以获得最佳超时体验（ETIMEDOUT 自动展平）。
+
 ### 实现细节
 
 - 双向链表管理子 canceler，析构 unlink O(1)
