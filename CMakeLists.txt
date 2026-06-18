@@ -20,6 +20,7 @@ pkg_check_modules(LIBURING REQUIRED IMPORTED_TARGET liburing)
 add_library(cornet STATIC
     src/logging.cc
     src/task.cc
+    src/cancel.cc
     src/executor.cc
     src/scheduler.cc
     src/context.cc

@@ -7,7 +7,9 @@
 #include <exception>
 #include <iterator>
 #include <type_traits>
+#include <concepts>
 #include "task.h"
+#include "cancel.h"
 #include "utils/utils.h"
 
 namespace cornet {
@@ -69,6 +71,28 @@ struct coro_t : task_t {
     bool detached{false};
     // parent coroutine to resume when this one completes
     std::coroutine_handle<> continuation;
+    // associated canceler for automatic cancellation propagation
+    canceler_t* canceler_{nullptr};
+
+    /**
+     * @brief await_transform for utask_t-derived awaitables.
+     * Wraps with cancellable_awaiter for automatic cancellation propagation.
+     */
+    template<typename T>
+    requires std::derived_from<std::decay_t<T>, utask_t>
+    cancellable_awaiter<std::decay_t<T>> await_transform(T&& op) {
+      return {std::forward<T>(op), canceler_};
+    }
+
+    /**
+     * @brief passthrough for all other awaitables.
+     * Handles coro_t (via operator co_await), suspend_always, etc.
+     */
+    template<typename T>
+    requires (!std::derived_from<std::decay_t<T>, utask_t>)
+    T&& await_transform(T&& op) {
+      return std::forward<T>(op);
+    }
 
     /**
      * @return coroutine implementation coro_t
