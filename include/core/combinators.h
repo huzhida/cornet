@@ -4,6 +4,7 @@
 #include "context.h"
 #include <tuple>
 #include <memory>
+#include <optional>
 
 namespace cornet {
 
@@ -55,41 +56,40 @@ sleep_awaiter sleep(std::chrono::duration<Rep, Period> duration) {
  */
 template<typename Awaitable, typename Rep, typename Period>
 struct timeout_awaiter {
+  using R = decltype(std::declval<Awaitable&>().await_resume());
   Awaitable op_;
   context_t* ctx_;
   __kernel_timespec ts_;
-  uint64_t timeout_slot_{0};
+  bool timeout_armed_{false};
 
   timeout_awaiter(Awaitable op, std::chrono::duration<Rep, Period> duration)
-    : op_(std::move(op)), ctx_(&context_t::current()), ts_(to_kernel_timespec(duration)) {}
+    : op_(std::move(op)), ctx_(&context_t::current()), ts_(to_kernel_timespec(duration)) {
+    static_assert(std::is_constructible_v<R, unexpected>,
+                  "with_timeout requires await_resume() to return an expected-like type constructible from unexpected");
+  }
 
   bool await_ready() { return op_.await_ready(); }
 
   void await_suspend(std::coroutine_handle<> h) {
+    timeout_armed_ = true;
     op_.handle = h;
     auto& uring = ctx_->io_uring();
-    auto& slots = ctx_->io_slots();
 
     io_uring_sqe* sqes[2];
     uring.get_sqes(sqes, 2);
 
-    op_.slot_data = slots.alloc(&op_);
-    op_.prepare_fn(&op_, sqes[0]);
-    io_uring_sqe_set_data(sqes[0], reinterpret_cast<void*>(op_.slot_data));
+    op_.prepare_into(sqes[0]);
     io_uring_sqe_set_flags(sqes[0], sqes[0]->flags | IOSQE_IO_LINK);
 
     io_uring_prep_link_timeout(sqes[1], &ts_, 0);
     io_uring_sqe_set_data(sqes[1], nullptr);
   }
 
-  expected<int> await_resume() {
-    if (op_.value == -ECANCELED) {
+  R await_resume() {
+    if (timeout_armed_ && op_.io_result() == -ECANCELED) {
       return unexpected(ETIMEDOUT);
     }
-    if (op_.value < 0) {
-      return unexpected(-op_.value);
-    }
-    return op_.value;
+    return op_.await_resume();
   }
 };
 
@@ -97,7 +97,7 @@ struct timeout_awaiter {
  * @brief create a timeout-wrapped awaitable
  * @param op the io operation awaiter (recv_awaiter, send_awaiter, etc.)
  * @param duration timeout duration
- * @return awaitable that returns ETIMEDOUT on timeout
+ * @return awaitable preserving op.await_resume()'s return type; returns ETIMEDOUT on timeout
  */
 template<typename Awaitable, typename Rep, typename Period>
 requires std::derived_from<Awaitable, utask_t>
@@ -144,38 +144,107 @@ namespace detail {
   template<typename T> struct is_expected : std::false_type {};
   template<typename T> struct is_expected<expected<T>> : std::true_type {};
   template<> struct is_expected<expected<void>> : std::true_type {};
-}
 
-template<typename V, typename Rep, typename Period>
-cancelable_coro_t<V> with_timeout(cancelable_coro_t<V> coro, std::chrono::duration<Rep, Period> duration) {
-  auto canceler = std::make_shared<canceler_t>();
-  coro.native_handle().promise().canceler_ = canceler.get();
+  template<typename V>
+  struct timeout_state {
+    canceler_t canceler;
+    bool done{false};
+    bool timed_out{false};
+    std::coroutine_handle<> continuation{nullptr};
+    std::optional<V> result;
+    std::exception_ptr exception;
+  };
 
-  auto timer = [](std::shared_ptr<canceler_t> c, std::chrono::duration<Rep, Period> d) -> coro_t<void> {
-    sleep_awaiter sa{d};
-    auto ret = co_await with_cancel(std::move(sa), *c);
-    if (ret.has_value()) {
-      c->cancel();
-    }
-  }(canceler, duration);
+  template<>
+  struct timeout_state<void> {
+    canceler_t canceler;
+    bool done{false};
+    bool timed_out{false};
+    std::coroutine_handle<> continuation{nullptr};
+    std::exception_ptr exception;
+  };
 
-  auto& ctx = context_t::current();
-  ctx.spawn(std::move(timer));
-
-  if constexpr (std::is_void_v<V>) {
-    co_await coro;
-    canceler->cancel();
-  } else {
-    auto result = co_await coro;
-    canceler->cancel();
-    // if V is expected<T> and the result contains ECANCELED from timeout, convert to ETIMEDOUT
-    if constexpr (detail::is_expected<V>::value) {
-      if (!result && result.error().code == ECANCELED && canceler->is_cancelled()) {
-        co_return unexpected(ETIMEDOUT);
+  template<typename V>
+  coro_t<void> timeout_target_task(std::shared_ptr<timeout_state<V>> state, cancelable_coro_t<V> coro, context_t& ctx) {
+    try {
+      coro.native_handle().promise().canceler_ = &state->canceler;
+      if constexpr (std::is_void_v<V>) {
+        co_await coro;
+        if (!state->done) {
+          state->done = true;
+          state->canceler.cancel();
+          if (state->continuation) ctx.spawn(state->continuation);
+        }
+      } else {
+        auto result = co_await coro;
+        if (!state->done) {
+          state->done = true;
+          state->result.emplace(std::move(result));
+          state->canceler.cancel();
+          if (state->continuation) ctx.spawn(state->continuation);
+        }
+      }
+    } catch (...) {
+      if (!state->done) {
+        state->done = true;
+        state->exception = std::current_exception();
+        state->canceler.cancel();
+        if (state->continuation) ctx.spawn(state->continuation);
       }
     }
-    co_return std::move(result);
   }
+
+  template<typename V, typename Rep, typename Period>
+  coro_t<void> timeout_timer_task(std::shared_ptr<timeout_state<V>> state,
+                                  std::chrono::duration<Rep, Period> duration,
+                                  context_t& ctx) {
+    auto ret = co_await with_cancel(sleep(duration), state->canceler);
+    if (ret && !state->done) {
+      state->done = true;
+      state->timed_out = true;
+      state->canceler.cancel();
+      if (state->continuation) ctx.spawn(state->continuation);
+    }
+  }
+}
+
+template<typename V>
+struct coro_timeout_awaiter {
+  std::shared_ptr<detail::timeout_state<V>> state_;
+
+  bool await_ready() const { return state_->done; }
+
+  void await_suspend(std::coroutine_handle<> h) {
+    state_->continuation = h;
+    if (state_->done) {
+      context_t::current().spawn(h);
+    }
+  }
+
+  V await_resume() {
+    if constexpr (std::is_void_v<V>) {
+      if (state_->exception) std::rethrow_exception(state_->exception);
+      return;
+    } else {
+      if (state_->exception) std::rethrow_exception(state_->exception);
+      if (state_->timed_out) {
+        return unexpected(ETIMEDOUT);
+      }
+      return std::move(*state_->result);
+    }
+  }
+};
+
+template<typename V, typename Rep, typename Period>
+coro_timeout_awaiter<V> with_timeout(cancelable_coro_t<V> coro, std::chrono::duration<Rep, Period> duration) {
+  static_assert(std::is_void_v<V> || detail::is_expected<V>::value,
+                "coroutine-level with_timeout requires ccoro_t<expected<T>> or ccoro_t<void>");
+
+  auto& ctx = context_t::current();
+  auto state = std::make_shared<detail::timeout_state<V>>();
+  ctx.spawn(detail::timeout_target_task(state, std::move(coro), ctx));
+  ctx.spawn(detail::timeout_timer_task(state, duration, ctx));
+  return {std::move(state)};
 }
 
 namespace detail {

@@ -217,7 +217,8 @@ TEST_F(combinators, canceler_reset) {
     canceler.cancel();
     EXPECT_TRUE(canceler.is_cancelled());
 
-    canceler.reset();
+    auto reset = canceler.reset();
+    EXPECT_TRUE(reset.has_value());
     EXPECT_FALSE(canceler.is_cancelled());
 
     // after reset, operations should work normally

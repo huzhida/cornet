@@ -128,7 +128,11 @@ struct context_t {
     void await_suspend(std::coroutine_handle<> h) {
       task_.handle = h;
       ctx_.ensure_executor();
-      ctx_.executor->add(&task_);
+      if (!ctx_.async_executor()->add(&task_)) {
+        task_.exception = std::make_exception_ptr(
+            std::system_error(ENOBUFS, std::system_category(), "executor queue full"));
+        ctx_.spawn(h);
+      }
     }
     R await_resume() {
       if (task_.exception) std::rethrow_exception(task_.exception);
@@ -372,9 +376,6 @@ private:
     }
   }
 
-  template<typename F, typename R>
-  friend struct async_awaiter;
-
   void switch_to(state_t s) {
     state.store(s, std::memory_order_release);
     SPDLOG_DEBUG("context switch to state:{}", to_string(s));
@@ -393,7 +394,7 @@ private:
   // eventfd for cross-thread wakeup
   int wakeup_fd{-1};
   // context current state
-  std::atomic<state_t> state;
+  std::atomic<state_t> state{state_t::Terminated};
   // context current scheduler type
   scheduler_type_t scheduler_type{scheduler_type_t::RoundRobin};
   // context owner thread id

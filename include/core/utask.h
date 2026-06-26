@@ -65,6 +65,27 @@ struct utask_t : task_t {
    */
   static int process_utask(context_t& ctx, cqe_t cqe);
 
+  /**
+   * @brief allocate a slot and fill the given SQE via prepare_fn, then set its user_data.
+   * Used both by await_suspend (single SQE) and by linked-submission awaiters
+   * (e.g. with_timeout) that need to fill an externally-provided SQE.
+   * @param sqe the SQE to fill.
+   */
+  void prepare_into(io_uring_sqe* sqe);
+
+  /**
+   * @brief the io_uring user_data token for this task (encoded slot index + generation).
+   * Used by cancellation to target the inflight operation. 0 means not submitted.
+   */
+  CORNET_NODISCARD inline uint64_t io_token() const { return slot_data_; }
+
+  /**
+   * @brief the raw result of the async syscall (negative errno on failure).
+   * Used by wrapping awaiters (e.g. with_timeout) to inspect the underlying
+   * outcome before reinterpreting it.
+   */
+  CORNET_NODISCARD inline int io_result() const { return value; }
+
 protected:
   // function pointer that fills the io_uring_sqe with operation-specific data
   prepare_fn_t prepare_fn{nullptr};
@@ -77,15 +98,7 @@ protected:
 
 private:
   // encoded slot data (index + generation) for safe lifetime tracking
-  uint64_t slot_data{0};
-
-  template<typename Awaitable, typename Rep, typename Period>
-  friend struct timeout_awaiter;
-
-  friend struct canceler_t;
-
-  template<typename Awaitable>
-  friend struct cancellable_awaiter;
+  uint64_t slot_data_{0};
 };
 
 } // namespace cornet

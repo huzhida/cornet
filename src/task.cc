@@ -6,8 +6,8 @@
 namespace cornet {
 
 utask_t::~utask_t() {
-  if (slot_data != 0 && ctx) {
-    ctx->io_slots().free(slot_data);
+  if (slot_data_ != 0 && ctx) {
+    ctx->io_slots().free(slot_data_);
     ctx->metrics().slot_frees++;
   }
 }
@@ -18,20 +18,22 @@ utask_t::utask_t(utask_t&& other) noexcept {
   this->value = other.value;
   this->handle = other.handle;
   this->ctx = other.ctx;
-  this->slot_data = other.slot_data;
+  this->slot_data_ = other.slot_data_;
   other.ctx = nullptr;
-  other.slot_data = 0;
+  other.slot_data_ = 0;
+}
+
+void utask_t::prepare_into(io_uring_sqe* sqe) {
+  slot_data_ = ctx->io_slots().alloc(this);
+  ctx->metrics().slot_allocs++;
+  prepare_fn(this, sqe);
+  io_uring_sqe_set_data(sqe, reinterpret_cast<void*>(slot_data_));
 }
 
 void utask_t::await_suspend(std::coroutine_handle<> h) {
   this->handle = h;
-  auto& uring = ctx->io_uring();
-  auto& slots = ctx->io_slots();
-  slot_data = slots.alloc(this);
-  ctx->metrics().slot_allocs++;
-  auto sqe = uring.get_sqe();
-  prepare_fn(this, sqe);
-  io_uring_sqe_set_data(sqe, reinterpret_cast<void*>(slot_data));
+  auto sqe = ctx->io_uring().get_sqe();
+  prepare_into(sqe);
 }
 
 int utask_t::process_utask(context_t& ctx, cqe_t cqe) {
@@ -47,9 +49,9 @@ int utask_t::process_utask(context_t& ctx, cqe_t cqe) {
 }
 
 void utask_t::complete(context_t& ctx, cqe_t cqe) {
-  ctx.io_slots().free(slot_data);
+  ctx.io_slots().free(slot_data_);
   ctx.metrics().slot_frees++;
-  slot_data = 0;
+  slot_data_ = 0;
 
   value = cqe->res;
   completed = true;
