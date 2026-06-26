@@ -16,6 +16,14 @@ namespace cornet {
 struct close_awaiter : utask_t {
   explicit close_awaiter(int fd);
 
+  bool await_ready() {
+    if (fd_ == -1) {
+      value = 0;
+      return true;
+    }
+    return completed;
+  }
+
   CORNET_NODISCARD CORNET_MAYBE_UNUSED expected<void> await_resume() const {
     if (value < 0) return unexpected(-value);
     return {};

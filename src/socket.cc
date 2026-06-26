@@ -200,7 +200,7 @@ socket_t::recvmsg_awaiter::recvmsg_awaiter(int fd, struct msghdr *msg, int flags
 }
 
 socket_t::sendto_awaiter::sendto_awaiter(int fd, void* buf, size_t nbytes, sockaddr* addr, socklen_t socklen, int flag)
-  : fd_(fd) {
+  : fd_(fd), flag_(flag) {
   this->ctx = &context_t::current();
   iov_ = {buf, nbytes};
   msg_ = {};
@@ -211,12 +211,12 @@ socket_t::sendto_awaiter::sendto_awaiter(int fd, void* buf, size_t nbytes, socka
   this->prepare_fn = [](utask_t* self, io_uring_sqe* sqe) {
     auto* t = static_cast<sendto_awaiter*>(self);
     t->msg_.msg_iov = &t->iov_;
-    io_uring_prep_sendmsg(sqe, t->fd_, &t->msg_, 0);
+    io_uring_prep_sendmsg(sqe, t->fd_, &t->msg_, t->flag_);
   };
 }
 
 socket_t::recvfrom_awaiter::recvfrom_awaiter(int fd, void* buf, size_t nbytes, sockaddr* addr, socklen_t* socklen, int flag)
-  : fd_(fd), user_socklen_(socklen) {
+  : fd_(fd), user_socklen_(socklen), flag_(flag) {
   this->ctx = &context_t::current();
   iov_ = {buf, nbytes};
   msg_ = {};
@@ -227,12 +227,14 @@ socket_t::recvfrom_awaiter::recvfrom_awaiter(int fd, void* buf, size_t nbytes, s
   this->prepare_fn = [](utask_t* self, io_uring_sqe* sqe) {
     auto* t = static_cast<recvfrom_awaiter*>(self);
     t->msg_.msg_iov = &t->iov_;
-    io_uring_prep_recvmsg(sqe, t->fd_, &t->msg_, 0);
+    io_uring_prep_recvmsg(sqe, t->fd_, &t->msg_, t->flag_);
   };
 }
 
-cornet::close_awaiter socket_t::close() const {
-  return close_awaiter{fd};
+cornet::close_awaiter socket_t::close() {
+  auto awaiter = close_awaiter{fd};
+  fd = -1;
+  return awaiter;
 }
 cornet::shutdown_awaiter socket_t::shutdown(int how) const {
   return shutdown_awaiter{fd, how};
@@ -272,27 +274,6 @@ coro_t<expected<void>> socket_t::connect(std::string_view host, uint16_t port, c
     co_return unexpected(ECANCELED);
   }
   co_return co_await with_cancel(connect(*resolved), canceler);
-}
-
-coro_t<expected<void>> socket_t::connect(std::string_view host, uint16_t port, std::chrono::nanoseconds timeout) const {
-  // fast path: numeric IP address, no DNS needed
-  resolved_address fast{};
-  auto socklen = to_address(host, port, fast.addr, domain, type, AI_NUMERICHOST);
-  if (socklen) {
-    fast.socklen = socklen.value();
-    auto ret = co_await with_timeout(connect(fast), timeout);
-    if (!ret) co_return unexpected(ret.error());
-    co_return {};
-  }
-
-  // slow path: hostname, async DNS resolve via thread pool
-  auto resolved = co_await resolve(host, port, domain, type);
-  if (!resolved) {
-    co_return unexpected(resolved.error());
-  }
-  auto ret = co_await with_timeout(connect(*resolved), timeout);
-  if (!ret) co_return unexpected(ret.error());
-  co_return {};
 }
 socket_t::connect_awaiter socket_t::connect(const resolved_address& resolved) const {
   return connect_awaiter{fd, resolved};

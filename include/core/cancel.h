@@ -3,6 +3,7 @@
 
 #include <coroutine>
 #include "utask.h"
+#include "utils/expected.h"
 #include "utils/utils.h"
 
 namespace cornet {
@@ -84,9 +85,12 @@ struct canceler_t {
 
   CORNET_NODISCARD bool is_cancelled() const { return cancelled_; }
 
-  void reset() {
+  expected<void> reset() {
+    if (active_head_) {
+      return unexpected(EBUSY);
+    }
     cancelled_ = false;
-    active_head_ = nullptr;
+    return {};
   }
 
   void link_node(cancel_node* node) {

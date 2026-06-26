@@ -122,6 +122,7 @@ class socket_t {
     sendto_awaiter(int fd, void* buf, size_t nbytes, sockaddr* addr, socklen_t socklen, int flag);
    private:
     int fd_;
+    int flag_;
     struct iovec iov_;
     struct msghdr msg_;
   };
@@ -139,6 +140,7 @@ class socket_t {
     }
    private:
     int fd_;
+    int flag_;
     struct iovec iov_;
     struct msghdr msg_;
     socklen_t* user_socklen_;
@@ -171,7 +173,7 @@ class socket_t {
   /**
    * @brief async close socket
    */
-  close_awaiter close() const;
+  close_awaiter close();
   /**
    * @brief async shutdown socket (half-close).
    * @param how SHUT_RD, SHUT_WR, or SHUT_RDWR
@@ -187,8 +189,11 @@ class socket_t {
   /**
    * @brief async connect with timeout.
    */
-  coro_t<expected<void>> connect(std::string_view host, uint16_t port,
-                                 std::chrono::nanoseconds timeout) const;
+  template<typename _Rep, typename _Period>
+  inline auto connect(std::string_view host, uint16_t port,
+                                 std::chrono::duration<_Rep, _Period> timeout) const {
+    return with_timeout(connect(host, port), timeout);
+  }
   /**
    * @brief async connect with cancellation support.
    */
