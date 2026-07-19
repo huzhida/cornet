@@ -7,7 +7,8 @@ namespace cornet {
 uring_t::uring_t(uint32_t entries_nr, uint32_t flags)
   : uring(std::make_unique<io_uring>()) {
   if (io_uring_queue_init(entries_nr, uring.get(), flags) < 0) {
-    CORNET_FATAL("failed to init io_uring queue with error: {}", strerror(errno));
+    SPDLOG_ERROR("failed to init io_uring queue with error: {}", strerror(errno));
+    throw std::runtime_error("failed to init io_uring queue");
   }
 }
 
@@ -66,7 +67,8 @@ io_uring_sqe* uring_t::get_sqe() {
     if (ret > 0) task_nr += ret;
     sqe = io_uring_get_sqe(uring.get());
     if (!sqe) {
-      CORNET_FATAL("failed to get sqe even after submit");
+      SPDLOG_ERROR("failed to get sqe even after submit");
+      throw std::runtime_error("failed to get sqe even after submit");
     }
   }
   return sqe;
@@ -85,7 +87,8 @@ void uring_t::get_sqes(io_uring_sqe** out, size_t n) {
       for (size_t j = 0; j < n; ++j) {
         out[j] = io_uring_get_sqe(uring.get());
         if (!out[j]) {
-          CORNET_FATAL("failed to get {} sqes even after submit", n);
+          SPDLOG_ERROR("failed to get {} sqes even after submit", n);
+          throw std::runtime_error("failed to get sqes even after submit");
         }
       }
       return;

@@ -14,6 +14,8 @@
 #include "executor.h"
 #include "io_slot.h"
 #include "utils/metrics.h"
+#include "utils/config.h"
+#include "utils/logging.h"
 #include <functional>
 #include <concurrentqueue/moodycamel/concurrentqueue.h>
 #ifdef BLOCK_SIZE

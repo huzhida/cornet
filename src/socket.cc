@@ -70,7 +70,8 @@ coro_t<expected<resolved_address>> resolve(std::string_view host, uint16_t port,
 
 socket_t::socket_t(int fd) : fd(fd) {
   if (fd < 0) {
-    CORNET_FATAL("socket bad file descriptor");
+    SPDLOG_ERROR("socket bad file descriptor");
+    throw std::runtime_error("socket bad file descriptor");
   }
 }
 socket_t::~socket_t() {

@@ -3,7 +3,7 @@
 
 #include <liburing.h>
 #include <queue>
-#include "utils/utils.h"
+#include "utils/defines.h"
 #include "utils/metrics.h"
 
 namespace cornet {
