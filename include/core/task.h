@@ -2,7 +2,7 @@
 #define CORNET_TASK_H
 
 #include <coroutine>
-#include "utils/utils.h"
+#include "utils/defines.h"
 
 namespace cornet {
 

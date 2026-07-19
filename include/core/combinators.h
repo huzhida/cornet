@@ -1,6 +1,8 @@
 #ifndef CORNET_COMBINATORS_H
 #define CORNET_COMBINATORS_H
 
+#include "coro.h"
+#include "cancel.h"
 #include "context.h"
 #include <tuple>
 #include <memory>

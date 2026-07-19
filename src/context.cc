@@ -20,7 +20,8 @@ context_t::context_t()
 
   wakeup_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
   if (wakeup_fd < 0) {
-    CORNET_FATAL("failed to create eventfd: {}", strerror(errno));
+    SPDLOG_ERROR("failed to create eventfd: {}", strerror(errno));
+    throw std::runtime_error("failed to create eventfd");
   }
 
   std::lock_guard<std::mutex> guard(contexts_mutex);

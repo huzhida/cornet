@@ -1,7 +1,9 @@
 #ifndef CORNET_SOCKET_H
 #define CORNET_SOCKET_H
 
-#include "context.h"
+#include "coro.h"
+#include "cancel.h"
+#include "combinators.h"
 #include <chrono>
 #include <netinet/in.h>
 #include <arpa/inet.h>
