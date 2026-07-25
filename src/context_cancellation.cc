@@ -1,8 +1,8 @@
-#include "io_uring/context_cancellation.h"
-#include "scheduling/context.h"
-#include "io_uring/utask.h"
-#include "io_uring/io_slot.h"
-#include "base/expected.h"
+#include "cornet/io_uring/context_cancellation.h"
+#include "cornet/scheduling/context.h"
+#include "cornet/io_uring/utask.h"
+#include "cornet/io_uring/io_slot.h"
+#include "cornet/base/expected.h"
 
 #ifndef IORING_ASYNC_CANCEL_ANY
 #define IORING_ASYNC_CANCEL_ANY (1U << 2)

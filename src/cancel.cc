@@ -1,6 +1,6 @@
-#include "coroutine/cancel.h"
-#include "io_uring/cancel_io.h"
-#include "scheduling/context.h"
+#include "cornet/coroutine/cancel.h"
+#include "cornet/io_uring/cancel_io.h"
+#include "cornet/scheduling/context.h"
 
 namespace cornet {
 

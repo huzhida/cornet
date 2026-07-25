@@ -1,7 +1,7 @@
 #ifndef CORNET_LOGGING_H
 #define CORNET_LOGGING_H
 
-#include "utils/config.h"
+#include "cornet/utils/config.h"
 #include <spdlog/spdlog.h>
 
 namespace cornet::logging {

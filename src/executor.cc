@@ -1,5 +1,5 @@
-#include "scheduling/executor.h"
-#include "coroutine/atask.h"
+#include "cornet/scheduling/executor.h"
+#include "cornet/coroutine/atask.h"
 
 namespace cornet {
 executor_t::executor_t(int thread_nr, size_t max_task_nr)

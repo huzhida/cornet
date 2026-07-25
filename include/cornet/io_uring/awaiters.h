@@ -1,8 +1,8 @@
 #ifndef CORNET_AWAITERS_H
 #define CORNET_AWAITERS_H
 
-#include "io_uring/utask.h"
-#include "coroutine/coro.h"
+#include "cornet/io_uring/utask.h"
+#include "cornet/coroutine/coro.h"
 #include <sys/types.h>
 #include <sys/stat.h>
 
