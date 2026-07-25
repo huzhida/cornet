@@ -34,7 +34,7 @@ add_library(cornet::cornet ALIAS cornet)
 target_include_directories(
     cornet PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<INSTALL_INTERFACE:include>
+    $<INSTALL_INTERFACE:cornet>
 )
 target_link_libraries(
     cornet PUBLIC
@@ -58,42 +58,47 @@ add_executable(hello-cornet main.cc)
 target_link_libraries(hello-cornet PRIVATE cornet)
 
 # ─── Benchmark ───
-find_package(asio CONFIG REQUIRED)
-find_package(libuv CONFIG REQUIRED)
+option(CORNET_ENABLE_BENCH "Build the benchmark target (requires asio and libuv)" OFF)
+if(CORNET_ENABLE_BENCH)
+    find_package(asio CONFIG REQUIRED)
+    find_package(libuv CONFIG REQUIRED)
 
-add_executable(bench EXCLUDE_FROM_ALL bench/benchmark.cc)
-target_include_directories(bench PRIVATE bench)
-target_link_libraries(
-    bench PRIVATE
-    cornet
-    asio::asio
-    concurrentqueue::concurrentqueue
-    $<IF:$<TARGET_EXISTS:libuv::uv_a>,libuv::uv_a,libuv::uv>
-)
+    add_executable(bench EXCLUDE_FROM_ALL bench/benchmark.cc)
+    target_include_directories(bench PRIVATE bench)
+    target_link_libraries(
+        bench PRIVATE
+        cornet
+        asio::asio
+        concurrentqueue::concurrentqueue
+        $<IF:$<TARGET_EXISTS:libuv::uv_a>,libuv::uv_a,libuv::uv>
+    )
+endif()
 
 # ─── 测试 ───
-enable_testing()
-find_package(GTest CONFIG REQUIRED)
-include(GoogleTest)
+option(CORNET_ENABLE_TESTS "Build the unit test target (requires GTest and asio)" OFF)
+if(CORNET_ENABLE_TESTS)
+    enable_testing()
+    find_package(GTest CONFIG REQUIRED)
+    include(GoogleTest)
 
-add_executable(unit_test EXCLUDE_FROM_ALL
-    tests/socket.cc
-    tests/expected.cc
-    tests/io_slot.cc
-    tests/generic_io.cc
-    tests/async.cc
-    tests/combinators.cc
-    tests/runtime.cc
-    tests/fs_io.cc
-)
-target_link_libraries(unit_test PRIVATE
-    cornet
-    asio::asio
-    concurrentqueue::concurrentqueue
-    GTest::gtest_main
-    GTest::gmock
-)
-gtest_discover_tests(unit_test)
+    add_executable(unit EXCLUDE_FROM_ALL
+        tests/socket.cc
+        tests/expected.cc
+        tests/io_slot.cc
+        tests/generic_io.cc
+        tests/async.cc
+        tests/combinators.cc
+        tests/runtime.cc
+        tests/fs_io.cc
+    )
+    target_link_libraries(unit PRIVATE
+        cornet
+        concurrentqueue::concurrentqueue
+        GTest::gtest_main
+        GTest::gmock
+    )
+    gtest_discover_tests(unit)
+endif()
 
 # ─── 安装 ───
 include(GNUInstallDirs)
@@ -106,7 +111,7 @@ install(
 )
 install(
     DIRECTORY include/ 
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/cornet)
 install(
     EXPORT cornetTargets
     NAMESPACE cornet::
