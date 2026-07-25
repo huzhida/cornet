@@ -52,7 +52,8 @@ Phase 2: 所有线程执行 init_fn（此时可安全访问任意 context）
 // round-robin 选择下一个 context（原子操作，线程安全）
 auto& target = rt.next_context();
 target.spawn_remote([conn = std::move(conn)]() -> coro_t<void> {
-    co_await handle_connection(conn);
+    auto& ctx = context_t::current();
+    co_await handle_connection(ctx, std::move(conn));
 });
 ```
 
@@ -151,20 +152,21 @@ coro_t<void> spawn_remote_runner(F f) {  // f 按值传入，移动到协程帧
 ## 典型架构：多线程 Echo Server
 
 ```cpp
-coro_t<void> handle_client(tcp::socket_t sock) {
+coro_t<void> handle_client(context_t& ctx, tcp::socket_t sock) {
     char buf[4096];
     while (true) {
-        auto n = co_await sock.recv(buf, sizeof(buf));
+        auto n = co_await sock.recv(ctx, buf, sizeof(buf));
         if (!n || *n == 0) break;
-        auto w = co_await sock.send(buf, *n);
+        auto w = co_await sock.send(ctx, buf, *n);
         if (!w) break;
     }
 }
 
 coro_t<void> accept_loop(context_t& ctx, runtime_t& rt) {
-    tcp::acceptor_t acceptor(ctx, "0.0.0.0", 8080);
+    tcp::socket_t listener;
+    listener.listen("0.0.0.0", 8080);
     while (!ctx.is_shutting_down()) {
-        auto sock = co_await acceptor.accept();
+        auto sock = co_await listener.accept(ctx);
         if (!sock) break;
 
         // round-robin 分发到各线程

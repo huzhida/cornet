@@ -21,7 +21,7 @@ co_await cornet::sleep(ctx, 100ms);
 
 ```cpp
 // 5 秒内未收到数据则返回 ETIMEDOUT
-auto result = co_await with_timeout(ctx, sock.recv(buf, 4096), 5s);
+auto result = co_await with_timeout(ctx, sock.recv(ctx, buf, 4096), 5s);
 if (!result) {
     if (result.error().code == ETIMEDOUT) {
         // 超时
@@ -47,9 +47,9 @@ int bytes = *result;
 `with_timeout` 适用于所有 `utask_t` 派生的 awaiter：
 
 ```cpp
-co_await with_timeout(ctx, sock.recv(buf, n), 5s);
-co_await with_timeout(ctx, sock.send(buf, n), 3s);
-co_await with_timeout(ctx, sock.accept(), 10s);
+co_await with_timeout(ctx, sock.recv(ctx, buf, n), 5s);
+co_await with_timeout(ctx, sock.send(ctx, buf, n), 3s);
+co_await with_timeout(ctx, sock.accept(ctx), 10s);
 co_await with_timeout(ctx, close_awaiter(ctx, fd), 1s);
 ```
 
@@ -143,9 +143,10 @@ when_any_result<Ts...> {
 ```cpp
 canceler_t canceler(ctx);
 
-coro_t<Data> cancellable_fetch(const std::string& url, canceler_t& c) {
-    auto sock = co_await connect(url);
-    auto n = co_await with_cancel(ctx, sock.recv(buf, 4096), c);
+coro_t<Data> cancellable_fetch(context_t& ctx, const std::string& url, canceler_t& c) {
+    tcp::v4::socket_t sock;
+    auto conn = co_await sock.connect(ctx, url, 80);
+    auto n = co_await with_cancel(ctx, sock.recv(ctx, buf, 4096), c);
     if (!n) co_return Data{};
     co_return parse(buf, *n);
 }
@@ -212,12 +213,12 @@ canceler_t canceler(ctx);
 coro_t<void> handle_client(tcp::socket_t sock, canceler_t& canceler) {
     char buf[4096];
     while (!canceler.is_cancelled()) {
-        auto n = co_await with_cancel(ctx, sock.recv(buf, 4096), canceler);
+        auto n = co_await with_cancel(ctx, sock.recv(ctx, buf, 4096), canceler);
         if (!n) {
             if (n.error().code == ECANCELED) break;  // 被取消
             break;  // 其他错误
         }
-        auto sent = co_await with_cancel(ctx, sock.send(buf, *n), canceler);
+        auto sent = co_await with_cancel(ctx, sock.send(ctx, buf, *n), canceler);
         if (!sent) break;
     }
 }
@@ -277,7 +278,7 @@ canceler.cancel();
 // ... 处理完取消逻辑 ...
 
 canceler.reset();  // 可以再次使用
-auto n = co_await with_cancel(ctx, sock.recv(buf, 4096), canceler);  // 正常工作
+auto n = co_await with_cancel(ctx, sock.recv(ctx, buf, 4096), canceler);  // 正常工作
 ```
 
 ### with_cancel 适用范围
@@ -285,10 +286,10 @@ auto n = co_await with_cancel(ctx, sock.recv(buf, 4096), canceler);  // 正常�
 `with_cancel` 可包装所有 `utask_t` 派生的 awaiter：
 
 ```cpp
-co_await with_cancel(ctx, sock.recv(buf, n), canceler);
-co_await with_cancel(ctx, sock.send(buf, n), canceler);
-co_await with_cancel(ctx, sock.accept(nullptr, nullptr, 0), canceler);
-co_await with_cancel(ctx, sleep(ctx, 5s), canceler);
+co_await with_cancel(ctx, sock.recv(ctx, buf, n), canceler);
+co_await with_cancel(ctx, sock.send(ctx, buf, n), canceler);
+co_await with_cancel(ctx, sock.accept(ctx, nullptr, nullptr, 0), canceler);
+co_await with_cancel(ctx, cornet::sleep(ctx, 5s), canceler);
 co_await with_cancel(ctx, close_awaiter(ctx, fd), canceler);
 ```
 
@@ -299,8 +300,8 @@ co_await with_cancel(ctx, close_awaiter(ctx, fd), canceler);
 ```cpp
 ccoro_t<expected<int>> long_io_task() {
     tcp::v4::socket_t sock;
-    auto conn = co_await sock.connect("server", 80);  // 自动可取消
-    auto n = co_await sock.recv(buf, 4096);            // 自动可取消
+    auto conn = co_await sock.connect(ctx, "server", 80);  // 自动可取消
+    auto n = co_await sock.recv(ctx, buf, 4096);            // 自动可取消
     co_return n;
 }
 
@@ -315,7 +316,7 @@ auto result = co_await with_cancel(ctx, long_io_task(), canceler);
 
 ```cpp
 ccoro_t<expected<void>> inner() {
-    co_await sock.recv(buf, n);  // 自动继承外层 canceler
+    co_await sock.recv(ctx, buf, n);  // 自动继承外层 canceler
     co_return {};
 }
 
@@ -336,8 +337,8 @@ co_await with_cancel(ctx, outer(), canceler);
 ```cpp
 // 返回 expected<T> 的协程：超时时返回 unexpected(ETIMEDOUT)
 ccoro_t<expected<int>> fetch_data() {
-    auto conn = co_await sock.connect("server", 80);
-    auto n = co_await sock.recv(buf, 4096);
+    auto conn = co_await sock.connect(ctx, "server", 80);
+    auto n = co_await sock.recv(ctx, buf, 4096);
     co_return n;
 }
 
@@ -459,7 +460,7 @@ co_await task_scope(ctx, [&](scope_t& scope) -> coro_t<void> {
         // ret 可能是 ECANCELED
     });
     scope.spawn([&scope]() -> coro_t<void> {
-        co_await sleep(ctx, 1s);
+        co_await cornet::sleep(ctx, 1s);
         scope.cancel();  // 取消 scope 内所有使用 with_cancel 的 IO
     });
     co_return;
@@ -473,7 +474,7 @@ canceler_t parent(ctx);
 
 // 外部某处触发取消
 ctx.spawn([&parent]() -> coro_t<void> {
-    co_await sleep(ctx, 5s);
+    co_await cornet::sleep(ctx, 5s);
     parent.cancel();  // 传播到 scope 内部
 }());
 

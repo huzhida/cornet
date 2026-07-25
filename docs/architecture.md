@@ -48,7 +48,7 @@ Cornet 围绕三个核心原则设计：
 ### IO 操作的完整生命周期
 
 ```
-用户代码: auto n = co_await sock.recv(buf, 4096);
+用户代码: auto n = co_await sock.recv(ctx, buf, 4096);
                     │
                     ▼
 1. recv_awaiter 构造
@@ -188,10 +188,10 @@ enum class error_domain : uint8_t {
 
 | 层级 | 返回类型 | 示例 |
 |------|----------|------|
-| IO awaiter (utask_t 基类) | `expected<int>` | `co_await sock.recv(buf, n)` |
-| void 操作 awaiter | `expected<void>` | `co_await sock.close()` / `co_await sleep(1s)` |
-| 高层组合 API | `coro_t<expected<T>>` | `co_await sock.connect(host, port)` |
-| timeout 包装 | `expected<int>` | `co_await with_timeout(op, 5s)` |
+| IO awaiter (utask_t 基类) | `expected<int>` | `co_await sock.recv(ctx, buf, n)` |
+| void 操作 awaiter | `expected<void>` | `co_await sock.close(ctx)` / `co_await sleep(ctx, 1s)` |
+| 高层组合 API | `coro_t<expected<T>>` | `co_await sock.connect(ctx, host, port)` |
+| timeout 包装 | `expected<int>` | `co_await with_timeout(ctx, op, 5s)` |
 
 ### 使用方式
 
@@ -199,7 +199,7 @@ enum class error_domain : uint8_t {
 
 ```cpp
 coro_t<void> handle(tcp::socket_t& sock) {
-    auto n = co_await sock.recv(buf, 4096);
+    auto n = co_await sock.recv(ctx, buf, 4096);
     if (!n) {
         // n.error().code    → errno 值
         // n.error().domain  → 错误域

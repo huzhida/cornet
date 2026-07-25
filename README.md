@@ -55,16 +55,16 @@ cmake --build --preset release
 ### 最简示例：TCP Echo Server
 
 ```cpp
-#include "core/socket.h"
+#include <cornet.h>
 
 using namespace cornet;
 
-coro_t<void> handle_client(tcp::v4::socket_t client) {
+coro_t<void> handle_client(tcp::v4::socket_t client, context_t& ctx) {
     char buf[4096];
     while (true) {
-        auto n = co_await client.recv(buf, sizeof(buf));
+        auto n = co_await client.recv(ctx, buf, sizeof(buf));
         if (!n || *n == 0) break;
-        auto sent = co_await client.send(buf, *n);
+        auto sent = co_await client.send(ctx, buf, *n);
         if (!sent) break;
     }
 }
@@ -76,9 +76,9 @@ coro_t<void> server() {
     listener.listen("0.0.0.0", 8080);
 
     while (!ctx.is_shutting_down()) {
-        auto client = co_await listener.accept();
+        auto client = co_await listener.accept(ctx);
         if (!client) continue;
-        ctx.spawn(handle_client(std::move(*client)));
+        ctx.spawn(handle_client(std::move(*client), ctx));
     }
 }
 
@@ -93,11 +93,11 @@ int main() {
 ### 异步 DNS + 超时连接
 
 ```cpp
-coro_t<expected<void>> connect_with_timeout() {
+coro_t<expected<void>> connect_with_timeout(context_t& ctx) {
     tcp::v4::socket_t sock;
     // connect 自动检测：IP 走快速路径，域名走异步 DNS
     // 带超时参数的 connect 内部自动处理取消
-    auto ret = co_await sock.connect("example.com", 80, std::chrono::seconds(5));
+    auto ret = co_await sock.connect(ctx, "example.com", 80, std::chrono::seconds(5));
     if (!ret) {
         co_return unexpected(ret.error());
     }
@@ -109,16 +109,16 @@ coro_t<expected<void>> connect_with_timeout() {
 
 ```cpp
 // 需要自动取消传播的协程，使用 ccoro_t（cancelable_coro_t 的别名）
-ccoro_t<expected<Data>> fetch_data() {
+ccoro_t<expected<Data>> fetch_data(context_t& ctx) {
     tcp::v4::socket_t sock;
-    auto conn = co_await sock.connect("server", 80);   // 自动可取消
+    auto conn = co_await sock.connect(ctx, "server", 80);   // 自动可取消
     if (!conn) co_return unexpected(conn.error());
-    auto n = co_await sock.recv(buf, 4096);            // 自动可取消
+    auto n = co_await sock.recv(ctx, buf, 4096);            // 自动可取消
     co_return parse(buf, *n);
 }
 
 // 整个协程设定超时，内部所有 IO 自动获得取消能力
-auto result = co_await with_timeout(fetch_data(), 5s);
+auto result = co_await with_timeout(ctx, fetch_data(ctx), 5s);
 if (!result && result.error().code == ETIMEDOUT) {
     // 协程整体超时，内部 IO 已自动取消
 }
@@ -128,7 +128,7 @@ if (!result && result.error().code == ETIMEDOUT) {
 
 ```cpp
 coro_t<void> fetch_all() {
-    auto result = co_await when_all(
+    auto result = co_await when_all(ctx,
         fetch_from("service-a", 8001),
         fetch_from("service-b", 8002),
         fetch_from("service-c", 8003)

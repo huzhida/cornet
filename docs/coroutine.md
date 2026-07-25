@@ -38,7 +38,7 @@ coro_t<int> compute() {
 
 // void 协程
 coro_t<void> do_work() {
-    co_await cornet::sleep(1s);
+    co_await cornet::sleep(ctx, 1s);
     co_return;
 }
 
@@ -83,10 +83,10 @@ ctx.spawn(coro);  // 左值，不 detach
 
 ```cpp
 // 使用 ccoro_t 声明需要取消能力的协程
-ccoro_t<expected<int>> long_io_task() {
+ccoro_t<expected<int>> long_io_task(context_t& ctx) {
     tcp::v4::socket_t sock;
-    auto conn = co_await sock.connect("server", 80);   // 自动可取消
-    auto n = co_await sock.recv(buf, 4096);             // 自动可取消
+    auto conn = co_await sock.connect(ctx, "server", 80);   // 自动可取消
+    auto n = co_await sock.recv(ctx, buf, 4096);             // 自动可取消
     co_return n;
 }
 
@@ -139,19 +139,19 @@ T&& await_transform(T&& op) {
 当 `ccoro_t` 嵌套 `ccoro_t` 时，外层的 canceler 自动传播到内层所有 IO：
 
 ```cpp
-ccoro_t<expected<void>> inner_task() {
-    co_await sock.recv(buf, n);   // 自动继承父 canceler
-    co_await sock.send(buf, n);   // 同样自动可取消
+ccoro_t<expected<void>> inner_task(context_t& ctx) {
+    co_await sock.recv(ctx, buf, n);   // 自动继承父 canceler
+    co_await sock.send(ctx, buf, n);   // 同样自动可取消
     co_return {};
 }
 
-ccoro_t<expected<void>> outer_task() {
-    co_await inner_task();  // canceler 自动注入 inner_task 的 promise
+ccoro_t<expected<void>> outer_task(context_t& ctx) {
+    co_await inner_task(ctx);  // canceler 自动注入 inner_task 的 promise
     co_return {};
 }
 
-canceler_t canceler;
-co_await with_cancel(outer_task(), canceler);
+canceler_t canceler(ctx);
+co_await with_cancel(ctx, outer_task(), canceler);
 // canceler.cancel() → outer_task 和 inner_task 中的 IO 全部取消
 ```
 
@@ -161,14 +161,14 @@ co_await with_cancel(outer_task(), canceler);
 
 ```cpp
 // 不需要取消 → 用 coro_t（零开销）
-coro_t<void> simple_handler() {
-    co_await sock.recv(buf, n);  // 直接调用，无包装
+coro_t<void> simple_handler(context_t& ctx) {
+    co_await sock.recv(ctx, buf, n);  // 直接调用，无包装
     co_return;
 }
 
 // 需要取消/超时 → 用 ccoro_t
-ccoro_t<expected<void>> cancellable_handler() {
-    co_await sock.recv(buf, n);  // await_transform 自动包装
+ccoro_t<expected<void>> cancellable_handler(context_t& ctx) {
+    co_await sock.recv(ctx, buf, n);  // await_transform 自动包装
     co_return {};
 }
 ```
@@ -248,9 +248,9 @@ return unexpected(ECANCELED, error_domain::internal);  // 内部错误
 当 `ccoro_t` 通过 `with_cancel` 或 `with_timeout` 包装时，canceler 被注入到 promise，内部所有 IO 自动可取消：
 
 ```cpp
-ccoro_t<expected<void>> my_handler() {
-    auto conn = co_await sock.connect("server", 80);  // 自动可取消
-    auto n = co_await sock.recv(buf, 4096);            // 自动可取消
+ccoro_t<expected<void>> my_handler(context_t& ctx) {
+    auto conn = co_await sock.connect(ctx, "server", 80);  // 自动可取消
+    auto n = co_await sock.recv(ctx, buf, 4096);            // 自动可取消
     auto sub = co_await compute_something();           // coro_t，不受影响
     co_return expected<void>{};
 }
@@ -288,7 +288,7 @@ Cornet 内部使用两种错误传播机制：
 
 ```cpp
 // IO 错误走 expected
-auto n = co_await sock.recv(buf, len);
+auto n = co_await sock.recv(ctx, buf, len);
 if (!n) { /* 处理 */ }
 
 // 业务逻辑可以用 throw（协程会捕获并存储）
