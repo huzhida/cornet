@@ -163,7 +163,7 @@ coro_t<void> handle_client(tcp::socket_t sock) {
 
 coro_t<void> accept_loop(context_t& ctx, runtime_t& rt) {
     tcp::acceptor_t acceptor(ctx, "0.0.0.0", 8080);
-    while (!ctx.is_draining()) {
+    while (!ctx.is_shutting_down()) {
         auto sock = co_await acceptor.accept();
         if (!sock) break;
 

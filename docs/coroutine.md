@@ -91,11 +91,11 @@ ccoro_t<expected<int>> long_io_task() {
 }
 
 // 协程级 with_cancel
-canceler_t canceler;
-auto result = co_await with_cancel(long_io_task(), canceler);
+canceler_t canceler(ctx);
+auto result = co_await with_cancel(ctx, long_io_task(), canceler);
 
 // 协程级 with_timeout
-auto result = co_await with_timeout(long_io_task(), 5s);
+auto result = co_await with_timeout(ctx, long_io_task(), 5s);
 ```
 
 ### await_transform 原理
@@ -255,8 +255,8 @@ ccoro_t<expected<void>> my_handler() {
     co_return expected<void>{};
 }
 
-canceler_t canceler;
-co_await with_cancel(my_handler(), canceler);  // 注入 canceler 到 promise
+canceler_t canceler(ctx);
+co_await with_cancel(ctx, my_handler(), canceler);  // 注入 canceler 到 promise
 ```
 
 ---

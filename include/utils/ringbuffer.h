@@ -3,7 +3,7 @@
 
 #include <atomic>
 #include <memory>
-#include "utils/defines.h"
+#include "base/defines.h"
 
 namespace cornet {
 /**

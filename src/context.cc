@@ -1,5 +1,5 @@
-#include "core/context.h"
-#include "core/combinators.h"
+#include "scheduling/context.h"
+#include "concurrency/combinators.h"
 #include <sys/eventfd.h>
 #include <sys/signalfd.h>
 #include <signal.h>
@@ -7,11 +7,9 @@
 
 namespace cornet {
 
-std::mutex context_t::contexts_mutex;
-std::unordered_map<std::thread::id, context_t*> context_t::contexts;
-
 context_t::context_t()
 : uring(config_t::get()["cornet"]["context"]["uring"]["capacity"].value_or(32)) {
+  cancellation_.init(*this);
   uring.metrics_ = &metrics_;
   if (auto scheduler_name = config_t::get()["cornet"]["context"]["scheduler"]["name"]) {
     scheduler_type = scheduler_t::to_scheduler_type(scheduler_name.as_string()->value_or(""));
@@ -23,9 +21,6 @@ context_t::context_t()
     SPDLOG_ERROR("failed to create eventfd: {}", strerror(errno));
     throw std::runtime_error("failed to create eventfd");
   }
-
-  std::lock_guard<std::mutex> guard(contexts_mutex);
-  contexts[std::this_thread::get_id()] = this;
 }
 
 context_t::~context_t() {
@@ -38,16 +33,9 @@ context_t::~context_t() {
     ::close(wakeup_fd);
     wakeup_fd = -1;
   }
-  std::lock_guard<std::mutex> guard(contexts_mutex);
-  contexts.erase(std::this_thread::get_id());
 }
 
 void context_t::run() {
-  if (owner != std::this_thread::get_id()) {
-    SPDLOG_ERROR("never run context in other thread");
-    return;
-  }
-
   spawn(wakeup_watch_loop());
   switch_to(state_t::Running);
   state_t current_state;
@@ -55,52 +43,40 @@ void context_t::run() {
     current_state = state.load(std::memory_order_acquire);
 
     if (current_state == state_t::Canceling) {
-      spawn(cancel_pending_io());
-      switch_to(state_t::Terminating);
+      spawn(cancellation_.cancel_pending_io());
+      switch_to(state_t::Terminated);
     }
 
     scheduler->sched(*this);
 
-    if (current_state <= state_t::Draining && user_idle()) {
-      switch_to(state_t::Canceling);
+    if (current_state <= state_t::Draining) {
+      if (user_idle()
+      || shutdown_deadline_.has_value() && std::chrono::steady_clock::now() > shutdown_deadline_.value()) {
+        switch_to(state_t::Canceling);
+      }
     }
   }
   switch_to(state_t::Terminated);
 }
 
 void context_t::shutdown(std::chrono::nanoseconds timeout) {
+  set_keep_alive(false);
   auto expected = state_t::Running;
   if (!state.compare_exchange_strong(expected, state_t::Draining, std::memory_order_acq_rel)) {
     return;
   }
-  if (std::this_thread::get_id() == owner) {
-    spawn(shutdown_sequence(timeout));
-  } else {
-    remote_queue_.enqueue([this, timeout]() {
-      spawn(shutdown_sequence(timeout));
-    });
-  }
+  shutdown_deadline_ = std::chrono::steady_clock::now() + timeout;
   wakeup();
 }
 
 void context_t::stop() {
+  set_keep_alive(false);
   auto expected = state_t::Running;
   if (!state.compare_exchange_strong(expected, state_t::Canceling, std::memory_order_acq_rel)) {
     expected = state_t::Draining;
     state.compare_exchange_strong(expected, state_t::Canceling, std::memory_order_acq_rel);
   }
   wakeup();
-}
-
-coro_t<void> context_t::shutdown_sequence(std::chrono::nanoseconds timeout) {
-  co_await sleep(timeout);
-
-  // Only transition if still in Draining (may have been superseded by stop() or user_idle)
-  auto current = state.load(std::memory_order_acquire);
-  if (current == state_t::Draining && !user_idle()) {
-    switch_to(state_t::Canceling);
-  }
-  co_return;
 }
 
 void context_t::on_signal(std::initializer_list<int> signals, std::function<void(int)> handler) {
@@ -133,12 +109,12 @@ coro_t<void> context_t::signal_watch_loop() {
   struct signalfd_siginfo siginfo{};
   while (!is_draining()) {
     uring.add_persistent();
-    auto ret = co_await io([this, &siginfo](io_uring_sqe* sqe) {
-      io_uring_prep_read(sqe, signal_fd, &siginfo, sizeof(siginfo), 0);
-    });
+    auto ret = co_await async_read(*this, signal_fd, &siginfo, sizeof(siginfo));
     uring.remove_persistent();
-    if (!ret || *ret <= 0) {
-      break;
+    if (!ret) {
+      if (ret.error().code == ECANCELED) break;
+      SPDLOG_ERROR("signal_watch_loop read failed: {}", ret.error().message());
+      co_return;
     }
     int sig = siginfo.ssi_signo;
     auto it = signal_handlers.find(sig);
@@ -153,12 +129,12 @@ coro_t<void> context_t::wakeup_watch_loop() {
   uint64_t buf;
   while (true) {
     uring.add_persistent();
-    auto ret = co_await read_awaiter(wakeup_fd, &buf, sizeof(buf));
+    auto ret = co_await read_awaiter(*this, wakeup_fd, &buf, sizeof(buf));
     uring.remove_persistent();
     if (!ret) {
       if (ret.error().code == ECANCELED) break;
       SPDLOG_ERROR("wakeup_watch_loop read failed: {}", ret.error().message());
-      break;
+      co_return;
     }
     if (is_draining()) break;
   }
@@ -185,9 +161,6 @@ void context_t::set_scheduler_type(scheduler_type_t type) {
   scheduler = std::move(s);
 }
 
-std::thread::id context_t::owner_thread() const {
-  return owner;
-}
 
 context_t::cancel_awaiter::cancel_awaiter(context_t& ctx, void* user_data, int flags)
   : user_data_(user_data), flags_(flags) {

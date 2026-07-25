@@ -1,9 +1,9 @@
 #ifndef CORNET_H
 #define CORNET_H
 
-#include "core/socket.h"
-#include "core/combinators.h"
-#include "core/runtime.h"
+#include "net/socket.h"
+#include "concurrency/combinators.h"
+#include "scheduling/runtime.h"
 #include "utils/config.h"
 #include "utils/logging.h"
 

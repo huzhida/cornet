@@ -9,9 +9,6 @@
 ```cpp
 // 当前线程的 context（自动创建）
 auto& ctx = context_t::current();
-
-// 获取其他线程的 context（跨线程通信）
-auto* other_ctx = context_t::from_thread(some_thread);
 ```
 
 ### 生命周期管理
@@ -88,7 +85,10 @@ ctx.set_keep_alive(true);
 ### 关闭流程
 
 ```cpp
-// 优雅关闭（等待 5s 后强制取消）
+// 优雅关闭（等待 1s 后强制取消，默认超时）
+ctx.shutdown();
+
+// 自定义超时
 ctx.shutdown(std::chrono::seconds(5));
 
 // 立即停止（取消所有 pending IO）
@@ -98,7 +98,7 @@ ctx.stop();
 状态机：
 
 ```
-Running ──shutdown()──→ Draining ──timeout/user_idle──→ Canceling ──spawn cancel──→ Terminating ──idle()──→ Terminated
+Running ──shutdown()──→ Draining ──timeout/user_idle──→ Canceling ──spawn cancel──→ Terminated
    │                       │                                ▲
    │                       └────────user_idle()─────────────┘
    └──────────────stop()────────────────────────────────────┘
@@ -110,8 +110,7 @@ Running ──shutdown()──→ Draining ──timeout/user_idle──→ Canc
 |------|------|
 | Running | 正常运行，接受新连接和任务 |
 | Draining | 优雅关闭中，不再接受新连接，等待现有任务完成 |
-| Canceling | spawn `cancel_pending_io()` 取消所有 inflight IO（含 persistent watcher） |
-| Terminating | cancel 协程已在运行，等待所有操作完成（包括 persistent IO drain） |
+| Canceling | spawn `cancel_pending_io()` 取消所有 inflight IO（含 persistent watcher），spawn 后立即进入 Terminated |
 | Terminated | `run()` 已返回，context 完全干净可复用 |
 
 ### idle 语义
@@ -127,6 +126,15 @@ run loop 保证：`idle()` 为 true 时所有 IO（含 persistent）已彻底 dr
 
 `shutdown()` 和 `stop()` 均使用 `compare_exchange_strong` 保证状态转换的原子性，
 多线程并发调用不会导致重复 spawn 或状态回退。
+
+### 状态查询
+
+```cpp
+ctx.is_shutting_down();  // true if not in Running state
+ctx.is_terminated();     // true if run loop has exited
+```
+
+> `is_draining()` 已废弃，请使用 `is_shutting_down()`。
 
 ### 指标监控
 

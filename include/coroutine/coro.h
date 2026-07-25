@@ -8,8 +8,8 @@
 #include <iterator>
 #include <type_traits>
 #include <concepts>
-#include "task.h"
-#include "cancel.h"
+#include "base/task.h"
+#include "coroutine/cancel.h"
 
 namespace cornet {
 
@@ -75,8 +75,8 @@ struct coro_final_awaiter {
    * @return the coroutine to resume next
    */
   CORNET_MAYBE_UNUSED std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> h) noexcept {
-    if (h.promise().continuation) return h.promise().continuation;
     if (h.promise().detached) h.destroy();
+    if (h.promise().continuation) return h.promise().continuation;
     return std::noop_coroutine();
   }
 

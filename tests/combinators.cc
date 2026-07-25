@@ -1,5 +1,5 @@
-#include "core/socket.h"
-#include "core/combinators.h"
+#include "net/socket.h"
+#include "concurrency/combinators.h"
 
 #include <gtest/gtest.h>
 
@@ -8,7 +8,11 @@ using namespace cornet;
 class combinators : public ::testing::Test {
 protected:
   void SetUp() override {
-    ctx = &context_t::current();
+    ctx = new context_t();
+  }
+
+  void TearDown() override {
+    delete ctx;
   }
 
   context_t* ctx;
@@ -17,7 +21,7 @@ protected:
 TEST_F(combinators, sleep_basic) {
   auto test = [](context_t& ctx) -> coro_t<void> {
     auto start = std::chrono::steady_clock::now();
-    auto ret = co_await sleep(std::chrono::milliseconds(50));
+    auto ret = co_await sleep(ctx, std::chrono::milliseconds(50));
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::steady_clock::now() - start).count();
     EXPECT_TRUE(ret.has_value());
@@ -31,8 +35,8 @@ TEST_F(combinators, sleep_basic) {
 TEST_F(combinators, sleep_multiple) {
   auto test = [](context_t& ctx) -> coro_t<void> {
     auto start = std::chrono::steady_clock::now();
-    co_await sleep(std::chrono::milliseconds(20));
-    co_await sleep(std::chrono::milliseconds(20));
+    co_await sleep(ctx, std::chrono::milliseconds(20));
+    co_await sleep(ctx, std::chrono::milliseconds(20));
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::steady_clock::now() - start).count();
     EXPECT_GE(elapsed, 35);
@@ -50,16 +54,16 @@ TEST_F(combinators, with_timeout_completes_before_timeout) {
 
     auto client_task = [](context_t& ctx) -> coro_t<void> {
       tcp::v4::socket_t sock;
-      co_await sock.connect("127.0.0.1", 23456);
-      co_await sock.send("hello", 5);
+      co_await sock.connect(ctx, "127.0.0.1", 23456);
+      co_await sock.send(ctx, "hello", 5);
     };
     ctx.spawn(client_task(ctx));
 
-    auto client = co_await server_sock.accept(0);
+    auto client = co_await server_sock.accept(ctx, 0);
     EXPECT_TRUE(client.has_value());
 
     char buf[16] = {};
-    auto result = co_await with_timeout(client->recv(buf, sizeof(buf)), std::chrono::seconds(5));
+    auto result = co_await with_timeout(ctx, client->recv(ctx, buf, sizeof(buf)), std::chrono::seconds(5));
     EXPECT_TRUE(result.has_value());
     EXPECT_EQ(*result, 5);
     co_return;
@@ -76,16 +80,16 @@ TEST_F(combinators, with_timeout_expires) {
 
     auto client_task = [](context_t& ctx) -> coro_t<void> {
       tcp::v4::socket_t sock;
-      co_await sock.connect("127.0.0.1", 23457);
-      co_await sleep(std::chrono::milliseconds(200));
+      co_await sock.connect(ctx, "127.0.0.1", 23457);
+      co_await sleep(ctx, std::chrono::milliseconds(200));
     };
     ctx.spawn(client_task(ctx));
 
-    auto client = co_await server_sock.accept(0);
+    auto client = co_await server_sock.accept(ctx, 0);
     EXPECT_TRUE(client.has_value());
 
     char buf[16] = {};
-    auto result = co_await with_timeout(client->recv(buf, sizeof(buf)), std::chrono::milliseconds(50));
+    auto result = co_await with_timeout(ctx, client->recv(ctx, buf, sizeof(buf)), std::chrono::milliseconds(50));
     EXPECT_FALSE(result.has_value());
     EXPECT_EQ(result.error().code, ETIMEDOUT);
     co_return;
@@ -96,16 +100,16 @@ TEST_F(combinators, with_timeout_expires) {
 
 TEST_F(combinators, when_all_basic) {
   auto test = [](context_t& ctx) -> coro_t<void> {
-    auto task1 = []() -> coro_t<int> {
-      co_await sleep(std::chrono::milliseconds(10));
+    auto task1 = [&ctx]() -> coro_t<int> {
+      co_await sleep(ctx, std::chrono::milliseconds(10));
       co_return 1;
     };
-    auto task2 = []() -> coro_t<int> {
-      co_await sleep(std::chrono::milliseconds(20));
+    auto task2 = [&ctx]() -> coro_t<int> {
+      co_await sleep(ctx, std::chrono::milliseconds(20));
       co_return 2;
     };
 
-    auto result = co_await when_all(task1(), task2());
+    auto result = co_await when_all(ctx, task1(), task2());
     auto& r1 = result.get<0>();
     auto& r2 = result.get<1>();
     EXPECT_TRUE(r1.has_value());
@@ -120,16 +124,16 @@ TEST_F(combinators, when_all_basic) {
 
 TEST_F(combinators, when_any_basic) {
   auto test = [](context_t& ctx) -> coro_t<void> {
-    auto fast = []() -> coro_t<int> {
-      co_await sleep(std::chrono::milliseconds(10));
+    auto fast = [&ctx]() -> coro_t<int> {
+      co_await sleep(ctx, std::chrono::milliseconds(10));
       co_return 1;
     };
-    auto slow = []() -> coro_t<int> {
-      co_await sleep(std::chrono::milliseconds(200));
+    auto slow = [&ctx]() -> coro_t<int> {
+      co_await sleep(ctx, std::chrono::milliseconds(200));
       co_return 2;
     };
 
-    auto result = co_await when_any(fast(), slow());
+    auto result = co_await when_any(ctx, fast(), slow());
     EXPECT_EQ(result.index, 0);
     auto& winner = result.get<0>();
     EXPECT_TRUE(winner.has_value());
@@ -142,7 +146,7 @@ TEST_F(combinators, when_any_basic) {
 
 TEST_F(combinators, canceler_before_io) {
   auto test = [](context_t& ctx) -> coro_t<void> {
-    canceler_t canceler;
+    canceler_t canceler(ctx);
     canceler.cancel();  // cancel before any IO
 
     tcp::v4::socket_t server_sock;
@@ -150,7 +154,7 @@ TEST_F(combinators, canceler_before_io) {
     EXPECT_TRUE(server_sock.listen("127.0.0.1", 23460).has_value());
 
     // should return ECANCELED immediately without submitting IO
-    auto result = co_await with_cancel(server_sock.accept(nullptr, nullptr, 0), canceler);
+    auto result = co_await with_cancel(ctx, server_sock.accept(ctx, nullptr, nullptr, 0), canceler);
     EXPECT_FALSE(result.has_value());
     EXPECT_EQ(result.error().code, ECANCELED);
     co_return;
@@ -161,21 +165,21 @@ TEST_F(combinators, canceler_before_io) {
 
 TEST_F(combinators, canceler_during_io) {
   auto test = [](context_t& ctx) -> coro_t<void> {
-    canceler_t canceler;
+    canceler_t canceler(ctx);
 
     tcp::v4::socket_t server_sock;
     server_sock.address_reuse(true);
     EXPECT_TRUE(server_sock.listen("127.0.0.1", 23461).has_value());
 
     // spawn a coroutine that cancels after a short delay
-    auto cancel_task = [&canceler]() -> coro_t<void> {
-      co_await sleep(std::chrono::milliseconds(50));
+    auto cancel_task = [&canceler, &ctx]() -> coro_t<void> {
+      co_await sleep(ctx, std::chrono::milliseconds(50));
       canceler.cancel();
     };
     ctx.spawn(cancel_task());
 
     // accept will block until cancelled
-    auto result = co_await with_cancel(server_sock.accept(nullptr, nullptr, 0), canceler);
+    auto result = co_await with_cancel(ctx, server_sock.accept(ctx, nullptr, nullptr, 0), canceler);
     EXPECT_FALSE(result.has_value());
     EXPECT_EQ(result.error().code, ECANCELED);
     co_return;
@@ -186,21 +190,21 @@ TEST_F(combinators, canceler_during_io) {
 
 TEST_F(combinators, canceler_hierarchical) {
   auto test = [](context_t& ctx) -> coro_t<void> {
-    canceler_t parent;
-    canceler_t child(parent);
+    canceler_t parent(ctx);
+    canceler_t child(ctx, parent);
 
     tcp::v4::socket_t server_sock;
     server_sock.address_reuse(true);
     EXPECT_TRUE(server_sock.listen("127.0.0.1", 23462).has_value());
 
     // cancel parent after delay, should propagate to child
-    auto cancel_task = [&parent]() -> coro_t<void> {
-      co_await sleep(std::chrono::milliseconds(50));
+    auto cancel_task = [&parent, &ctx]() -> coro_t<void> {
+      co_await sleep(ctx, std::chrono::milliseconds(50));
       parent.cancel();
     };
     ctx.spawn(cancel_task());
 
-    auto result = co_await with_cancel(server_sock.accept(nullptr, nullptr, 0), child);
+    auto result = co_await with_cancel(ctx, server_sock.accept(ctx, nullptr, nullptr, 0), child);
     EXPECT_FALSE(result.has_value());
     EXPECT_EQ(result.error().code, ECANCELED);
     EXPECT_TRUE(child.is_cancelled());
@@ -213,7 +217,7 @@ TEST_F(combinators, canceler_hierarchical) {
 
 TEST_F(combinators, canceler_reset) {
   auto test = [](context_t& ctx) -> coro_t<void> {
-    canceler_t canceler;
+    canceler_t canceler(ctx);
     canceler.cancel();
     EXPECT_TRUE(canceler.is_cancelled());
 
@@ -222,7 +226,7 @@ TEST_F(combinators, canceler_reset) {
     EXPECT_FALSE(canceler.is_cancelled());
 
     // after reset, operations should work normally
-    auto ret = co_await with_cancel(sleep(std::chrono::milliseconds(10)), canceler);
+    auto ret = co_await with_cancel(ctx, sleep(ctx, std::chrono::milliseconds(10)), canceler);
     EXPECT_TRUE(ret.has_value());
     co_return;
   };
@@ -234,17 +238,17 @@ TEST_F(combinators, task_scope_basic) {
   auto test = [](context_t& ctx) -> coro_t<void> {
     int count = 0;
 
-    auto result = co_await task_scope([&](scope_t& scope) -> coro_t<void> {
-      scope.spawn([&count]() -> coro_t<void> {
-        co_await sleep(std::chrono::milliseconds(10));
+    auto result = co_await task_scope(ctx, [&](scope_t& scope) -> coro_t<void> {
+      scope.spawn([&count, &ctx]() -> coro_t<void> {
+        co_await sleep(ctx, std::chrono::milliseconds(10));
         count++;
       });
-      scope.spawn([&count]() -> coro_t<void> {
-        co_await sleep(std::chrono::milliseconds(20));
+      scope.spawn([&count, &ctx]() -> coro_t<void> {
+        co_await sleep(ctx, std::chrono::milliseconds(20));
         count++;
       });
-      scope.spawn([&count]() -> coro_t<void> {
-        co_await sleep(std::chrono::milliseconds(30));
+      scope.spawn([&count, &ctx]() -> coro_t<void> {
+        co_await sleep(ctx, std::chrono::milliseconds(30));
         count++;
       });
       co_return;
@@ -263,20 +267,20 @@ TEST_F(combinators, task_scope_cancel) {
   auto test = [](context_t& ctx) -> coro_t<void> {
     int completed = 0;
 
-    auto result = co_await task_scope([&](scope_t& scope) -> coro_t<void> {
+    auto result = co_await task_scope(ctx, [&](scope_t& scope) -> coro_t<void> {
       // fast task completes normally
-      scope.spawn([&completed]() -> coro_t<void> {
-        co_await sleep(std::chrono::milliseconds(10));
+      scope.spawn([&completed, &ctx]() -> coro_t<void> {
+        co_await sleep(ctx, std::chrono::milliseconds(10));
         completed++;
       });
       // slow task uses with_cancel so it can be cancelled
-      scope.spawn([&completed, &scope]() -> coro_t<void> {
-        auto ret = co_await with_cancel(sleep(std::chrono::milliseconds(500)), scope.canceler());
+      scope.spawn([&completed, &scope, &ctx]() -> coro_t<void> {
+        auto ret = co_await with_cancel(ctx, sleep(ctx, std::chrono::milliseconds(500)), *scope.canceler());
         if (ret.has_value()) completed++;
       });
       // cancel scope after short delay
-      scope.spawn([&scope]() -> coro_t<void> {
-        co_await sleep(std::chrono::milliseconds(50));
+      scope.spawn([&scope, &ctx]() -> coro_t<void> {
+        co_await sleep(ctx, std::chrono::milliseconds(50));
         scope.cancel();
       });
       co_return;
@@ -292,19 +296,19 @@ TEST_F(combinators, task_scope_cancel) {
 
 TEST_F(combinators, task_scope_with_parent_canceler) {
   auto test = [](context_t& ctx) -> coro_t<void> {
-    canceler_t parent;
+    canceler_t parent(ctx);
     int completed = 0;
 
     // cancel from outside the scope
-    auto cancel_task = [&parent]() -> coro_t<void> {
-      co_await sleep(std::chrono::milliseconds(50));
+    auto cancel_task = [&parent, &ctx]() -> coro_t<void> {
+      co_await sleep(ctx, std::chrono::milliseconds(50));
       parent.cancel();
     };
     ctx.spawn(cancel_task());
 
-    auto result = co_await task_scope(parent, [&](scope_t& scope) -> coro_t<void> {
-      scope.spawn([&completed, &scope]() -> coro_t<void> {
-        auto ret = co_await with_cancel(sleep(std::chrono::milliseconds(500)), scope.canceler());
+    auto result = co_await task_scope(ctx, parent, [&](scope_t& scope) -> coro_t<void> {
+      scope.spawn([&completed, &scope, &ctx]() -> coro_t<void> {
+        auto ret = co_await with_cancel(ctx, sleep(ctx, std::chrono::milliseconds(500)), *scope.canceler());
         if (ret.has_value()) completed++;
       });
       co_return;
@@ -321,7 +325,7 @@ TEST_F(combinators, task_scope_with_parent_canceler) {
 
 TEST_F(combinators, task_scope_no_children) {
   auto test = [](context_t& ctx) -> coro_t<void> {
-    auto result = co_await task_scope([](scope_t& scope) -> coro_t<void> {
+    auto result = co_await task_scope(ctx, [](scope_t& scope) -> coro_t<void> {
       // body does nothing, spawns no children
       co_return;
     });
@@ -336,12 +340,12 @@ TEST_F(combinators, task_scope_spawn_with_result) {
   auto test = [](context_t& ctx) -> coro_t<void> {
     int r1 = 0, r2 = 0;
 
-    auto compute = [](int x) -> coro_t<int> {
-      co_await sleep(std::chrono::milliseconds(10));
+    auto compute = [&ctx](int x) -> coro_t<int> {
+      co_await sleep(ctx, std::chrono::milliseconds(10));
       co_return x * 2;
     };
 
-    auto result = co_await task_scope([&](scope_t& scope) -> coro_t<void> {
+    auto result = co_await task_scope(ctx, [&](scope_t& scope) -> coro_t<void> {
       scope.spawn(compute(21), r1);
       scope.spawn(compute(11), r2);
       co_return;
@@ -360,17 +364,17 @@ TEST_F(combinators, task_scope_spawn_with_expected) {
   auto test = [](context_t& ctx) -> coro_t<void> {
     expected<int> r1, r2;
 
-    auto succeed = []() -> coro_t<int> {
-      co_await sleep(std::chrono::milliseconds(10));
+    auto succeed = [&ctx]() -> coro_t<int> {
+      co_await sleep(ctx, std::chrono::milliseconds(10));
       co_return 100;
     };
-    auto fail = []() -> coro_t<int> {
-      co_await sleep(std::chrono::milliseconds(10));
+    auto fail = [&ctx]() -> coro_t<int> {
+      co_await sleep(ctx, std::chrono::milliseconds(10));
       throw std::runtime_error("deliberate failure");
       co_return 0;
     };
 
-    auto result = co_await task_scope([&](scope_t& scope) -> coro_t<void> {
+    auto result = co_await task_scope(ctx, [&](scope_t& scope) -> coro_t<void> {
       scope.spawn(succeed(), r1);
       scope.spawn(fail(), r2);
       co_return;
@@ -392,13 +396,13 @@ TEST_F(combinators, task_scope_spawn_non_void_discard) {
   auto test = [](context_t& ctx) -> coro_t<void> {
     int side_effect = 0;
 
-    auto task_with_result = [&side_effect]() -> coro_t<int> {
-      co_await sleep(std::chrono::milliseconds(10));
+    auto task_with_result = [&ctx, &side_effect]() -> coro_t<int> {
+      co_await sleep(ctx, std::chrono::milliseconds(10));
       side_effect = 1;
       co_return 999;  // result discarded by scope
     };
 
-    auto result = co_await task_scope([&](scope_t& scope) -> coro_t<void> {
+    auto result = co_await task_scope(ctx, [&](scope_t& scope) -> coro_t<void> {
       scope.spawn(task_with_result());  // spawn coro_t<int> without collecting result
       co_return;
     });
@@ -416,14 +420,14 @@ TEST_F(combinators, task_scope_spawn_non_void_discard) {
 TEST_F(combinators, await_transform_propagates_cancel) {
   // canceler injected into cancelable_coro_t's promise automatically cancels internal IO
   auto test = [](context_t& ctx) -> coro_t<void> {
-    canceler_t canceler;
+    canceler_t canceler(ctx);
 
     auto io_task = [](context_t& ctx) -> cancelable_coro_t<expected<void>> {
       tcp::v4::socket_t server_sock;
       server_sock.address_reuse(true);
       EXPECT_TRUE(server_sock.listen("127.0.0.1", 23470).has_value());
       // accept blocks — will be cancelled via await_transform propagation
-      auto result = co_await server_sock.accept(nullptr, nullptr, 0);
+      auto result = co_await server_sock.accept(ctx, nullptr, nullptr, 0);
       if (!result) {
         co_return unexpected(result.error());
       }
@@ -431,14 +435,14 @@ TEST_F(combinators, await_transform_propagates_cancel) {
     };
 
     // cancel after short delay
-    auto cancel_task = [&canceler]() -> coro_t<void> {
-      co_await sleep(std::chrono::milliseconds(50));
+    auto cancel_task = [&canceler, &ctx]() -> coro_t<void> {
+      co_await sleep(ctx, std::chrono::milliseconds(50));
       canceler.cancel();
     };
     ctx.spawn(cancel_task());
 
     // with_cancel injects canceler into io_task's promise
-    auto result = co_await with_cancel(io_task(ctx), canceler);
+    auto result = co_await with_cancel(ctx, io_task(ctx), canceler);
     EXPECT_FALSE(result.has_value());
     EXPECT_EQ(result.error().code, ECANCELED);
     co_return;
@@ -450,12 +454,12 @@ TEST_F(combinators, await_transform_propagates_cancel) {
 TEST_F(combinators, await_transform_no_cancel_passthrough) {
   // without cancellation, await_transform passes through normally
   auto test = [](context_t& ctx) -> coro_t<void> {
-    auto io_task = []() -> coro_t<expected<void>> {
-      auto ret = co_await sleep(std::chrono::milliseconds(10));
+    auto io_task = [](context_t& ctx) -> coro_t<expected<void>> {
+      auto ret = co_await sleep(ctx, std::chrono::milliseconds(10));
       co_return ret;
     };
 
-    auto result = co_await io_task();
+    auto result = co_await io_task(ctx);
     EXPECT_TRUE(result.has_value());
     co_return;
   };
@@ -467,23 +471,23 @@ TEST_F(combinators, await_transform_no_cancel_passthrough) {
 
 TEST_F(combinators, coro_with_cancel_basic) {
   auto test = [](context_t& ctx) -> coro_t<void> {
-    canceler_t canceler;
+    canceler_t canceler(ctx);
 
     auto long_task = [](context_t& ctx) -> cancelable_coro_t<expected<int>> {
       tcp::v4::socket_t server_sock;
       server_sock.address_reuse(true);
       EXPECT_TRUE(server_sock.listen("127.0.0.1", 23471).has_value());
-      auto result = co_await server_sock.accept(nullptr, nullptr, 0);
+      auto result = co_await server_sock.accept(ctx, nullptr, nullptr, 0);
       co_return result;
     };
 
-    auto cancel_task = [&canceler]() -> coro_t<void> {
-      co_await sleep(std::chrono::milliseconds(50));
+    auto cancel_task = [&canceler, &ctx]() -> coro_t<void> {
+      co_await sleep(ctx, std::chrono::milliseconds(50));
       canceler.cancel();
     };
     ctx.spawn(cancel_task());
 
-    auto result = co_await with_cancel(long_task(ctx), canceler);
+    auto result = co_await with_cancel(ctx, long_task(ctx), canceler);
     EXPECT_FALSE(result.has_value());
     EXPECT_EQ(result.error().code, ECANCELED);
     co_return;
@@ -500,11 +504,11 @@ TEST_F(combinators, coro_with_timeout_expires) {
       tcp::v4::socket_t server_sock;
       server_sock.address_reuse(true);
       EXPECT_TRUE(server_sock.listen("127.0.0.1", 23472).has_value());
-      auto result = co_await server_sock.accept(nullptr, nullptr, 0);
+      auto result = co_await server_sock.accept(ctx, nullptr, nullptr, 0);
       co_return result;
     };
 
-    auto result = co_await with_timeout(long_task(ctx), std::chrono::milliseconds(50));
+    auto result = co_await with_timeout(ctx, long_task(ctx), std::chrono::milliseconds(50));
     // expected<int> with ETIMEDOUT (flattened from ECANCELED)
     EXPECT_FALSE(result.has_value());
     EXPECT_EQ(result.error().code, ETIMEDOUT);
@@ -516,12 +520,12 @@ TEST_F(combinators, coro_with_timeout_expires) {
 
 TEST_F(combinators, coro_with_timeout_completes_before_timeout) {
   auto test = [](context_t& ctx) -> coro_t<void> {
-    auto fast_task = []() -> cancelable_coro_t<expected<void>> {
-      co_await sleep(std::chrono::milliseconds(10));
+    auto fast_task = [](context_t& ctx) -> cancelable_coro_t<expected<void>> {
+      co_await sleep(ctx, std::chrono::milliseconds(10));
       co_return expected<void>{};
     };
 
-    auto result = co_await with_timeout(fast_task(), std::chrono::milliseconds(500));
+    auto result = co_await with_timeout(ctx, fast_task(ctx), std::chrono::milliseconds(500));
     EXPECT_TRUE(result.has_value());
     co_return;
   };
@@ -535,13 +539,13 @@ TEST_F(combinators, coro_with_timeout_void_expires) {
       tcp::v4::socket_t server_sock;
       server_sock.address_reuse(true);
       EXPECT_TRUE(server_sock.listen("127.0.0.1", 23473).has_value());
-      co_await server_sock.accept(nullptr, nullptr, 0);
+      co_await server_sock.accept(ctx, nullptr, nullptr, 0);
     };
 
     // void coroutine with timeout — throws on timeout
     bool threw = false;
     try {
-      co_await with_timeout(long_task(ctx), std::chrono::milliseconds(50));
+      co_await with_timeout(ctx, long_task(ctx), std::chrono::milliseconds(50));
     } catch (...) {
       threw = true;
     }

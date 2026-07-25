@@ -1,4 +1,4 @@
-#include "core/socket.h"
+#include "net/socket.h"
 
 #include <gtest/gtest.h>
 #include <thread>
@@ -10,10 +10,11 @@ using namespace cornet;
 class socket : public ::testing::Test {
 protected:
   void SetUp() override {
-    ctx = &context_t::current();
+    ctx = new context_t();
   }
 
   void TearDown() override {
+    delete ctx;
   }
 
   context_t* ctx;
@@ -59,7 +60,7 @@ TEST_F(socket, tcpv4_create_and_close) {
   auto test = [](context_t& ctx) -> coro_t<int> {
     tcp::v4::socket_t sock;
     EXPECT_GT(sock.native_fd(), 0);
-    auto ret = co_await sock.close();
+    auto ret = co_await sock.close(ctx);
     EXPECT_TRUE(ret.has_value());
     co_return 0;
   };
@@ -79,7 +80,7 @@ TEST_F(socket, tcpv4_listen) {
     const auto* sin = reinterpret_cast<sockaddr_in*>(&addr);
     EXPECT_GT(ntohs(sin->sin_port), 0);
 
-    auto _ = co_await sock.close();
+    auto _ = co_await sock.close(ctx);
     co_return;
   };
   ctx->spawn(test(*ctx));
@@ -91,13 +92,13 @@ TEST_F(socket, tcpv4_accept_and_connect) {
     tcp::v4::socket_t sock;
     sock.address_reuse(true);
     EXPECT_TRUE(sock.listen("127.0.0.1", 12345).has_value());
-    auto client = co_await sock.accept();
+    auto client = co_await sock.accept(ctx);
     EXPECT_TRUE(client.has_value());
     co_return;
   };
   auto connector = [](context_t& ctx) -> coro_t<void> {
     tcp::v4::socket_t sock;
-    auto ret = co_await sock.connect("127.0.0.1", 12345);
+    auto ret = co_await sock.connect(ctx, "127.0.0.1", 12345);
     EXPECT_TRUE(ret.has_value());
   };
   ctx->spawn(listener(*ctx));
@@ -110,15 +111,15 @@ TEST_F(socket, tcpv4_send_recv) {
     tcp::v4::socket_t sock;
     sock.address_reuse(true);
     EXPECT_TRUE(sock.listen("127.0.0.1", 12345).has_value());
-    auto client = co_await sock.accept();
+    auto client = co_await sock.accept(ctx);
     EXPECT_TRUE(client.has_value());
     char buffer[16] = {};
     for (int i = 0; i < 8; ++i) {
-      auto received = co_await client->recv(buffer, sizeof(buffer));
+      auto received = co_await client->recv(ctx, buffer, sizeof(buffer));
       EXPECT_TRUE(received.has_value());
       EXPECT_EQ(*received, (int)strlen("hello world."));
       EXPECT_STREQ(buffer, "hello world.");
-      auto sent = co_await client->send(buffer, strlen(buffer));
+      auto sent = co_await client->send(ctx, buffer, strlen(buffer));
       EXPECT_TRUE(sent.has_value());
       EXPECT_EQ(*sent, (int)strlen("hello world."));
     }
@@ -126,14 +127,14 @@ TEST_F(socket, tcpv4_send_recv) {
   };
   auto connector = [](context_t& ctx) -> coro_t<void> {
     tcp::v4::socket_t sock;
-    auto conn = co_await sock.connect("127.0.0.1", 12345);
+    auto conn = co_await sock.connect(ctx, "127.0.0.1", 12345);
     EXPECT_TRUE(conn.has_value());
     char buffer[16] = "hello world.";
     for (int i = 0; i < 8; ++i) {
-      auto sent = co_await sock.send((void*)buffer, strlen("hello world."));
+      auto sent = co_await sock.send(ctx, (void*)buffer, strlen("hello world."));
       EXPECT_TRUE(sent.has_value());
       EXPECT_EQ(*sent, (int)strlen("hello world."));
-      auto received = co_await sock.recv((void*)buffer, sizeof(buffer));
+      auto received = co_await sock.recv(ctx, (void*)buffer, sizeof(buffer));
       EXPECT_TRUE(received.has_value());
       EXPECT_EQ(*received, (int)strlen("hello world."));
     }
@@ -147,15 +148,15 @@ TEST_F(socket, tcpv6_send_recv) {
     tcp::v6::socket_t sock;
     sock.address_reuse(true);
     EXPECT_TRUE(sock.listen("::1", 12345).has_value());
-    auto client = co_await sock.accept();
+    auto client = co_await sock.accept(ctx);
     EXPECT_TRUE(client.has_value());
     char buffer[16] = {};
     for (int i = 0; i < 8; ++i) {
-      auto received = co_await client->recv(buffer, sizeof(buffer));
+      auto received = co_await client->recv(ctx, buffer, sizeof(buffer));
       EXPECT_TRUE(received.has_value());
       EXPECT_EQ(*received, (int)strlen("hello world."));
       EXPECT_STREQ(buffer, "hello world.");
-      auto sent = co_await client->send(buffer, strlen(buffer));
+      auto sent = co_await client->send(ctx, buffer, strlen(buffer));
       EXPECT_TRUE(sent.has_value());
       EXPECT_EQ(*sent, (int)strlen("hello world."));
     }
@@ -163,14 +164,14 @@ TEST_F(socket, tcpv6_send_recv) {
   };
   auto connector = [](context_t& ctx) -> coro_t<void> {
     tcp::v6::socket_t sock;
-    auto conn = co_await sock.connect("::1", 12345);
+    auto conn = co_await sock.connect(ctx, "::1", 12345);
     EXPECT_TRUE(conn.has_value());
     char buffer[16] = "hello world.";
     for (int i = 0; i < 8; ++i) {
-      auto sent = co_await sock.send((void*)buffer, strlen("hello world."));
+      auto sent = co_await sock.send(ctx, (void*)buffer, strlen("hello world."));
       EXPECT_TRUE(sent.has_value());
       EXPECT_EQ(*sent, (int)strlen("hello world."));
-      auto received = co_await sock.recv((void*)buffer, sizeof(buffer));
+      auto received = co_await sock.recv(ctx, (void*)buffer, sizeof(buffer));
       EXPECT_TRUE(received.has_value());
       EXPECT_EQ(*received, (int)strlen("hello world."));
     }
@@ -185,15 +186,15 @@ TEST_F(socket, tcp_local_send_recv) {
     sock.address_reuse(true);
     auto path = "/tmp/cornet.sock";
     EXPECT_TRUE(sock.listen(path).has_value());
-    auto client = co_await sock.accept();
+    auto client = co_await sock.accept(ctx);
     EXPECT_TRUE(client.has_value());
     char buffer[16] = {};
     for (int i = 0; i < 8; ++i) {
-      auto received = co_await client->recv(buffer, sizeof(buffer));
+      auto received = co_await client->recv(ctx, buffer, sizeof(buffer));
       EXPECT_TRUE(received.has_value());
       EXPECT_EQ(*received, (int)strlen("hello world."));
       EXPECT_STREQ(buffer, "hello world.");
-      auto sent = co_await client->send(buffer, strlen(buffer));
+      auto sent = co_await client->send(ctx, buffer, strlen(buffer));
       EXPECT_TRUE(sent.has_value());
       EXPECT_EQ(*sent, (int)strlen("hello world."));
     }
@@ -202,14 +203,14 @@ TEST_F(socket, tcp_local_send_recv) {
   auto connector = [](context_t& ctx) -> coro_t<void> {
     tcp::local::socket_t sock;
     auto path = "/tmp/cornet.sock";
-    auto conn = co_await sock.connect(path);
+    auto conn = co_await sock.connect(ctx, path);
     EXPECT_TRUE(conn.has_value());
     char buffer[16] = "hello world.";
     for (int i = 0; i < 8; ++i) {
-      auto sent = co_await sock.send((void*)buffer, strlen("hello world."));
+      auto sent = co_await sock.send(ctx, (void*)buffer, strlen("hello world."));
       EXPECT_TRUE(sent.has_value());
       EXPECT_EQ(*sent, (int)strlen("hello world."));
-      auto received = co_await sock.recv((void*)buffer, sizeof(buffer));
+      auto received = co_await sock.recv(ctx, (void*)buffer, sizeof(buffer));
       EXPECT_TRUE(received.has_value());
       EXPECT_EQ(*received, (int)strlen("hello world."));
     }
@@ -229,11 +230,11 @@ TEST_F(socket, udpv4_sendto_recvfrom) {
     sockaddr_storage addr{};
     socklen_t len{sizeof(addr)};
     for (int i=0; i<8; ++i) {
-      auto received = co_await sock.recvfrom(buffer, sizeof(buffer), (sockaddr*)&addr, &len);
+      auto received = co_await sock.recvfrom(ctx, buffer, sizeof(buffer), (sockaddr*)&addr, &len);
       EXPECT_TRUE(received.has_value());
       EXPECT_EQ(*received, (int)strlen("hello world."));
       EXPECT_EQ(len, sizeof(sockaddr_in));
-      auto sent = co_await sock.sendto(buffer, strlen(buffer), (sockaddr*)&addr, len);
+      auto sent = co_await sock.sendto(ctx, buffer, strlen(buffer), (sockaddr*)&addr, len);
       EXPECT_TRUE(sent.has_value());
       EXPECT_EQ(*sent, (int)strlen("hello world."));
       len = 0;
@@ -247,10 +248,10 @@ TEST_F(socket, udpv4_sendto_recvfrom) {
     auto socklen = socklen_.value();
     char buffer[16] = {"hello world."};
     for (int i = 0; i < 8; ++i) {
-      auto sent = co_await sock.sendto(buffer, strlen(buffer), (sockaddr*)&addr, socklen);
+      auto sent = co_await sock.sendto(ctx, buffer, strlen(buffer), (sockaddr*)&addr, socklen);
       EXPECT_TRUE(sent.has_value());
       EXPECT_EQ(*sent, (int)strlen("hello world."));
-      auto received = co_await sock.recvfrom(buffer, sizeof(buffer), (sockaddr*)&addr, &socklen);
+      auto received = co_await sock.recvfrom(ctx, buffer, sizeof(buffer), (sockaddr*)&addr, &socklen);
       EXPECT_TRUE(received.has_value());
       EXPECT_EQ(*received, (int)strlen("hello world."));
       EXPECT_EQ(addr.ss_family, AF_INET);
@@ -272,11 +273,11 @@ TEST_F(socket, udpv6_sendto_recvfrom) {
     sockaddr_storage addr{};
     socklen_t len{sizeof(addr)};
     for (int i=0; i<8; ++i) {
-      auto received = co_await sock.recvfrom(buffer, sizeof(buffer), (sockaddr*)&addr, &len);
+      auto received = co_await sock.recvfrom(ctx, buffer, sizeof(buffer), (sockaddr*)&addr, &len);
       EXPECT_TRUE(received.has_value());
       EXPECT_EQ(*received, (int)strlen("hello world."));
       EXPECT_EQ(len, sizeof(sockaddr_in6));
-      auto sent = co_await sock.sendto(buffer, strlen(buffer), (sockaddr*)&addr, len);
+      auto sent = co_await sock.sendto(ctx, buffer, strlen(buffer), (sockaddr*)&addr, len);
       EXPECT_TRUE(sent.has_value());
       EXPECT_EQ(*sent, (int)strlen("hello world."));
       len = 0;
@@ -290,10 +291,10 @@ TEST_F(socket, udpv6_sendto_recvfrom) {
     auto socklen = socklen_.value();
     char buffer[16] = {"hello world."};
     for (int i = 0; i < 8; ++i) {
-      auto sent = co_await sock.sendto(buffer, strlen(buffer), (sockaddr*)&addr, socklen);
+      auto sent = co_await sock.sendto(ctx, buffer, strlen(buffer), (sockaddr*)&addr, socklen);
       EXPECT_TRUE(sent.has_value());
       EXPECT_EQ(*sent, (int)strlen("hello world."));
-      auto received = co_await sock.recvfrom(buffer, sizeof(buffer), (sockaddr*)&addr, &socklen);
+      auto received = co_await sock.recvfrom(ctx, buffer, sizeof(buffer), (sockaddr*)&addr, &socklen);
       EXPECT_TRUE(received.has_value());
       EXPECT_EQ(*received, (int)strlen("hello world."));
       EXPECT_EQ(addr.ss_family, AF_INET6);
@@ -314,11 +315,11 @@ TEST_F(socket, udp_local_sendto_recvfrom) {
     sockaddr_storage addr{};
     socklen_t len{sizeof(sockaddr_un)};
     for (int i=0; i<8; ++i) {
-      auto received = co_await sock.recvfrom(buffer, sizeof(buffer), (sockaddr*)&addr, &len);
+      auto received = co_await sock.recvfrom(ctx, buffer, sizeof(buffer), (sockaddr*)&addr, &len);
       EXPECT_TRUE(received.has_value());
       EXPECT_EQ(*received, (int)strlen("hello world."));
       EXPECT_EQ(len, sizeof(sockaddr_un) - 108 + strlen("/tmp/cornet.client.sock") + 1);
-      auto sent = co_await sock.sendto(buffer, strlen(buffer), (sockaddr*)&addr, len);
+      auto sent = co_await sock.sendto(ctx, buffer, strlen(buffer), (sockaddr*)&addr, len);
       EXPECT_TRUE(sent.has_value());
       EXPECT_EQ(*sent, (int)strlen("hello world."));
       len = 0;
@@ -335,10 +336,10 @@ TEST_F(socket, udp_local_sendto_recvfrom) {
     auto socklen = socklen_.value();
     char buffer[16] = {"hello world."};
     for (int i = 0; i < 8; ++i) {
-      auto sent = co_await sock.sendto(buffer, strlen(buffer), (sockaddr*)&addr, socklen);
+      auto sent = co_await sock.sendto(ctx, buffer, strlen(buffer), (sockaddr*)&addr, socklen);
       EXPECT_TRUE(sent.has_value());
       EXPECT_EQ(*sent, (int)strlen("hello world."));
-      auto received = co_await sock.recvfrom(buffer, sizeof(buffer), (sockaddr*)&addr, &socklen);
+      auto received = co_await sock.recvfrom(ctx, buffer, sizeof(buffer), (sockaddr*)&addr, &socklen);
       EXPECT_TRUE(received.has_value());
       EXPECT_EQ(*received, (int)strlen("hello world."));
       EXPECT_EQ(addr.ss_family, AF_UNIX);
