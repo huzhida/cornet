@@ -1,11 +1,12 @@
 #ifndef CORNET_RUNTIME_H
 #define CORNET_RUNTIME_H
 
-#include "context.h"
+#include "scheduling/context.h"
 #include <thread>
 #include <vector>
 #include <functional>
 #include <atomic>
+#include <mutex>
 
 namespace cornet {
 
@@ -16,7 +17,7 @@ namespace cornet {
  *
  * Usage:
  *   runtime_t rt(4);
- *   rt.start([](context_t& ctx, size_t idx) {
+ *   rt.start([](size_t idx, context_t& ctx) {
  *       // per-thread initialization (e.g., spawn listeners)
  *   });
  *   rt.join();  // blocks until all threads exit
@@ -24,7 +25,7 @@ namespace cornet {
 class runtime_t {
 public:
   /**
-   * @brief construct runtime with specified thread count.
+   * @brief construct runtime with specified thread count and create all context_t instances.
    * @param thread_nr number of worker threads (default: hardware_concurrency)
    */
   explicit runtime_t(size_t thread_nr = std::thread::hardware_concurrency());
@@ -37,12 +38,13 @@ public:
   runtime_t& operator=(runtime_t&&) = delete;
 
   /**
-   * @brief start all worker threads. Each thread initializes its context and calls run().
-   * Blocks until all contexts are initialized (but does NOT wait for run() to finish).
-   * @param init_fn per-thread initialization function called with (context_t&, thread_index)
-   *               before ctx.run(). Used to spawn initial coroutines.
+   * @brief start all worker threads. Each thread calls run().
+   * Blocks until all threads are ready to run.
+   * @param init_fn per-thread initialization function called with (thread_index, context_t&).
+   *                The context for each thread is created by the runtime,
+   *                so it is passed directly to the init_fn.
    */
-  void start(std::function<void(context_t&, size_t)> init_fn);
+  void start(std::function<void(size_t, context_t&)> init_fn);
 
   /**
    * @brief initiate graceful shutdown on all contexts.
@@ -61,31 +63,30 @@ public:
    */
   void join();
 
-  /**
-   * @brief get context by index.
-   * @param index thread/context index [0, thread_nr)
-   * @return pointer to context (nullptr if index out of range)
-   */
-  context_t* context(size_t index) const;
-
-  /**
-   * @brief round-robin select next context for load distribution.
-   * Thread-safe.
-   * @return reference to selected context
-   */
-  context_t& next_context();
 
   /**
    * @brief number of worker threads.
    */
   size_t size() const { return thread_nr_; }
 
+  /**
+   * @brief get the context_t for a specific worker thread.
+   * Must be called after start() and before shutdown().
+   * @param idx thread index (0 <= idx < size())
+   * @return context_t& reference to the context
+   */
+  CORNET_NODISCARD context_t& context_at(size_t idx) const {
+    if (idx >= contexts_.size()) throw std::out_of_range("context_at: idx out of range");
+    return *contexts_[idx];
+  }
+
 private:
   size_t thread_nr_;
   std::atomic<size_t> next_index_{0};
   std::vector<std::thread> workers_;
-  std::vector<context_t*> contexts_;
+  std::vector<std::unique_ptr<context_t>> contexts_;
   std::atomic<bool> stopped_{false};
+  mutable std::mutex mutex_;
 };
 
 } // namespace cornet

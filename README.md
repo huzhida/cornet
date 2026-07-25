@@ -75,7 +75,7 @@ coro_t<void> server() {
     listener.port_reuse(true);
     listener.listen("0.0.0.0", 8080);
 
-    while (!ctx.is_draining()) {
+    while (!ctx.is_shutting_down()) {
         auto client = co_await listener.accept();
         if (!client) continue;
         ctx.spawn(handle_client(std::move(*client)));
@@ -177,22 +177,33 @@ pattern = "%^%L%$ [%Y-%m-%d %T %t %@] %v"
 ```
 cornet/
 ├── include/
-│   ├── core/
-│   │   ├── context.h      # 事件循环核心
+│   ├── base/
+│   │   ├── defines.h      # 宏与工具函数
+│   │   ├── expected.h     # 轻量级 expected 类型
+│   │   ├── metrics.h      # 性能指标
+│   │   └── task.h         # 任务基类
+│   ├── coroutine/
 │   │   ├── coro.h         # 协程包装器 (coro_t / cancelable_coro_t / ccoro_t，CRTP 共享实现)
-│   │   ├── cancel.h       # 取消器与 cancellable_awaiter
+│   │   └── cancel.h       # 取消器与 cancellable_awaiter
+│   ├── io_uring/
+│   │   ├── uring.h        # io_uring 封装
 │   │   ├── utask.h        # io_uring 任务基类
-│   │   ├── socket.h       # TCP/UDP Socket 抽象
-│   │   ├── combinators.h  # when_all/when_any/sleep/timeout/协程级cancel
 │   │   ├── awaiters.h     # 通用 awaiter (close/read/write/nop)
+│   │   ├── io_slot.h      # io_uring user_data 安全管理
+│   │   ├── cancel_io.h    # io_uring 取消操作
+│   │   └── context_cancellation.h  # context 级取消
+│   ├── scheduling/
+│   │   ├── context.h      # 事件循环核心
 │   │   ├── scheduler.h    # 调度器接口与实现 (ring_queue_t 高效就绪队列)
 │   │   ├── executor.h     # 线程池
-│   │   ├── io_slot.h      # io_uring user_data 安全管理
-│   │   └── uring.h        # io_uring 封装
+│   │   └── runtime.h      # 多线程 runtime
+│   ├── concurrency/
+│   │   ├── combinators.h  # when_all/when_any/sleep/timeout/协程级cancel
+│   │   └── scope.h        # 结构化并发 scope
+│   ├── net/
+│   │   └── socket.h       # TCP/UDP Socket 抽象
 │   └── utils/
 │       ├── config.h       # TOML 配置
-│       ├── expected.h     # 轻量级 expected 类型
-│       ├── metrics.h      # 性能指标
 │       └── logging.h      # 日志初始化
 ├── src/                   # 实现文件
 ├── tests/                 # 单元测试

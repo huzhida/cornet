@@ -1,6 +1,6 @@
-#include "core/awaiters.h"
-#include "core/context.h"
-#include "core/combinators.h"
+#include "io_uring/awaiters.h"
+#include "scheduling/context.h"
+#include "concurrency/combinators.h"
 
 #include <gtest/gtest.h>
 #include <fcntl.h>
@@ -13,8 +13,13 @@ using namespace cornet;
 class fs_io : public ::testing::Test {
 protected:
   void SetUp() override {
-    ctx = &context_t::current();
+    ctx = new context_t();
   }
+
+  void TearDown() override {
+    delete ctx;
+  }
+
   context_t* ctx;
 };
 
@@ -22,11 +27,11 @@ TEST_F(fs_io, shutdown_socket) {
   auto test = [](context_t& ctx) -> coro_t<void> {
     int sv[2];
     EXPECT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
-    auto ret = co_await shutdown_awaiter(sv[0], SHUT_WR);
+    auto ret = co_await shutdown_awaiter(ctx, sv[0], SHUT_WR);
     EXPECT_TRUE(ret.has_value());
     // after shutdown write end, read should get EOF
     char buf[1];
-    auto n = co_await read_awaiter(sv[1], buf, 1);
+    auto n = co_await read_awaiter(ctx, sv[1], buf, 1);
     EXPECT_TRUE(n.has_value());
     EXPECT_EQ(*n, 0);
     ::close(sv[0]);
@@ -45,7 +50,7 @@ TEST_F(fs_io, openat_read_close) {
     ::write(fd, "hello", 5);
     ::close(fd);
 
-    auto result = co_await openat_awaiter(AT_FDCWD, path, O_RDONLY);
+    auto result = co_await openat_awaiter(ctx, AT_FDCWD, path, O_RDONLY);
     EXPECT_TRUE(result.has_value());
     if (!result) co_return;
     int afd = *result;
@@ -53,12 +58,12 @@ TEST_F(fs_io, openat_read_close) {
 
     // async read
     char buf[16] = {};
-    auto n = co_await read_awaiter(afd, buf, sizeof(buf));
+    auto n = co_await read_awaiter(ctx, afd, buf, sizeof(buf));
     EXPECT_TRUE(n.has_value());
     EXPECT_EQ(*n, 5);
     EXPECT_STREQ(buf, "hello");
 
-    co_await close_awaiter(afd);
+    co_await close_awaiter(ctx, afd);
     ::unlink(path);
     co_return;
   };
@@ -73,7 +78,7 @@ TEST_F(fs_io, splice_pipe) {
     EXPECT_EQ(pipe(pipe2), 0);
 
     ::write(pipe1[1], "splice", 6);
-    auto n = co_await splice_awaiter(pipe1[0], -1, pipe2[1], -1, 6, 0);
+    auto n = co_await splice_awaiter(ctx, pipe1[0], -1, pipe2[1], -1, 6, 0);
     EXPECT_TRUE(n.has_value());
     EXPECT_EQ(*n, 6);
 
@@ -95,7 +100,7 @@ TEST_F(fs_io, poll_add_readable) {
     EXPECT_EQ(pipe(pipefd), 0);
     ::write(pipefd[1], "x", 1);
 
-    auto mask = co_await poll_add_awaiter(pipefd[0], POLLIN);
+    auto mask = co_await poll_add_awaiter(ctx, pipefd[0], POLLIN);
     EXPECT_TRUE(mask.has_value());
     EXPECT_NE(*mask & POLLIN, 0);
 
@@ -115,7 +120,7 @@ TEST_F(fs_io, statx_file) {
     ::close(fd);
 
     struct statx stx{};
-    auto ret = co_await statx_awaiter(AT_FDCWD, path, 0, STATX_SIZE, &stx);
+    auto ret = co_await statx_awaiter(ctx, AT_FDCWD, path, 0, STATX_SIZE, &stx);
     EXPECT_TRUE(ret.has_value());
     EXPECT_EQ(stx.stx_size, 6u);
 
@@ -130,14 +135,14 @@ TEST_F(fs_io, mkdirat_unlinkat) {
   auto test = [](context_t& ctx) -> coro_t<void> {
     const char* path = "/tmp/cornet_test_mkdir";
 
-    auto ret = co_await mkdirat_awaiter(AT_FDCWD, path, 0755);
+    auto ret = co_await mkdirat_awaiter(ctx, AT_FDCWD, path, 0755);
     EXPECT_TRUE(ret.has_value());
 
     struct stat st{};
     EXPECT_EQ(::stat(path, &st), 0);
     EXPECT_TRUE(S_ISDIR(st.st_mode));
 
-    auto rm = co_await unlinkat_awaiter(AT_FDCWD, path, AT_REMOVEDIR);
+    auto rm = co_await unlinkat_awaiter(ctx, AT_FDCWD, path, AT_REMOVEDIR);
     EXPECT_TRUE(rm.has_value());
 
     EXPECT_NE(::stat(path, &st), 0);
@@ -156,7 +161,7 @@ TEST_F(fs_io, renameat_file) {
     ::write(fd, "data", 4);
     ::close(fd);
 
-    auto ret = co_await renameat_awaiter(AT_FDCWD, old_path, AT_FDCWD, new_path, 0);
+    auto ret = co_await renameat_awaiter(ctx, AT_FDCWD, old_path, AT_FDCWD, new_path, 0);
     EXPECT_TRUE(ret.has_value());
 
     struct stat st{};
@@ -178,7 +183,7 @@ TEST_F(fs_io, fsync_file) {
     if (fd < 0) co_return;
     ::write(fd, "sync", 4);
 
-    auto ret = co_await fsync_awaiter(fd);
+    auto ret = co_await fsync_awaiter(ctx, fd);
     EXPECT_TRUE(ret.has_value());
 
     ::close(fd);

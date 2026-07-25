@@ -5,12 +5,12 @@
 挂起协程指定时长，基于 io_uring timeout 实现（非忙等待）。
 
 ```cpp
-#include "core/combinators.h"
+#include "concurrency/combinators.h"
 using namespace std::chrono_literals;
 
-co_await cornet::sleep(1s);
-co_await cornet::sleep(std::chrono::milliseconds(500));
-co_await cornet::sleep(100ms);
+co_await cornet::sleep(ctx, 1s);
+co_await cornet::sleep(ctx, std::chrono::milliseconds(500));
+co_await cornet::sleep(ctx, 100ms);
 ```
 
 返回 `expected<void>`，正常超时返回成功。
@@ -21,7 +21,7 @@ co_await cornet::sleep(100ms);
 
 ```cpp
 // 5 秒内未收到数据则返回 ETIMEDOUT
-auto result = co_await with_timeout(sock.recv(buf, 4096), 5s);
+auto result = co_await with_timeout(ctx, sock.recv(buf, 4096), 5s);
 if (!result) {
     if (result.error().code == ETIMEDOUT) {
         // 超时
@@ -47,10 +47,10 @@ int bytes = *result;
 `with_timeout` 适用于所有 `utask_t` 派生的 awaiter：
 
 ```cpp
-co_await with_timeout(sock.recv(buf, n), 5s);
-co_await with_timeout(sock.send(buf, n), 3s);
-co_await with_timeout(sock.accept(), 10s);
-co_await with_timeout(close_awaiter(fd), 1s);
+co_await with_timeout(ctx, sock.recv(buf, n), 5s);
+co_await with_timeout(ctx, sock.send(buf, n), 3s);
+co_await with_timeout(ctx, sock.accept(), 10s);
+co_await with_timeout(ctx, close_awaiter(ctx, fd), 1s);
 ```
 
 ## when_all
@@ -58,7 +58,7 @@ co_await with_timeout(close_awaiter(fd), 1s);
 并发执行多个协程，等待 **全部** 完成后返回。
 
 ```cpp
-auto result = co_await when_all(
+auto result = co_await when_all(ctx,
     fetch_data_a(),   // coro_t<int>
     fetch_data_b(),   // coro_t<std::string>
     fetch_data_c()    // coro_t<void>
@@ -90,7 +90,7 @@ when_all_result<Ts...> {
 `when_all` 不会因某个子协程失败而取消其他协程。每个结果独立，调用方逐个检查：
 
 ```cpp
-auto result = co_await when_all(task1(), task2(), task3());
+auto result = co_await when_all(ctx, task1(), task2(), task3());
 for_each_error(result, [](auto& r) {
     if (!r) handle_error(r.error());
 });
@@ -107,7 +107,7 @@ awaiter 析构时自动置空 continuation，防止已销毁的协程被误调�
 并发执行多个协程，**第一个** 完成时立即返回。
 
 ```cpp
-auto result = co_await when_any(
+auto result = co_await when_any(ctx,
     primary_fetch(),    // coro_t<Data>
     fallback_fetch(),   // coro_t<Data>
     timeout_sentinel()  // coro_t<Data>
@@ -141,17 +141,17 @@ when_any_result<Ts...> {
 传入 `canceler_t` 可在第一个完成时自动取消剩余协程的 inflight IO：
 
 ```cpp
-canceler_t canceler;
+canceler_t canceler(ctx);
 
 coro_t<Data> cancellable_fetch(const std::string& url, canceler_t& c) {
     auto sock = co_await connect(url);
-    auto n = co_await with_cancel(sock.recv(buf, 4096), c);
+    auto n = co_await with_cancel(ctx, sock.recv(buf, 4096), c);
     if (!n) co_return Data{};
     co_return parse(buf, *n);
 }
 
 // 第一个完成时，canceler 自动触发，取消其他协程的 IO
-auto result = co_await when_any(canceler,
+auto result = co_await when_any(ctx, canceler,
     cancellable_fetch("server-a", canceler),
     cancellable_fetch("server-b", canceler)
 );
@@ -164,11 +164,11 @@ auto result = co_await when_any(canceler,
 
 ```cpp
 coro_t<Data> timeout_coro() {
-    co_await cornet::sleep(5s);
+    co_await cornet::sleep(ctx, 5s);
     co_return Data{};  // 哨兵值
 }
 
-auto result = co_await when_any(real_work(), timeout_coro());
+auto result = co_await when_any(ctx, real_work(), timeout_coro());
 if (result.index == 1) {
     // 超时
 }
@@ -180,7 +180,7 @@ if (result.index == 1) {
 // 并发请求三个服务，整体超时 10s
 coro_t<void> fetch_with_global_timeout() {
     coro_t<Results> work = []() -> coro_t<Results> {
-        auto r = co_await when_all(
+        auto r = co_await when_all(ctx,
             call_service_a(),
             call_service_b(),
             call_service_c()
@@ -189,11 +189,11 @@ coro_t<void> fetch_with_global_timeout() {
     }();
 
     coro_t<Results> timeout = []() -> coro_t<Results> {
-        co_await cornet::sleep(10s);
+        co_await cornet::sleep(ctx, 10s);
         co_return Results::timeout();
     }();
 
-    auto result = co_await when_any(std::move(work), std::move(timeout));
+    auto result = co_await when_any(ctx, std::move(work), std::move(timeout));
     if (result.index == 1) {
         // 全局超时
     }
@@ -207,17 +207,17 @@ coro_t<void> fetch_with_global_timeout() {
 ### 基本使用
 
 ```cpp
-canceler_t canceler;
+canceler_t canceler(ctx);
 
 coro_t<void> handle_client(tcp::socket_t sock, canceler_t& canceler) {
     char buf[4096];
     while (!canceler.is_cancelled()) {
-        auto n = co_await with_cancel(sock.recv(buf, 4096), canceler);
+        auto n = co_await with_cancel(ctx, sock.recv(buf, 4096), canceler);
         if (!n) {
             if (n.error().code == ECANCELED) break;  // 被取消
             break;  // 其他错误
         }
-        auto sent = co_await with_cancel(sock.send(buf, *n), canceler);
+        auto sent = co_await with_cancel(ctx, sock.send(buf, *n), canceler);
         if (!sent) break;
     }
 }
@@ -234,7 +234,7 @@ canceler.cancel();
 一个 canceler 可以同时关联多个 IO 操作（跨多个协程）。取消时所有关联的 inflight IO 都会收到 cancel：
 
 ```cpp
-canceler_t canceler;
+canceler_t canceler(ctx);
 
 // 协程 A 和 B 共享同一个 canceler
 ctx.spawn(reader(sock1, canceler));
@@ -249,11 +249,11 @@ canceler.cancel();
 子 canceler 在父 canceler 取消时自动传播。子 canceler 析构时从父链表 **O(1) 摘除**（双向链表）：
 
 ```cpp
-canceler_t server_canceler;
+canceler_t server_canceler(ctx);
 
 // 每个客户端一个子 canceler
-canceler_t client1_canceler(server_canceler);
-canceler_t client2_canceler(server_canceler);
+canceler_t client1_canceler(ctx, server_canceler);
+canceler_t client2_canceler(ctx, server_canceler);
 
 // 取消所有客户端（迭代式传播，无递归栈溢出风险）
 server_canceler.cancel();
@@ -272,12 +272,12 @@ server_canceler.cancel();
 ### 重置复用
 
 ```cpp
-canceler_t canceler;
+canceler_t canceler(ctx);
 canceler.cancel();
 // ... 处理完取消逻辑 ...
 
 canceler.reset();  // 可以再次使用
-auto n = co_await with_cancel(sock.recv(buf, 4096), canceler);  // 正常工作
+auto n = co_await with_cancel(ctx, sock.recv(buf, 4096), canceler);  // 正常工作
 ```
 
 ### with_cancel 适用范围
@@ -285,16 +285,16 @@ auto n = co_await with_cancel(sock.recv(buf, 4096), canceler);  // 正常工作
 `with_cancel` 可包装所有 `utask_t` 派生的 awaiter：
 
 ```cpp
-co_await with_cancel(sock.recv(buf, n), canceler);
-co_await with_cancel(sock.send(buf, n), canceler);
-co_await with_cancel(sock.accept(nullptr, nullptr, 0), canceler);
-co_await with_cancel(sleep(5s), canceler);
-co_await with_cancel(close_awaiter(fd), canceler);
+co_await with_cancel(ctx, sock.recv(buf, n), canceler);
+co_await with_cancel(ctx, sock.send(buf, n), canceler);
+co_await with_cancel(ctx, sock.accept(nullptr, nullptr, 0), canceler);
+co_await with_cancel(ctx, sleep(ctx, 5s), canceler);
+co_await with_cancel(ctx, close_awaiter(ctx, fd), canceler);
 ```
 
 ### 协程级 with_cancel
 
-`with_cancel(ccoro_t<V>, canceler)` 将 canceler 注入到协程的 promise 中，使其内部所有 `co_await utask_t` 操作自动获得取消能力（通过 `await_transform`）：
+`with_cancel(ctx, ccoro_t<V>, canceler)` 将 canceler 注入到协程的 promise 中，使其内部所有 `co_await utask_t` 操作自动获得取消能力（通过 `await_transform`）：
 
 ```cpp
 ccoro_t<expected<int>> long_io_task() {
@@ -304,8 +304,8 @@ ccoro_t<expected<int>> long_io_task() {
     co_return n;
 }
 
-canceler_t canceler;
-auto result = co_await with_cancel(long_io_task(), canceler);
+canceler_t canceler(ctx);
+auto result = co_await with_cancel(ctx, long_io_task(), canceler);
 // canceler.cancel() 会取消 long_io_task 内部正在执行的任意 IO
 ```
 
@@ -324,14 +324,14 @@ ccoro_t<expected<void>> outer() {
     co_return {};
 }
 
-canceler_t canceler;
-co_await with_cancel(outer(), canceler);
+canceler_t canceler(ctx);
+co_await with_cancel(ctx, outer(), canceler);
 // cancel 传播: outer → inner → inner 的所有 IO
 ```
 
 ### 协程级 with_timeout
 
-`with_timeout(ccoro_t<V>, duration)` 为整个协程设置超时，内部 IO 在超时后自动取消：
+`with_timeout(ctx, ccoro_t<V>, duration)` 为整个协程设置超时，内部 IO 在超时后自动取消：
 
 ```cpp
 // 返回 expected<T> 的协程：超时时返回 unexpected(ETIMEDOUT)
@@ -341,7 +341,7 @@ ccoro_t<expected<int>> fetch_data() {
     co_return n;
 }
 
-auto result = co_await with_timeout(fetch_data(), 5s);
+auto result = co_await with_timeout(ctx, fetch_data(), 5s);
 if (!result) {
     if (result.error().code == ETIMEDOUT) {
         // 协程整体超时
@@ -362,10 +362,9 @@ if (!result) {
 
 | 协程返回类型 | with_timeout 返回类型 | 超时行为 |
 |---|---|---|
-| `coro_t<expected<T>>` | `ccoro_t<expected<T>>` | 返回 `unexpected(ETIMEDOUT)` |
-| `coro_t<expected<void>>` | `ccoro_t<expected<void>>` | 返回 `unexpected(ETIMEDOUT)` |
-| `coro_t<void>` | `ccoro_t<void>` | 协程被取消，IO 返回 ECANCELED |
-| `coro_t<int>` | `ccoro_t<int>` | 协程被取消，IO 抛异常 |
+| `ccoro_t<expected<T>>` | `ccoro_t<expected<T>>` | 返回 `unexpected(ETIMEDOUT)` |
+| `ccoro_t<expected<void>>` | `ccoro_t<expected<void>>` | 返回 `unexpected(ETIMEDOUT)` |
+| `ccoro_t<void>` | `ccoro_t<void>` | 协程被取消，IO 返回 ECANCELED |
 
 推荐协程返回 `expected<T>` 以获得最佳超时体验（ETIMEDOUT 自动展平）。
 
@@ -397,7 +396,7 @@ if (!result) {
 ### 基本使用
 
 ```cpp
-co_await task_scope([&](scope_t& scope) -> coro_t<void> {
+co_await task_scope(ctx, [&](scope_t& scope) -> coro_t<void> {
     scope.spawn(handle_client(client1));
     scope.spawn(handle_client(client2));
     scope.spawn(handle_client(client3));
@@ -412,7 +411,7 @@ co_await task_scope([&](scope_t& scope) -> coro_t<void> {
 
 ```cpp
 scope.spawn([&data]() -> coro_t<void> {
-    co_await sleep(100ms);
+    co_await sleep(ctx, 100ms);
     data.process();
 });
 ```
@@ -430,7 +429,7 @@ scope.spawn(std::move(task)); // 结果被丢弃
 
 ```cpp
 int result1, result2;
-co_await task_scope([&](scope_t& scope) -> coro_t<void> {
+co_await task_scope(ctx, [&](scope_t& scope) -> coro_t<void> {
     scope.spawn(compute(21), result1);
     scope.spawn(compute(11), result2);
     co_return;
@@ -442,7 +441,7 @@ co_await task_scope([&](scope_t& scope) -> coro_t<void> {
 
 ```cpp
 expected<int> r1, r2;
-co_await task_scope([&](scope_t& scope) -> coro_t<void> {
+co_await task_scope(ctx, [&](scope_t& scope) -> coro_t<void> {
     scope.spawn(may_succeed(), r1);
     scope.spawn(may_fail(), r2);
     co_return;
@@ -454,13 +453,13 @@ if (!r2) { log_error(r2.error()); }
 ### scope 内取消
 
 ```cpp
-co_await task_scope([&](scope_t& scope) -> coro_t<void> {
+co_await task_scope(ctx, [&](scope_t& scope) -> coro_t<void> {
     scope.spawn([&scope]() -> coro_t<void> {
-        auto ret = co_await with_cancel(long_io(), scope.canceler());
+        auto ret = co_await with_cancel(ctx, long_io(), scope.canceler());
         // ret 可能是 ECANCELED
     });
     scope.spawn([&scope]() -> coro_t<void> {
-        co_await sleep(1s);
+        co_await sleep(ctx, 1s);
         scope.cancel();  // 取消 scope 内所有使用 with_cancel 的 IO
     });
     co_return;
@@ -470,17 +469,17 @@ co_await task_scope([&](scope_t& scope) -> coro_t<void> {
 ### 外部取消（父 canceler）
 
 ```cpp
-canceler_t parent;
+canceler_t parent(ctx);
 
 // 外部某处触发取消
 ctx.spawn([&parent]() -> coro_t<void> {
-    co_await sleep(5s);
+    co_await sleep(ctx, 5s);
     parent.cancel();  // 传播到 scope 内部
 }());
 
-co_await task_scope(parent, [&](scope_t& scope) -> coro_t<void> {
+co_await task_scope(ctx, parent, [&](scope_t& scope) -> coro_t<void> {
     scope.spawn([&scope]() -> coro_t<void> {
-        auto ret = co_await with_cancel(very_long_io(), scope.canceler());
+        auto ret = co_await with_cancel(ctx, very_long_io(), scope.canceler());
         // parent.cancel() 传播到 scope.canceler()，此 IO 被取消
     });
     co_return;
@@ -492,7 +491,7 @@ co_await task_scope(parent, [&](scope_t& scope) -> coro_t<void> {
 scope 返回 `expected<void>`：
 
 ```cpp
-auto result = co_await task_scope([&](scope_t& scope) -> coro_t<void> {
+auto result = co_await task_scope(ctx, [&](scope_t& scope) -> coro_t<void> {
     scope.spawn(task_that_throws());
     co_return;
 });
@@ -517,4 +516,3 @@ if (!result) {
 - scope body 本身也是协程，需要 `co_return`
 - `scope.spawn` 只能在 body 内调用（scope 退出后不可再 spawn）
 - task_scope 内部使用 `unique_ptr<scope_t>` 管理 scope 生命周期
-

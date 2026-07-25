@@ -1,5 +1,5 @@
-#include "core/context.h"
-#include "core/combinators.h"
+#include "scheduling/context.h"
+#include "concurrency/combinators.h"
 
 #include <gtest/gtest.h>
 
@@ -8,7 +8,11 @@ using namespace cornet;
 class generic_io : public ::testing::Test {
 protected:
   void SetUp() override {
-    ctx = &context_t::current();
+    ctx = new context_t();
+  }
+
+  void TearDown() override {
+    delete ctx;
   }
 
   context_t* ctx;

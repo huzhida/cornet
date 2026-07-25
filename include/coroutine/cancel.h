@@ -2,9 +2,10 @@
 #define CORNET_CANCEL_H
 
 #include <coroutine>
-#include "utask.h"
-#include "utils/expected.h"
-#include "utils/defines.h"
+#include "io_uring/utask.h"
+#include "base/expected.h"
+#include "base/defines.h"
+#include "io_uring/cancel_io.h"
 
 namespace cornet {
 
@@ -44,10 +45,22 @@ struct cancellable_awaiter;
  *   parent.cancel();  // propagates to child
  */
 struct canceler_t {
-  canceler_t();
+  /**
+   * @brief construct a root canceler (no parent).
+   * The context must be passed explicitly — no global context lookup.
+   */
+  explicit canceler_t(context_t& ctx)
+    : io_() {
+    io_.ctx_ = &ctx;
+  }
 
-  explicit canceler_t(canceler_t& parent)
-    : ctx_(parent.ctx_), parent_(&parent) {
+  /**
+   * @brief construct a child canceler with a parent canceler.
+   * The context must be passed explicitly — no global context lookup.
+   */
+  explicit canceler_t(context_t& ctx, canceler_t& parent)
+    : parent_(&parent), io_() {
+    io_.ctx_ = &ctx;  // Each canceler should have its own context, not inherit from parent
     next_sibling_ = parent.first_child_;
     if (next_sibling_) {
       next_sibling_->prev_sibling_ = this;
@@ -86,62 +99,22 @@ struct canceler_t {
   CORNET_NODISCARD bool is_cancelled() const { return cancelled_; }
 
   expected<void> reset() {
-    if (active_head_) {
+    if (io_.active_head_) {
       return unexpected(EBUSY);
     }
     cancelled_ = false;
     return {};
   }
 
-  void link_node(cancel_node* node) {
-    node->prev = nullptr;
-    node->next = active_head_;
-    if (active_head_) {
-      active_head_->prev = node;
-    }
-    active_head_ = node;
-  }
-
-  void unlink_node(cancel_node* node) {
-    if (node->prev) {
-      node->prev->next = node->next;
-    } else {
-      active_head_ = node->next;
-    }
-    if (node->next) {
-      node->next->prev = node->prev;
-    }
-    node->prev = node->next = nullptr;
-  }
+  void link_node(cancel_node* node) { io_.link_node(node); }
+  void unlink_node(cancel_node* node) { io_.unlink_node(node); }
 
 private:
+  void cancel_subtree();
   void cancel_active_tasks();
 
-  void cancel_subtree() {
-    canceler_t* current = this;
-    while (current) {
-      if (!current->cancelled_) {
-        current->cancelled_ = true;
-        current->cancel_active_tasks();
-      }
-      if (current->first_child_) {
-        current = current->first_child_;
-      } else {
-        while (current && current != this) {
-          if (current->next_sibling_) {
-            current = current->next_sibling_;
-            break;
-          }
-          current = current->parent_;
-        }
-        if (current == this) break;
-      }
-    }
-  }
-
   bool cancelled_{false};
-  cancel_node* active_head_{nullptr};
-  context_t* ctx_{nullptr};
+  canceler_io_t io_;
   canceler_t* parent_{nullptr};
   canceler_t* first_child_{nullptr};
   canceler_t* next_sibling_{nullptr};
@@ -197,7 +170,7 @@ struct cancellable_awaiter {
 };
 
 template<typename Awaitable>
-cancellable_awaiter<Awaitable> with_cancel(Awaitable op, canceler_t& canceler) {
+cancellable_awaiter<Awaitable> with_cancel(context_t& ctx, Awaitable op, canceler_t& canceler) {
   return {std::move(op), &canceler};
 }
 

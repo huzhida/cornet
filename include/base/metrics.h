@@ -2,6 +2,8 @@
 #define CORNET_METRICS_H
 
 #include <cstdint>
+
+#ifdef CORNET_METRICS
 #include <chrono>
 #include <algorithm>
 #include <string>
@@ -133,5 +135,50 @@ struct context_metrics_t {
 };
 
 } // namespace cornet
+#else
+namespace cornet {
+
+// Zero-overhead stubs when CORNET_METRICS is disabled.
+// These preserve the same API surface so callers don't need #ifdef everywhere.
+
+struct latency_stats_t {
+  void record(uint64_t) {}
+  uint64_t avg_us() const { return 0; }
+  void reset() {}
+};
+
+struct scoped_timer_t {
+  scoped_timer_t(latency_stats_t*) {}
+  ~scoped_timer_t() = default;
+};
+
+struct context_metrics_t {
+  uint64_t submit_calls{0};
+  uint64_t submit_sqes{0};
+  uint64_t submit_failures{0};
+  latency_stats_t submit_latency;
+  uint64_t wait_calls{0};
+  uint64_t wait_timeouts{0};
+  uint64_t wait_cqes_processed{0};
+  latency_stats_t wait_latency;
+  uint64_t peek_calls{0};
+  uint64_t peek_empty{0};
+  uint64_t peek_cqes_processed{0};
+  uint64_t get_sqe_calls{0};
+  uint64_t get_sqe_submit_forced{0};
+  uint64_t sched_cycles{0};
+  uint64_t tasks_resumed{0};
+  latency_stats_t sched_latency;
+  uint64_t slot_allocs{0};
+  uint64_t slot_frees{0};
+  uint64_t slot_stale_cqes{0};
+  uint64_t tasks_completed{0};
+  uint64_t tasks_failed{0};
+  void reset() { *this = context_metrics_t{}; }
+  void dump(FILE* = nullptr) const {}
+};
+
+} // namespace cornet
+#endif
 
 #endif //CORNET_METRICS_H

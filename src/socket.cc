@@ -1,5 +1,5 @@
-#include "core/socket.h"
-#include "core/combinators.h"
+#include "net/socket.h"
+#include "concurrency/combinators.h"
 
 namespace cornet {
 
@@ -39,8 +39,7 @@ expected<socklen_t> to_address(std::string_view path, sockaddr_storage& addr) {
   return sizeof(sockaddr_un);
 }
 
-coro_t<expected<resolved_address>> resolve(std::string_view host, uint16_t port, int family, int type) {
-  auto& ctx = context_t::current();
+coro_t<expected<resolved_address>> resolve(context_t& ctx, std::string_view host, uint16_t port, int family, int type) {
   std::string host_str(host);
   std::string port_str = std::to_string(port);
 
@@ -76,7 +75,7 @@ socket_t::socket_t(int fd) : fd(fd) {
 }
 socket_t::~socket_t() {
   if (fd != -1) {
-    async_close(fd);
+    ::close(fd);
     fd = -1;
   }
 }
@@ -89,12 +88,7 @@ socket_t::socket_t(socket_t&& s) noexcept {
 socket_t& socket_t::operator=(socket_t&& s) noexcept {
   if (this != &s) {
     if (this->fd != -1) {
-      auto& ctx = context_t::current();
-      if (std::this_thread::get_id() == ctx.owner_thread()) {
-        async_close(this->fd);
-      } else {
-        ::close(this->fd);
-      }
+      ::close(this->fd);
     }
     this->fd = s.fd;
     s.fd = -1;
@@ -113,18 +107,18 @@ void socket_t::port_reuse(bool on) const {
   setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, (void*)&reuse, sizeof(reuse));
 }
 
-socket_t::accept_awaiter::accept_awaiter(int fd, sockaddr* addr, socklen_t* len, int flag)
+socket_t::accept_awaiter::accept_awaiter(context_t& ctx, int fd, sockaddr* addr, socklen_t* len, int flag)
   : fd_(fd), addr_(addr), addr_len_(len), flag_(flag) {
-  this->ctx = &context_t::current();
+  this->ctx = &ctx;
   this->prepare_fn = [](utask_t* self, io_uring_sqe* sqe) {
     auto* t = static_cast<accept_awaiter*>(self);
     io_uring_prep_accept(sqe, t->fd_, t->addr_, t->addr_len_, t->flag_);
   };
 }
 
-socket_t::connect_awaiter::connect_awaiter(int fd, std::string_view ip, uint16_t port, int domain, int type)
+socket_t::connect_awaiter::connect_awaiter(context_t& ctx, int fd, std::string_view ip, uint16_t port, int domain, int type)
   : fd_(fd) {
-  this->ctx = &context_t::current();
+  this->ctx = &ctx;
   auto socklen = to_address(ip, port, addr, domain, type, AI_ADDRCONFIG | AI_V4MAPPED);
   if (!socklen) {
     this->completed = true;
@@ -137,9 +131,9 @@ socket_t::connect_awaiter::connect_awaiter(int fd, std::string_view ip, uint16_t
     io_uring_prep_connect(sqe, t->fd_, (sockaddr*)&t->addr, t->socklen_);
   };
 }
-socket_t::connect_awaiter::connect_awaiter(int fd, std::string_view path)
+socket_t::connect_awaiter::connect_awaiter(context_t& ctx, int fd, std::string_view path)
   : fd_(fd) {
-  this->ctx = &context_t::current();
+  this->ctx = &ctx;
   auto socklen = to_address(path, addr);
   if (!socklen) {
     this->completed = true;
@@ -153,9 +147,9 @@ socket_t::connect_awaiter::connect_awaiter(int fd, std::string_view path)
   };
 }
 
-socket_t::connect_awaiter::connect_awaiter(int fd, const resolved_address& resolved)
+socket_t::connect_awaiter::connect_awaiter(context_t& ctx, int fd, const resolved_address& resolved)
   : fd_(fd) {
-  this->ctx = &context_t::current();
+  this->ctx = &ctx;
   addr = resolved.addr;
   socklen_ = resolved.socklen;
   this->prepare_fn = [](utask_t* self, io_uring_sqe* sqe) {
@@ -164,45 +158,45 @@ socket_t::connect_awaiter::connect_awaiter(int fd, const resolved_address& resol
   };
 }
 
-socket_t::recv_awaiter::recv_awaiter(int fd, void* buf, size_t nbytes, int flag)
+socket_t::recv_awaiter::recv_awaiter(context_t& ctx, int fd, void* buf, size_t nbytes, int flag)
   : fd_(fd), buf_(buf), nbytes_(nbytes), flag_(flag) {
-  this->ctx = &context_t::current();
+  this->ctx = &ctx;
   this->prepare_fn = [](utask_t* self, io_uring_sqe* sqe) {
     auto* t = static_cast<recv_awaiter*>(self);
     io_uring_prep_recv(sqe, t->fd_, t->buf_, t->nbytes_, t->flag_);
   };
 }
 
-socket_t::send_awaiter::send_awaiter(int fd, const void* buf, size_t nbytes, int flag)
+socket_t::send_awaiter::send_awaiter(context_t& ctx, int fd, const void* buf, size_t nbytes, int flag)
   : fd_(fd), buf_(buf), nbytes_(nbytes), flag_(flag) {
-  this->ctx = &context_t::current();
+  this->ctx = &ctx;
   this->prepare_fn = [](utask_t* self, io_uring_sqe* sqe) {
     auto* t = static_cast<send_awaiter*>(self);
     io_uring_prep_send(sqe, t->fd_, t->buf_, t->nbytes_, t->flag_);
   };
 }
 
-socket_t::sendmsg_awaiter::sendmsg_awaiter(int fd, struct msghdr *msg, int flags)
+socket_t::sendmsg_awaiter::sendmsg_awaiter(context_t& ctx, int fd, struct msghdr *msg, int flags)
   : fd_(fd), msg_(msg), flags_(flags) {
-  this->ctx = &context_t::current();
+  this->ctx = &ctx;
   this->prepare_fn = [](utask_t* self, io_uring_sqe* sqe) {
     auto* t = static_cast<sendmsg_awaiter*>(self);
     io_uring_prep_sendmsg(sqe, t->fd_, t->msg_, t->flags_);
   };
 }
 
-socket_t::recvmsg_awaiter::recvmsg_awaiter(int fd, struct msghdr *msg, int flags)
+socket_t::recvmsg_awaiter::recvmsg_awaiter(context_t& ctx, int fd, struct msghdr *msg, int flags)
   : fd_(fd), msg_(msg), flags_(flags) {
-  this->ctx = &context_t::current();
+  this->ctx = &ctx;
   this->prepare_fn = [](utask_t* self, io_uring_sqe* sqe) {
     auto* t = static_cast<recvmsg_awaiter*>(self);
     io_uring_prep_recvmsg(sqe, t->fd_, t->msg_, t->flags_);
   };
 }
 
-socket_t::sendto_awaiter::sendto_awaiter(int fd, void* buf, size_t nbytes, sockaddr* addr, socklen_t socklen, int flag)
+socket_t::sendto_awaiter::sendto_awaiter(context_t& ctx, int fd, void* buf, size_t nbytes, sockaddr* addr, socklen_t socklen, int flag)
   : fd_(fd), flag_(flag) {
-  this->ctx = &context_t::current();
+  this->ctx = &ctx;
   iov_ = {buf, nbytes};
   msg_ = {};
   msg_.msg_name = addr;
@@ -216,9 +210,9 @@ socket_t::sendto_awaiter::sendto_awaiter(int fd, void* buf, size_t nbytes, socka
   };
 }
 
-socket_t::recvfrom_awaiter::recvfrom_awaiter(int fd, void* buf, size_t nbytes, sockaddr* addr, socklen_t* socklen, int flag)
+socket_t::recvfrom_awaiter::recvfrom_awaiter(context_t& ctx, int fd, void* buf, size_t nbytes, sockaddr* addr, socklen_t* socklen, int flag)
   : fd_(fd), user_socklen_(socklen), flag_(flag) {
-  this->ctx = &context_t::current();
+  this->ctx = &ctx;
   iov_ = {buf, nbytes};
   msg_ = {};
   msg_.msg_name = addr;
@@ -232,58 +226,58 @@ socket_t::recvfrom_awaiter::recvfrom_awaiter(int fd, void* buf, size_t nbytes, s
   };
 }
 
-cornet::close_awaiter socket_t::close() {
-  auto awaiter = close_awaiter{fd};
+cornet::close_awaiter socket_t::close(context_t& ctx) {
+  close_awaiter awaiter{ctx, fd};
   fd = -1;
   return awaiter;
 }
-cornet::shutdown_awaiter socket_t::shutdown(int how) const {
-  return shutdown_awaiter{fd, how};
+cornet::shutdown_awaiter socket_t::shutdown(context_t& ctx, int how) const {
+  return shutdown_awaiter{ctx, fd, how};
 }
-ccoro_t<expected<void>> socket_t::connect(std::string_view host, uint16_t port) const {
+ccoro_t<expected<void>> socket_t::connect(context_t& ctx, std::string_view host, uint16_t port) const {
   // fast path: numeric IP address, no DNS needed
   resolved_address fast{};
   auto socklen = to_address(host, port, fast.addr, domain, type, AI_NUMERICHOST);
   if (socklen) {
     fast.socklen = socklen.value();
-    co_return co_await connect(fast);
+    co_return co_await connect(ctx, fast);
   }
 
   // slow path: hostname, async DNS resolve via thread pool
-  auto resolved = co_await resolve(host, port, domain, type);
+  auto resolved = co_await resolve(ctx, host, port, domain, type);
   if (!resolved) {
     co_return unexpected(resolved.error());
   }
-  co_return co_await connect(*resolved);
+  co_return co_await connect(ctx, *resolved);
 }
 
-coro_t<expected<void>> socket_t::connect(std::string_view host, uint16_t port, canceler_t& canceler) const {
+coro_t<expected<void>> socket_t::connect(context_t& ctx, std::string_view host, uint16_t port, canceler_t& canceler) const {
   // fast path: numeric IP address, no DNS needed
   resolved_address fast{};
   auto socklen = to_address(host, port, fast.addr, domain, type, AI_NUMERICHOST);
   if (socklen) {
     fast.socklen = socklen.value();
-    co_return co_await with_cancel(connect(fast), canceler);
+    co_return co_await with_cancel(ctx, connect(ctx, fast), canceler);
   }
 
   // slow path: hostname, async DNS resolve via thread pool
-  auto resolved = co_await resolve(host, port, domain, type);
+  auto resolved = co_await resolve(ctx, host, port, domain, type);
   if (!resolved) {
     co_return unexpected(resolved.error());
   }
   if (canceler.is_cancelled()) {
     co_return unexpected(ECANCELED);
   }
-  co_return co_await with_cancel(connect(*resolved), canceler);
+  co_return co_await with_cancel(ctx, connect(ctx, *resolved), canceler);
 }
-socket_t::connect_awaiter socket_t::connect(const resolved_address& resolved) const {
-  return connect_awaiter{fd, resolved};
+socket_t::connect_awaiter socket_t::connect(context_t& ctx, const resolved_address& resolved) const {
+  return connect_awaiter{ctx, fd, resolved};
 }
-socket_t::recv_awaiter socket_t::recv(void* buf, size_t nbytes, int flag) const {
-  return recv_awaiter{fd, buf, nbytes, flag};
+socket_t::recv_awaiter socket_t::recv(context_t& ctx, void* buf, size_t nbytes, int flag) const {
+  return recv_awaiter{ctx, fd, buf, nbytes, flag};
 }
-socket_t::send_awaiter socket_t::send(const void* buf, size_t nbytes, int flag) const {
-  return send_awaiter{fd, buf, nbytes, flag};
+socket_t::send_awaiter socket_t::send(context_t& ctx, const void* buf, size_t nbytes, int flag) const {
+  return send_awaiter{ctx, fd, buf, nbytes, flag};
 }
 expected<void> socket_t::bind(std::string_view address, uint16_t port) const {
   sockaddr_storage addr{};
@@ -322,19 +316,19 @@ expected<void> socket_t::listen(std::string_view address, uint16_t port) const {
   }
   return {};
 }
-socket_t::tcp_accept_awaiter::tcp_accept_awaiter(int fd, int flag)
+socket_t::tcp_accept_awaiter::tcp_accept_awaiter(context_t& ctx, int fd, int flag)
   : fd_(fd), flag_(flag) {
-  this->ctx = &context_t::current();
+  this->ctx = &ctx;
   this->prepare_fn = [](utask_t* self, io_uring_sqe* sqe) {
     auto* t = static_cast<tcp_accept_awaiter*>(self);
     io_uring_prep_accept(sqe, t->fd_, (sockaddr*)&t->addr_, &t->len_, t->flag_);
   };
 }
-socket_t::accept_awaiter socket_t::accept(sockaddr* addr, socklen_t* socklen, int flag) const {
-  return accept_awaiter{fd, addr, socklen, flag};
+socket_t::accept_awaiter socket_t::accept(context_t& ctx, sockaddr* addr, socklen_t* socklen, int flag) const {
+  return accept_awaiter{ctx, fd, addr, socklen, flag};
 }
-socket_t::tcp_accept_awaiter socket_t::accept(int flag) const {
-  return tcp_accept_awaiter{fd, flag};
+socket_t::tcp_accept_awaiter socket_t::accept(context_t& ctx, int flag) const {
+  return tcp_accept_awaiter{ctx, fd, flag};
 }
 } // cornet::tcp
 
@@ -343,17 +337,17 @@ socket_t::socket_t(int fd) : cornet::socket_t(fd) {
   type = SOCK_DGRAM;
   protocol = IPPROTO_UDP;
 }
-socket_t::sendto_awaiter socket_t::sendto(void *buf, size_t nbytes, sockaddr *addr, socklen_t socklen, int flag) const {
-  return sendto_awaiter{fd, buf, nbytes, addr, socklen, flag};
+socket_t::sendto_awaiter socket_t::sendto(context_t& ctx, void *buf, size_t nbytes, sockaddr *addr, socklen_t socklen, int flag) const {
+  return sendto_awaiter{ctx, fd, buf, nbytes, addr, socklen, flag};
 }
-socket_t::recvfrom_awaiter socket_t::recvfrom(void *buf, size_t nbytes, sockaddr *addr, socklen_t *socklen, int flag) const {
-  return recvfrom_awaiter{fd, buf, nbytes, addr, socklen, flag};
+socket_t::recvfrom_awaiter socket_t::recvfrom(context_t& ctx, void *buf, size_t nbytes, sockaddr *addr, socklen_t *socklen, int flag) const {
+  return recvfrom_awaiter{ctx, fd, buf, nbytes, addr, socklen, flag};
 }
-socket_t::sendmsg_awaiter socket_t::sendmsg(struct msghdr *msg, int flags) const {
-  return sendmsg_awaiter{fd, msg, flags};
+socket_t::sendmsg_awaiter socket_t::sendmsg(context_t& ctx, struct msghdr *msg, int flags) const {
+  return sendmsg_awaiter{ctx, fd, msg, flags};
 }
-socket_t::recvmsg_awaiter socket_t::recvmsg(struct msghdr *msg, int flags) const {
-  return recvmsg_awaiter{fd, msg, flags};
+socket_t::recvmsg_awaiter socket_t::recvmsg(context_t& ctx, struct msghdr *msg, int flags) const {
+  return recvmsg_awaiter{ctx, fd, msg, flags};
 }
 } // cornet::udp
 } // cornet

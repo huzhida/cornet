@@ -2,7 +2,9 @@
 
 ## 概述
 
-`include/core/awaiters.h` 提供不依赖 socket 的通用 io_uring awaiter。
+`include/io_uring/awaiters.h` 提供不依赖 socket 的通用 io_uring awaiter。
+
+所有 awaiter 和 `async_*` 便捷函数都接受 `context_t& ctx` 作为第一个参数，用于获取 io_uring 上下文。
 
 ## close_awaiter
 
@@ -10,23 +12,17 @@
 
 ```cpp
 // 协程中使用（等待关闭完成）
-co_await close_awaiter(fd);
+co_await close_awaiter(ctx, fd);
 ```
 
 返回 `expected<void>`。
 
 ## async_close
 
-Fire-and-forget 异步关闭。自动根据 context 状态选择策略：
-
-- context 正常运行（Running）→ 通过 `io_detach` 异步关闭，下次 flush_io 提交
-- context 非正常运行（Draining/Canceling/Terminating/Terminated）或非 owner 线程调用 → 降级为同步 `::close(fd)`
-
-降级条件使用 `is_draining()`（state != Running），避免在关闭流程中 io_detach 的 SQE 被
-`cancel_pending_io` 取消导致 fd 泄漏。
+Fire-and-forget 异步关闭。通过 `io_detach` 直接提交 SQE，无需等待 CQE。
 
 ```cpp
-async_close(fd);  // 无需 co_await，fire-and-forget
+async_close(ctx, fd);  // 无需 co_await，fire-and-forget
 ```
 
 ## read_awaiter
@@ -35,13 +31,14 @@ async_close(fd);  // 无需 co_await，fire-and-forget
 
 ```cpp
 char buf[4096];
-auto n = co_await read_awaiter(fd, buf, sizeof(buf), /*offset=*/0);
+auto n = co_await read_awaiter(ctx, fd, buf, sizeof(buf), /*offset=*/0);
 if (n) {
     int bytes_read = *n;
 }
 ```
 
 参数：
+- `ctx` — context 实例
 - `fd` — 文件描述符
 - `buf` — 读缓冲区
 - `nbytes` — 最大读取字节数
@@ -54,7 +51,7 @@ if (n) {
 异步写文件/设备。
 
 ```cpp
-auto n = co_await write_awaiter(fd, data, len, /*offset=*/0);
+auto n = co_await write_awaiter(ctx, fd, data, len, /*offset=*/0);
 if (n) {
     int bytes_written = *n;
 }
@@ -67,7 +64,7 @@ if (n) {
 io_uring NOP 操作，用于测试或流水线占位。
 
 ```cpp
-co_await nop_awaiter();
+co_await nop_awaiter(ctx);
 ```
 
 返回 `expected<void>`。
@@ -88,9 +85,9 @@ auto ret = co_await ctx.io([fd, buf, n](io_uring_sqe* sqe) {
 异步半关闭 socket。
 
 ```cpp
-co_await shutdown_awaiter(fd, SHUT_WR);   // 关闭写端
-co_await shutdown_awaiter(fd, SHUT_RD);   // 关闭读端
-co_await shutdown_awaiter(fd, SHUT_RDWR); // 关闭读写
+co_await shutdown_awaiter(ctx, fd, SHUT_WR);   // 关闭写端
+co_await shutdown_awaiter(ctx, fd, SHUT_RD);   // 关闭读端
+co_await shutdown_awaiter(ctx, fd, SHUT_RDWR); // 关闭读写
 ```
 
 返回 `expected<void>`。
@@ -101,13 +98,14 @@ co_await shutdown_awaiter(fd, SHUT_RDWR); // 关闭读写
 
 ```cpp
 // 打开已有文件
-auto fd = co_await openat_awaiter(AT_FDCWD, "/path/to/file", O_RDONLY);
+auto fd = co_await openat_awaiter(ctx, AT_FDCWD, "/path/to/file", O_RDONLY);
 
 // 创建新文件
-auto fd = co_await openat_awaiter(AT_FDCWD, "/tmp/out.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+auto fd = co_await openat_awaiter(ctx, AT_FDCWD, "/tmp/out.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
 ```
 
 参数：
+- `ctx` — context 实例
 - `dirfd` — 目录 fd（`AT_FDCWD` 表示当前目录）
 - `path` — 文件路径
 - `flags` — open flags（O_RDONLY, O_WRONLY, O_CREAT 等）
@@ -124,13 +122,14 @@ int pipefd[2];
 pipe(pipefd);
 
 // file → pipe
-auto n = co_await splice_awaiter(file_fd, file_offset, pipefd[1], -1, 4096, SPLICE_F_MOVE);
+auto n = co_await splice_awaiter(ctx, file_fd, file_offset, pipefd[1], -1, 4096, SPLICE_F_MOVE);
 
 // pipe → socket
-co_await splice_awaiter(pipefd[0], -1, socket_fd, -1, *n, SPLICE_F_MOVE);
+co_await splice_awaiter(ctx, pipefd[0], -1, socket_fd, -1, *n, SPLICE_F_MOVE);
 ```
 
 参数：
+- `ctx` — context 实例
 - `fd_in` / `fd_out` — 源/目标 fd
 - `off_in` / `off_out` — 偏移（-1 表示用 fd 当前偏移，pipe 必须传 -1）
 - `nbytes` — 传输字节数
@@ -144,13 +143,13 @@ co_await splice_awaiter(pipefd[0], -1, socket_fd, -1, *n, SPLICE_F_MOVE);
 
 ```cpp
 // 把文件内容零拷贝发给 socket（等效 sendfile）
-auto total = co_await splice_forward(file_fd, socket_fd);
+auto total = co_await splice_forward(ctx, file_fd, socket_fd);
 
 // 自定义 chunk 大小
-auto total = co_await splice_forward(fd_in, fd_out, 131072);
+auto total = co_await splice_forward(ctx, fd_in, fd_out, 131072);
 ```
 
-返回 `expected<size_t>`（总传输字节数）。
+返回 `coro_t<expected<size_t>>`（总传输字节数）。
 
 ## poll_add_awaiter
 
@@ -158,10 +157,10 @@ auto total = co_await splice_forward(fd_in, fd_out, 131072);
 
 ```cpp
 // 等待可读
-auto mask = co_await poll_add_awaiter(eventfd, POLLIN);
+auto mask = co_await poll_add_awaiter(ctx, eventfd, POLLIN);
 
 // 等待可写
-auto mask = co_await poll_add_awaiter(fd, POLLOUT);
+auto mask = co_await poll_add_awaiter(ctx, fd, POLLOUT);
 ```
 
 返回 `expected<int>`（触发的事件 mask）。
@@ -172,7 +171,7 @@ auto mask = co_await poll_add_awaiter(fd, POLLOUT);
 
 ```cpp
 struct statx stx{};
-co_await statx_awaiter(AT_FDCWD, "/path/to/file", 0, STATX_ALL, &stx);
+co_await statx_awaiter(ctx, AT_FDCWD, "/path/to/file", 0, STATX_ALL, &stx);
 // stx.stx_size, stx.stx_mode 等
 ```
 
@@ -184,10 +183,10 @@ co_await statx_awaiter(AT_FDCWD, "/path/to/file", 0, STATX_ALL, &stx);
 
 ```cpp
 // 删除文件
-co_await unlinkat_awaiter(AT_FDCWD, "/tmp/file.txt", 0);
+co_await unlinkat_awaiter(ctx, AT_FDCWD, "/tmp/file.txt", 0);
 
 // 删除空目录
-co_await unlinkat_awaiter(AT_FDCWD, "/tmp/dir", AT_REMOVEDIR);
+co_await unlinkat_awaiter(ctx, AT_FDCWD, "/tmp/dir", AT_REMOVEDIR);
 ```
 
 返回 `expected<void>`。
@@ -197,7 +196,7 @@ co_await unlinkat_awaiter(AT_FDCWD, "/tmp/dir", AT_REMOVEDIR);
 异步重命名/移动文件。
 
 ```cpp
-co_await renameat_awaiter(AT_FDCWD, "/tmp/old.txt", AT_FDCWD, "/tmp/new.txt", 0);
+co_await renameat_awaiter(ctx, AT_FDCWD, "/tmp/old.txt", AT_FDCWD, "/tmp/new.txt", 0);
 ```
 
 返回 `expected<void>`。
@@ -207,7 +206,7 @@ co_await renameat_awaiter(AT_FDCWD, "/tmp/old.txt", AT_FDCWD, "/tmp/new.txt", 0)
 异步创建目录。
 
 ```cpp
-co_await mkdirat_awaiter(AT_FDCWD, "/tmp/newdir", 0755);
+co_await mkdirat_awaiter(ctx, AT_FDCWD, "/tmp/newdir", 0755);
 ```
 
 返回 `expected<void>`。
@@ -218,39 +217,39 @@ co_await mkdirat_awaiter(AT_FDCWD, "/tmp/newdir", 0755);
 
 ```cpp
 // 完整 fsync
-co_await fsync_awaiter(fd);
+co_await fsync_awaiter(ctx, fd);
 
 // 仅同步数据（不含元数据），等效 fdatasync
-co_await fsync_awaiter(fd, IORING_FSYNC_DATASYNC);
+co_await fsync_awaiter(ctx, fd, IORING_FSYNC_DATASYNC);
 ```
 
 返回 `expected<void>`。
 
 ## async_* 便捷函数
 
-所有 awaiter 都有对应的 `async_*` 自由函数包装，省去 `AT_FDCWD` 等样板参数：
+所有 awaiter 都有对应的 `async_*` 自由函数包装，省去 `AT_FDCWD` 等样板参数。所有便捷函数都以 `context_t& ctx` 作为第一个参数：
 
 ```cpp
 // 文件操作
-auto fd = co_await async_open("/path/to/file", O_RDONLY);
-auto n  = co_await async_read(fd, buf, sizeof(buf));
-auto w  = co_await async_write(fd, data, len);
-co_await async_fsync(fd);
-async_close(fd);
+auto fd = co_await async_open(ctx, "/path/to/file", O_RDONLY);
+auto n  = co_await async_read(ctx, fd, buf, sizeof(buf));
+auto w  = co_await async_write(ctx, fd, data, len);
+co_await async_fsync(ctx, fd);
+async_close(ctx, fd);
 
 // 文件系统
 struct statx stx{};
-co_await async_statx("/path", STATX_ALL, &stx);
-co_await async_mkdir("/tmp/newdir");
-co_await async_rename("/tmp/old.txt", "/tmp/new.txt");
-co_await async_unlink("/tmp/file.txt");
+co_await async_statx(ctx, "/path", STATX_ALL, &stx);
+co_await async_mkdir(ctx, "/tmp/newdir");
+co_await async_rename(ctx, "/tmp/old.txt", "/tmp/new.txt");
+co_await async_unlink(ctx, "/tmp/file.txt");
 
 // 网络
-co_await async_shutdown(sock_fd, SHUT_WR);
-auto mask = co_await async_poll(fd, POLLIN);
+co_await async_shutdown(ctx, sock_fd, SHUT_WR);
+auto mask = co_await async_poll(ctx, fd, POLLIN);
 
 // 零拷贝
-auto n = co_await async_splice(fd_in, -1, fd_out, -1, 4096);
+auto n = co_await async_splice(ctx, fd_in, -1, fd_out, -1, 4096);
 ```
 
 ## 自定义 Awaiter
@@ -262,8 +261,8 @@ struct my_awaiter : utask_t {
     int fd_;
     // ... 其他参数
 
-    my_awaiter(int fd, ...) : fd_(fd) {
-        this->ctx = &context_t::current();
+    my_awaiter(context_t& ctx, int fd, ...) : fd_(fd) {
+        this->ctx = &ctx;
         this->prepare_fn = [](utask_t* self, io_uring_sqe* sqe) {
             auto* t = static_cast<my_awaiter*>(self);
             // 用 liburing API 填充 sqe

@@ -1,5 +1,5 @@
-#include "core/io_slot.h"
-#include "core/utask.h"
+#include "io_uring/io_slot.h"
+#include "io_uring/utask.h"
 
 #include <gtest/gtest.h>
 

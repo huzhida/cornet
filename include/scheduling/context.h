@@ -1,22 +1,22 @@
 #ifndef CORNET_CONTEXT_H
 #define CORNET_CONTEXT_H
 
-#include "uring.h"
-#ifndef IORING_ASYNC_CANCEL_ANY
-#define IORING_ASYNC_CANCEL_ANY (1U << 2)
-#endif
-#include "task.h"
-#include "utask.h"
-#include "atask.h"
-#include "coro.h"
-#include "awaiters.h"
-#include "scheduler.h"
-#include "executor.h"
-#include "io_slot.h"
-#include "utils/metrics.h"
+#include "io_uring/uring.h"
+#include "base/task.h"
+#include "io_uring/utask.h"
+#include "coroutine/atask.h"
+#include "coroutine/coro.h"
+#include "io_uring/awaiters.h"
+#include "scheduling/scheduler.h"
+#include "scheduling/executor.h"
+#include "io_uring/io_slot.h"
+#include "base/metrics.h"
 #include "utils/config.h"
 #include "utils/logging.h"
+#include "io_uring/context_cancellation.h"
 #include <functional>
+#include <memory>
+#include <optional>
 #include <concurrentqueue/moodycamel/concurrentqueue.h>
 #ifdef BLOCK_SIZE
 #undef BLOCK_SIZE
@@ -47,8 +47,6 @@ struct context_t {
     Draining,
     // context is canceling all pending io
     Canceling,
-    // cancel_pending_io has been spawned, waiting for completion
-    Terminating,
     // context terminated, all tasks done
     Terminated
   };
@@ -62,6 +60,7 @@ struct context_t {
   context_t& operator=(const context_t&) = delete;
 
   context_t& operator=(context_t&& ctx) = delete;
+
 
   /**
    * @brief spawn a coroutine into the scheduler's ready queue.
@@ -156,6 +155,8 @@ struct context_t {
 
   /**
    * @brief context start to resume task and wait io, run until tasks all complete or stop() called.
+   * The run loop exits when idle() returns true (no IO inflight and no ready tasks).
+   * During shutdown, the loop transitions Draining → Canceling → Terminated.
    */
   void run();
 
@@ -180,13 +181,23 @@ struct context_t {
   void wakeup();
 
   /**
+   * @brief whether the context is shutting down (draining, canceling, or terminated).
+   * Users should check this in accept loops to stop accepting new connections.
+   * @return true if not in Running state
+   */
+  CORNET_NODISCARD inline bool is_shutting_down() const {
+    auto s = state.load(std::memory_order_acquire);
+    return s != state_t::Running;
+  }
+
+  /**
    * @brief whether the context is in draining state (shutting down gracefully).
    * Users should check this in accept loops to stop accepting new connections.
    * @return true if draining or later state
+   * @deprecated use is_shutting_down() instead
    */
   CORNET_NODISCARD inline bool is_draining() const {
-    auto s = state.load(std::memory_order_acquire);
-    return s != state_t::Running;
+    return is_shutting_down();
   }
 
   /**
@@ -313,12 +324,6 @@ struct context_t {
   }
 
   /**
-   * @brief return context_t owner thread id
-   * @return owner thread id
-   */
-  CORNET_NODISCARD std::thread::id owner_thread() const;
-
-  /**
    * @brief cancel awaiter, used for cancel io_uring async tasks.
    */
   struct cancel_awaiter : utask_t {
@@ -326,29 +331,6 @@ struct context_t {
     int flags_;
     cancel_awaiter(context_t& ctx, void* user_data, int flags);
   };
-
-  /**
-   * @brief return current thread's context (thread-local singleton)
-   * @return thread-local context reference
-   */
-  static inline context_t& current() {
-    static thread_local context_t ctx;
-    return ctx;
-  }
-
-  /**
-   * @brief return given thread owned context
-   * @param t context owner thread
-   * @return context owned by correspond thread
-   */
-  static inline context_t* from_thread(const std::thread& t) {
-    std::lock_guard<std::mutex> guard(contexts_mutex);
-    auto iter = contexts.find(t.get_id());
-    if (iter == contexts.end()) {
-      return nullptr;
-    }
-    return iter->second;
-  }
 
   /**
    * @brief context state to string
@@ -360,14 +342,13 @@ struct context_t {
       case state_t::Running: return "Running";
       case state_t::Draining: return "Draining";
       case state_t::Canceling: return "Canceling";
-      case state_t::Terminating: return "Terminating";
       case state_t::Terminated: return "Terminated";
     }
     return "Unknown";
   }
 
-private:
   context_t();
+
 
   void ensure_executor() {
     if (!executor) {
@@ -378,15 +359,12 @@ private:
     }
   }
 
+private:
   void switch_to(state_t s) {
     state.store(s, std::memory_order_release);
     SPDLOG_DEBUG("context switch to state:{}", to_string(s));
   }
 
-  // thread-safety mutex for global contexts registry
-  static std::mutex contexts_mutex;
-  // global contexts registry
-  static std::unordered_map<std::thread::id, context_t*> contexts;
   // context owned io_uring wrapper
   uring_t uring;
   // context owned io slot table for safe user_data management
@@ -399,8 +377,6 @@ private:
   std::atomic<state_t> state{state_t::Terminated};
   // context current scheduler type
   scheduler_type_t scheduler_type{scheduler_type_t::RoundRobin};
-  // context owner thread id
-  std::thread::id owner{std::this_thread::get_id()};
   // context scheduler
   std::unique_ptr<scheduler_t> scheduler;
   // context executor
@@ -414,54 +390,17 @@ private:
   // keep-alive flag: prevents auto-exit when user tasks are idle
   bool keep_alive_{false};
 
+  // graceful shutdown deadline: when Draining and user_idle() is false,
+  // this deadline triggers a forced Canceling transition
+  std::optional<std::chrono::steady_clock::time_point> shutdown_deadline_;
+
   // internal: signal watch coroutine
   coro_t<void> signal_watch_loop();
   // internal: wakeup eventfd watch coroutine
   coro_t<void> wakeup_watch_loop();
-  // internal: shutdown coroutine (drain → cancel → terminate)
-  coro_t<void> shutdown_sequence(std::chrono::nanoseconds timeout);
-  /**
- * @brief cancel all pending io_uring operations.
- * Uses IORING_ASYNC_CANCEL_ANY on 5.19+ kernels, falls back to
- * per-slot cancellation on older kernels.
- * @return expected<int>: canceled task count on success, error on failure
- */
-  inline coro_t<expected<int>> cancel_pending_io() {
-    int canceled_nr = 0;
 
-    // Try CANCEL_ANY first (5.19+)
-    if (!uring.idle()) {
-      auto ret = co_await cancel_awaiter{*this, nullptr, IORING_ASYNC_CANCEL_ANY};
-      if (!ret && ret.error().code == EINVAL) {
-        // Kernel doesn't support CANCEL_ANY, fallback to per-slot cancel
-        std::vector<uint64_t> active;
-        slots.for_each_active([&](uint64_t sd) { active.push_back(sd); });
-        for (auto sd : active) {
-          auto r = co_await cancel_awaiter{*this, reinterpret_cast<void*>(sd), 0};
-          if (r && *r > 0) canceled_nr += *r;
-        }
-        co_return canceled_nr;
-      }
-      // CANCEL_ANY supported
-      if (!ret) {
-        if (ret.error().code == ENOENT) co_return canceled_nr;
-        co_return ret;
-      }
-      if (*ret > 0) canceled_nr += *ret;
-    }
-
-    // Continue with CANCEL_ANY
-    while (!uring.idle()) {
-      auto ret = co_await cancel_awaiter{*this, nullptr, IORING_ASYNC_CANCEL_ANY};
-      if (!ret) {
-        if (ret.error().code == ENOENT) co_return canceled_nr;
-        co_return ret;
-      }
-      if (*ret == 0) co_return canceled_nr;
-      canceled_nr += *ret;
-    }
-    co_return canceled_nr;
-  }
+  // cancellation infrastructure (io_uring-specific, isolated for future backend replacement)
+  context_cancellation_t cancellation_;
 };
 
 } // cornet

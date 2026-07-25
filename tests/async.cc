@@ -1,4 +1,4 @@
-#include "core/context.h"
+#include "scheduling/context.h"
 
 #include <gtest/gtest.h>
 #include <stdexcept>
@@ -8,7 +8,11 @@ using namespace cornet;
 class async_test : public ::testing::Test {
 protected:
   void SetUp() override {
-    ctx = &context_t::current();
+    ctx = new context_t();
+  }
+
+  void TearDown() override {
+    delete ctx;
   }
 
   context_t* ctx;

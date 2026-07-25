@@ -45,7 +45,7 @@ if (!ret) {
 }
 
 // accept 返回新的 socket
-while (!ctx.is_draining()) {
+while (!ctx.is_shutting_down()) {
     auto client = co_await listener.accept();
     if (!client) continue;
     ctx.spawn(handle(std::move(*client)));

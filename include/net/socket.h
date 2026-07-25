@@ -1,9 +1,9 @@
 #ifndef CORNET_SOCKET_H
 #define CORNET_SOCKET_H
 
-#include "coro.h"
-#include "cancel.h"
-#include "combinators.h"
+#include "coroutine/coro.h"
+#include "coroutine/cancel.h"
+#include "concurrency/combinators.h"
 #include <chrono>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -36,7 +36,7 @@ struct resolved_address {
  * @param type socket type (SOCK_STREAM, SOCK_DGRAM)
  * @return resolved address on success, error on failure
  */
-coro_t<expected<resolved_address>> resolve(std::string_view host, uint16_t port,
+coro_t<expected<resolved_address>> resolve(context_t& ctx, std::string_view host, uint16_t port,
                                          int family = AF_UNSPEC, int type = SOCK_STREAM);
 
 class socket_t {
@@ -45,7 +45,7 @@ class socket_t {
    * @brief accept awaiter for io_uring_prep_accept
    */
   struct accept_awaiter : utask_t {
-    accept_awaiter(int fd, sockaddr* addr, socklen_t* addr_len, int flag);
+    accept_awaiter(context_t& ctx, int fd, sockaddr* addr, socklen_t* addr_len, int flag);
    private:
     int fd_;
     sockaddr* addr_;
@@ -57,9 +57,9 @@ class socket_t {
    * @brief connect awaiter for io_uring_prep_connect
    */
   struct connect_awaiter : utask_t {
-    connect_awaiter(int fd, std::string_view ip, uint16_t port, int domain, int type);
-    connect_awaiter(int fd, std::string_view path);
-    connect_awaiter(int fd, const resolved_address& resolved);
+    connect_awaiter(context_t& ctx, int fd, std::string_view ip, uint16_t port, int domain, int type);
+    connect_awaiter(context_t& ctx, int fd, std::string_view path);
+    connect_awaiter(context_t& ctx, int fd, const resolved_address& resolved);
 
     CORNET_NODISCARD CORNET_MAYBE_UNUSED expected<void> await_resume() const {
       if (value < 0) return unexpected(-value);
@@ -75,7 +75,7 @@ class socket_t {
    * @brief send awaiter for io_uring_prep_send
    */
   struct send_awaiter : utask_t {
-    send_awaiter(int fd, const void* buf, size_t nbytes, int flag);
+    send_awaiter(context_t& ctx, int fd, const void* buf, size_t nbytes, int flag);
    private:
     int fd_;
     const void* buf_;
@@ -87,7 +87,7 @@ class socket_t {
    * @brief recv awaiter for io_uring_prep_recv
    */
   struct recv_awaiter : utask_t {
-    recv_awaiter(int fd, void* buf, size_t nbytes, int flag);
+    recv_awaiter(context_t& ctx, int fd, void* buf, size_t nbytes, int flag);
    private:
     int fd_;
     void* buf_;
@@ -99,7 +99,7 @@ class socket_t {
    * @brief sendmsg awaiter for io_uring_prep_sendmsg
    */
   struct sendmsg_awaiter : utask_t {
-    sendmsg_awaiter(int fd, struct msghdr* msg, int flags);
+    sendmsg_awaiter(context_t& ctx, int fd, struct msghdr* msg, int flags);
    private:
     int fd_;
     struct msghdr* msg_;
@@ -110,7 +110,7 @@ class socket_t {
    * @brief recvmsg awaiter for io_uring_prep_recvmsg
    */
   struct recvmsg_awaiter : utask_t {
-    recvmsg_awaiter(int fd, struct msghdr* msg, int flags);
+    recvmsg_awaiter(context_t& ctx, int fd, struct msghdr* msg, int flags);
    private:
     int fd_;
     struct msghdr* msg_;
@@ -121,7 +121,7 @@ class socket_t {
    * @brief sendto awaiter with embedded iovec/msghdr
    */
   struct sendto_awaiter : utask_t {
-    sendto_awaiter(int fd, void* buf, size_t nbytes, sockaddr* addr, socklen_t socklen, int flag);
+    sendto_awaiter(context_t& ctx, int fd, void* buf, size_t nbytes, sockaddr* addr, socklen_t socklen, int flag);
    private:
     int fd_;
     int flag_;
@@ -133,7 +133,7 @@ class socket_t {
    * @brief recvfrom awaiter with embedded iovec/msghdr
    */
   struct recvfrom_awaiter : utask_t {
-    recvfrom_awaiter(int fd, void* buf, size_t nbytes, sockaddr* addr, socklen_t* socklen, int flag);
+    recvfrom_awaiter(context_t& ctx, int fd, void* buf, size_t nbytes, sockaddr* addr, socklen_t* socklen, int flag);
 
     CORNET_NODISCARD CORNET_MAYBE_UNUSED expected<int> await_resume() const {
       if (value < 0) return unexpected(-value);
@@ -175,45 +175,40 @@ class socket_t {
   /**
    * @brief async close socket
    */
-  close_awaiter close();
+  close_awaiter close(context_t& ctx);
   /**
    * @brief async shutdown socket (half-close).
+   * @param ctx context for io_uring operations
    * @param how SHUT_RD, SHUT_WR, or SHUT_RDWR
    */
-  shutdown_awaiter shutdown(int how) const;
+  shutdown_awaiter shutdown(context_t& ctx, int how) const;
   /**
    * @brief async connect with async DNS resolve.
+   * @param ctx context for io_uring operations
    * @param host hostname or IP address
    * @param port port number
    * @return expected<void> on success, error on failure
    */
-  ccoro_t<expected<void>> connect(std::string_view host, uint16_t port) const;
-  /**
-   * @brief async connect with timeout.
-   */
-  template<typename _Rep, typename _Period>
-  inline auto connect(std::string_view host, uint16_t port,
-                                 std::chrono::duration<_Rep, _Period> timeout) const {
-    return with_timeout(connect(host, port), timeout);
-  }
+  ccoro_t<expected<void>> connect(context_t& ctx, std::string_view host, uint16_t port) const;
   /**
    * @brief async connect with cancellation support.
    */
-  coro_t<expected<void>> connect(std::string_view host, uint16_t port, canceler_t& canceler) const;
+  coro_t<expected<void>> connect(context_t& ctx, std::string_view host, uint16_t port, canceler_t& canceler) const;
   /**
    * @brief async connect to pre-resolved address.
+   * @param ctx context for io_uring operations
    * @param resolved resolve result from cornet::resolve()
    * @return connect_awaiter
    */
-  connect_awaiter connect(const resolved_address& resolved) const;
+  connect_awaiter connect(context_t& ctx, const resolved_address& resolved) const;
   /**
    * @brief async recv from peer
    */
-  recv_awaiter recv(void* buf, size_t nbytes, int flag = 0) const;
+  recv_awaiter recv(context_t& ctx, void* buf, size_t nbytes, int flag = 0) const;
   /**
    * @brief async send to peer
    */
-  send_awaiter send(const void* buf, size_t nbytes, int flag = 0) const;
+  send_awaiter send(context_t& ctx, const void* buf, size_t nbytes, int flag = 0) const;
   /**
    * @brief sync bind address:port to socket
    */
@@ -236,7 +231,7 @@ class socket_t : public cornet::socket_t {
    * @brief accept awaiter that returns a tcp socket directly
    */
   struct tcp_accept_awaiter : utask_t {
-    tcp_accept_awaiter(int fd, int flag);
+    tcp_accept_awaiter(context_t& ctx, int fd, int flag);
 
     CORNET_NODISCARD CORNET_MAYBE_UNUSED expected<socket_t> await_resume() const {
       if (value < 0) return unexpected(-value);
@@ -252,17 +247,17 @@ class socket_t : public cornet::socket_t {
   };
 
   /**
+   * @brief accept a connection, returning a new tcp socket.
+   */
+  tcp_accept_awaiter accept(context_t& ctx, int flag = 0) const;
+  /**
+   * @brief accept a connection with raw sockaddr.
+   */
+  accept_awaiter accept(context_t& ctx, sockaddr* addr, socklen_t* socklen, int flag = 0) const;
+  /**
    * @brief sync listen on address:port
    */
   expected<void> listen(std::string_view address, uint16_t port) const;
-  /**
-   * @brief async accept (raw, returns fd)
-   */
-  accept_awaiter accept(sockaddr* addr, socklen_t* socklen, int flag = 0) const;
-  /**
-   * @brief async accept (high-level, returns socket)
-   */
-  tcp_accept_awaiter accept(int flag = 0) const;
 };
 } // cornet::tcp
 
@@ -271,10 +266,10 @@ class socket_t : public cornet::socket_t {
  protected:
   explicit socket_t(int fd);
  public:
-  sendto_awaiter sendto(void* buf, size_t nbytes, sockaddr* addr, socklen_t socklen, int flag = 0) const;
-  recvfrom_awaiter recvfrom(void* buf, size_t nbytes, sockaddr* addr, socklen_t* socklen, int flag = 0) const;
-  sendmsg_awaiter sendmsg(struct msghdr* msg, int flags) const;
-  recvmsg_awaiter recvmsg(struct msghdr* msg, int flags) const;
+  sendto_awaiter sendto(context_t& ctx, void* buf, size_t nbytes, sockaddr* addr, socklen_t socklen, int flag = 0) const;
+  recvfrom_awaiter recvfrom(context_t& ctx, void* buf, size_t nbytes, sockaddr* addr, socklen_t* socklen, int flag = 0) const;
+  sendmsg_awaiter sendmsg(context_t& ctx, struct msghdr* msg, int flags) const;
+  recvmsg_awaiter recvmsg(context_t& ctx, struct msghdr* msg, int flags) const;
 };
 } // cornet::udp
 
@@ -292,8 +287,8 @@ class socket_t : public cornet::tcp::socket_t {
   CORNET_NODISCARD inline expected<void> listen(std::string_view address) const {
     return cornet::tcp::socket_t::listen(address, 0);
   }
-  CORNET_NODISCARD inline connect_awaiter connect(std::string_view address) const {
-    return connect_awaiter{fd, address};
+  CORNET_NODISCARD inline connect_awaiter connect(context_t& ctx, std::string_view address) const {
+    return connect_awaiter{ctx, fd, address};
   }
  private:
   using cornet::tcp::socket_t::listen;
@@ -311,8 +306,8 @@ class socket_t : public cornet::udp::socket_t {
   CORNET_NODISCARD inline expected<void> bind(std::string_view address) {
     return cornet::udp::socket_t::bind(address, 0);
   }
-  CORNET_NODISCARD inline connect_awaiter connect(std::string_view address) const {
-    return connect_awaiter{fd, address};
+  CORNET_NODISCARD inline connect_awaiter connect(context_t& ctx, std::string_view address) const {
+    return connect_awaiter{ctx, fd, address};
   }
  private:
   using cornet::udp::socket_t::bind;
