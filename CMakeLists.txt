@@ -111,7 +111,7 @@ install(
 )
 install(
     DIRECTORY include/ 
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/cornet)
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(
     EXPORT cornetTargets
     NAMESPACE cornet::

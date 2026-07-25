@@ -1,7 +1,7 @@
 #ifndef CORNET_RUNTIME_H
 #define CORNET_RUNTIME_H
 
-#include "scheduling/context.h"
+#include "cornet/scheduling/context.h"
 #include <thread>
 #include <vector>
 #include <functional>

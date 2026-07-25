@@ -1,9 +1,9 @@
 #ifndef CORNET_SOCKET_H
 #define CORNET_SOCKET_H
 
-#include "coroutine/coro.h"
-#include "coroutine/cancel.h"
-#include "concurrency/combinators.h"
+#include "cornet/coroutine/coro.h"
+#include "cornet/coroutine/cancel.h"
+#include "cornet/concurrency/combinators.h"
 #include <chrono>
 #include <netinet/in.h>
 #include <arpa/inet.h>

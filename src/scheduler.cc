@@ -1,7 +1,7 @@
-#include "scheduling/scheduler.h"
-#include "scheduling/context.h"
-#include "coroutine/atask.h"
-#include "base/metrics.h"
+#include "cornet/scheduling/scheduler.h"
+#include "cornet/scheduling/context.h"
+#include "cornet/coroutine/atask.h"
+#include "cornet/base/metrics.h"
 #include <fmt/ranges.h>
 
 namespace cornet {

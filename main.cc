@@ -1,9 +1,9 @@
 #include <iostream>
-#include "net/socket.h"
+#include "cornet/net/socket.h"
 
 #include <filesystem>
 
-#include "concurrency/combinators.h"
+#include "cornet/concurrency/combinators.h"
 
 using namespace cornet;
 

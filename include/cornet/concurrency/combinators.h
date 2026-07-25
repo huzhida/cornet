@@ -1,10 +1,10 @@
 #ifndef CORNET_COMBINATORS_H
 #define CORNET_COMBINATORS_H
 
-#include "coroutine/coro.h"
-#include "coroutine/cancel.h"
-#include "scheduling/context.h"
-#include "concurrency/scope.h"
+#include "cornet/coroutine/coro.h"
+#include "cornet/coroutine/cancel.h"
+#include "cornet/scheduling/context.h"
+#include "cornet/concurrency/scope.h"
 #include <tuple>
 #include <memory>
 #include <optional>

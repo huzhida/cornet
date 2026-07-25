@@ -1,9 +1,9 @@
 #ifndef CORNET_URING_TASK_H
 #define CORNET_URING_TASK_H
 
-#include "base/task.h"
-#include "io_uring/uring.h"
-#include "base/expected.h"
+#include "cornet/base/task.h"
+#include "cornet/io_uring/uring.h"
+#include "cornet/base/expected.h"
 
 namespace cornet {
 
