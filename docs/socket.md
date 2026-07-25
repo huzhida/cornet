@@ -46,7 +46,7 @@ if (!ret) {
 
 // accept 返回新的 socket
 while (!ctx.is_shutting_down()) {
-    auto client = co_await listener.accept();
+    auto client = co_await listener.accept(ctx);
     if (!client) continue;
     ctx.spawn(handle(std::move(*client)));
 }
@@ -58,7 +58,7 @@ while (!ctx.is_shutting_down()) {
 tcp::v4::socket_t sock;
 
 // 连接（自动判断 IP 直连 or DNS 异步解析）
-auto ret = co_await sock.connect("example.com", 80);
+auto ret = co_await sock.connect(ctx, "example.com", 80);
 if (!ret) {
     // 连接失败
 }
@@ -70,14 +70,14 @@ if (!ret) {
 char buf[4096];
 
 // 接收
-auto n = co_await sock.recv(buf, sizeof(buf));
+auto n = co_await sock.recv(ctx, buf, sizeof(buf));
 if (!n) {
     // n.error() 获取错误
 }
 int bytes_received = *n;  // 实际接收字节数
 
 // 发送
-auto sent = co_await sock.send(data, len);
+auto sent = co_await sock.send(ctx, data, len);
 if (!sent) {
     // 发送失败
 }
@@ -88,11 +88,11 @@ int bytes_sent = *sent;
 
 ```cpp
 // 异步关闭（通过 io_uring）
-co_await sock.close();
+co_await sock.close(ctx);
 
 // 半关闭（shutdown）
-co_await sock.shutdown(SHUT_WR);   // 关闭写端，通知对端 EOF
-co_await sock.shutdown(SHUT_RD);   // 关闭读端
+co_await sock.shutdown(ctx, SHUT_WR);   // 关闭写端，通知对端 EOF
+co_await sock.shutdown(ctx, SHUT_RD);   // 关闭读端
 
 // 析构时自动异步关闭：
 // - 同线程：ctx.spawn(async_close(fd))
@@ -103,11 +103,11 @@ co_await sock.shutdown(SHUT_RD);   // 关闭读端
 
 ```cpp
 // 带超时
-auto ret = co_await sock.connect("example.com", 80, std::chrono::seconds(5));
+auto ret = co_await sock.connect(ctx, "example.com", 80);
 
 // 带取消
-canceler_t canceler;
-auto ret = co_await sock.connect("example.com", 80, canceler);
+canceler_t canceler(ctx);
+auto ret = co_await sock.connect(ctx, "example.com", 80, canceler);
 // 其他协程中调用 canceler.cancel() 可取消连接
 ```
 
@@ -127,10 +127,10 @@ sock.bind("0.0.0.0", 9000);
 sockaddr_storage from_addr{};
 socklen_t from_len = sizeof(from_addr);
 char buf[65536];
-auto n = co_await sock.recvfrom(buf, sizeof(buf), (sockaddr*)&from_addr, &from_len);
+auto n = co_await sock.recvfrom(ctx, buf, sizeof(buf), (sockaddr*)&from_addr, &from_len);
 
 // 发送
-auto sent = co_await sock.sendto(data, len, (sockaddr*)&dest_addr, dest_len);
+auto sent = co_await sock.sendto(ctx, data, len, (sockaddr*)&dest_addr, dest_len);
 ```
 
 ### sendmsg/recvmsg
@@ -141,8 +141,8 @@ struct iovec iov{.iov_base = buf, .iov_len = len};
 msg.msg_iov = &iov;
 msg.msg_iovlen = 1;
 
-auto n = co_await sock.sendmsg(&msg, 0);
-auto m = co_await sock.recvmsg(&msg, 0);
+auto n = co_await sock.sendmsg(ctx, &msg, 0);
+auto m = co_await sock.recvmsg(ctx, &msg, 0);
 ```
 
 ## DNS 解析
@@ -151,21 +151,21 @@ auto m = co_await sock.recvmsg(&msg, 0);
 
 ```cpp
 // IP 地址走快速路径（同步），域名走线程池异步解析
-auto ret = co_await sock.connect("example.com", 443);
+auto ret = co_await sock.connect(ctx, "example.com", 443);
 ```
 
 ### 手动解析（复用地址）
 
 ```cpp
 // 异步解析
-auto resolved = co_await cornet::resolve("example.com", 443);
+auto resolved = co_await cornet::resolve(ctx, "example.com", 443);
 if (!resolved) {
     // resolved.error().message() — 解析错误信息
 }
 
 // 用解析结果连接多个 socket
-auto ret1 = co_await sock1.connect(*resolved);
-auto ret2 = co_await sock2.connect(*resolved);
+auto ret1 = co_await sock1.connect(ctx, *resolved);
+auto ret2 = co_await sock2.connect(ctx, *resolved);
 ```
 
 ## Unix Domain Socket
@@ -176,11 +176,11 @@ auto ret2 = co_await sock2.connect(*resolved);
 tcp::local::socket_t server;
 server.listen("/tmp/my.sock");
 
-auto client = co_await server.accept();
+auto client = co_await server.accept(ctx);
 
 // 客户端
 tcp::local::socket_t cli;
-auto ret = co_await cli.connect("/tmp/my.sock");
+auto ret = co_await cli.connect(ctx, "/tmp/my.sock");
 ```
 
 ### UDP 风格
@@ -188,7 +188,7 @@ auto ret = co_await cli.connect("/tmp/my.sock");
 ```cpp
 udp::local::socket_t sock;
 sock.bind("/tmp/dgram.sock");
-auto ret = co_await sock.connect("/tmp/peer.sock");
+auto ret = co_await sock.connect(ctx, "/tmp/peer.sock");
 ```
 
 ## 错误处理
@@ -196,7 +196,7 @@ auto ret = co_await sock.connect("/tmp/peer.sock");
 所有 IO 操作返回 `expected<T>`：
 
 ```cpp
-auto n = co_await sock.recv(buf, len);
+auto n = co_await sock.recv(ctx, buf, len);
 if (!n) {
     error_t err = n.error();
     int code = err.code;              // errno 值

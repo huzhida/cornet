@@ -67,7 +67,7 @@ auto result = co_await ctx.async([] {
 ```cpp
 // 从任意线程向目标 context 投递协程
 other_ctx->spawn_remote([data = std::move(data)]() -> coro_t<void> {
-    co_await process(data);
+    co_await process(other_ctx, data);
 });
 ```
 
