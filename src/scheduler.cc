@@ -1,14 +1,17 @@
+#include "cornet/base/metrics.h"
 #include "cornet/scheduling/scheduler.h"
+
+#include <fmt/ranges.h>
+
 #include "cornet/scheduling/context.h"
 #include "cornet/coroutine/atask.h"
-#include "cornet/base/metrics.h"
-#include <fmt/ranges.h>
+#include "cornet/utils/config.h"
 
 namespace cornet {
 
-std::unordered_map<scheduler_type_t, std::pair<std::string, std::unique_ptr<scheduler_t>(*)()>> scheduler_t::registry;
+std::unordered_map<scheduler_type_t, std::pair<std::string, std::unique_ptr<scheduler_t>(*)(config_t*)>> scheduler_t::registry;
 
-std::unique_ptr<scheduler_t> scheduler_t::scheduler(scheduler_type_t scheduler_type) {
+std::unique_ptr<scheduler_t> scheduler_t::scheduler(scheduler_type_t scheduler_type, config_t* config) {
   auto iter = registry.find(scheduler_type);
   if (iter == registry.end()) {
     std::vector<std::string> registered_schedulers;
@@ -21,7 +24,12 @@ std::unique_ptr<scheduler_t> scheduler_t::scheduler(scheduler_type_t scheduler_t
                  fmt::join(registered_schedulers.begin(), registered_schedulers.end(), ","));
     throw std::runtime_error("scheduler not found");
   }
-  return iter->second.second();
+  return iter->second.second(config);
+}
+
+std::unique_ptr<scheduler_t> scheduler_t::scheduler(config_t* config) {
+  auto scheduler_type = to_scheduler_type(config ? config->at_path("cornet.scheduler").as_string()->value_or("Adaptive") : "Adaptive") ;
+  return scheduler_t::scheduler(scheduler_type, config);
 }
 
 void scheduler_t::transfer_to(scheduler_t &scheduler) {
@@ -68,24 +76,27 @@ uint32_t scheduler_t::flush_io(context_t& ctx, std::chrono::nanoseconds wait_tim
 }
 
 CORNET_REGISTER_SCHEDULER(scheduler_type_t::TimeSlice, time_slice_scheduler_t);
-time_slice_scheduler_t::time_slice_scheduler_t() {
-  auto conf = config_t::get()["cornet"]["context"]["scheduler"];
+time_slice_scheduler_t::time_slice_scheduler_t(config_t* config) : scheduler_t(config) {
+  if (config) {
+    auto conf = (*config)["cornet"]["context"]["scheduler"];
+    cpu_budget = parse_time_str(conf["cpu_budget"].value_or("10ms"));
+    io_budget = parse_time_str(conf["io_budget"].value_or("1ms"));
+  }
+  else {
+    cpu_budget = parse_time_str("10ms");
+    io_budget = parse_time_str("1ms");
+  }
 
-  cpu_budget = config_t::to_nanoseconds(conf["cpu_budget"].value_or("10ms"));
-  io_budget = config_t::to_nanoseconds(conf["io_budget"].value_or("1ms"));
 }
 void time_slice_scheduler_t::sched(context_t& ctx) {
-#ifdef CORNET_METRICS
-  scoped_timer_t timer(&ctx.metrics().sched_latency);
-  ctx.metrics().sched_cycles++;
-#endif
+  CORNET_METRICS_SCOPE_TIMER(ctx.metrics().sched_latency);
+  CORNET_METRICS_ADD(ctx.metrics().sched_cycles);
+
   auto start = std::chrono::steady_clock::now();
 
   while (!ready_tasks.empty() && !cpu_timeout(start)) {
     resume_one_task();
-#ifdef CORNET_METRICS
-    ctx.metrics().tasks_resumed++;
-#endif
+    CORNET_METRICS_ADD(ctx.metrics().tasks_resumed);
   }
 
   flush_io(ctx, io_budget);
@@ -99,39 +110,37 @@ bool time_slice_scheduler_t::cpu_timeout(std::chrono::steady_clock::time_point& 
 
 CORNET_REGISTER_SCHEDULER(scheduler_type_t::RoundRobin, round_robin_scheduler_t);
 void round_robin_scheduler_t::sched(context_t& ctx) {
-#ifdef CORNET_METRICS
-  scoped_timer_t timer(&ctx.metrics().sched_latency);
-  ctx.metrics().sched_cycles++;
-#endif
+  CORNET_METRICS_SCOPE_TIMER(ctx.metrics().sched_latency);
+  CORNET_METRICS_ADD(ctx.metrics().sched_cycles);
 
   while (!ready_tasks.empty()) {
     resume_one_task();
-#ifdef CORNET_METRICS
-    ctx.metrics().tasks_resumed++;
-#endif
+    CORNET_METRICS_ADD(ctx.metrics().tasks_resumed);
   }
 
   flush_io(ctx);
 }
 
 CORNET_REGISTER_SCHEDULER(scheduler_type_t::Batch, batch_scheduler_t);
-batch_scheduler_t::batch_scheduler_t() {
-  if (auto batch_num = config_t::get()["cornet"]["context"]["scheduler"]["batch"]) {
-    batch_nr = batch_num.value_or(32);
+batch_scheduler_t::batch_scheduler_t(config_t* config) : scheduler_t(config) {
+  if (config) {
+    if (auto batch_num = (*config)["cornet"]["context"]["scheduler"]["batch"]) {
+      batch_nr = batch_num.value_or(32);
+    }
   }
+  else {
+    batch_nr = 32;
+  }
+
 }
 void batch_scheduler_t::sched(context_t& ctx) {
-#ifdef CORNET_METRICS
-  scoped_timer_t timer(&ctx.metrics().sched_latency);
-  ctx.metrics().sched_cycles++;
-#endif
+  CORNET_METRICS_SCOPE_TIMER(ctx.metrics().sched_latency);
+  CORNET_METRICS_ADD(ctx.metrics().sched_cycles);
   size_t processed = 0;
 
   while (!ready_tasks.empty() && ++processed < batch_nr) {
     resume_one_task();
-#ifdef CORNET_METRICS
-    ctx.metrics().tasks_resumed++;
-#endif
+    CORNET_METRICS_ADD(ctx.metrics().tasks_resumed);
   }
 
   flush_io(ctx);
@@ -139,18 +148,14 @@ void batch_scheduler_t::sched(context_t& ctx) {
 
 CORNET_REGISTER_SCHEDULER(scheduler_type_t::Adaptive, adaptive_scheduler_t);
 void adaptive_scheduler_t::sched(context_t& ctx) {
-#ifdef CORNET_METRICS
-  scoped_timer_t timer(&ctx.metrics().sched_latency);
-  ctx.metrics().sched_cycles++;
-#endif
+  CORNET_METRICS_SCOPE_TIMER(ctx.metrics().sched_latency);
+  CORNET_METRICS_ADD(ctx.metrics().sched_cycles);
 
   size_t resumed = 0;
   while (!ready_tasks.empty() && resumed < cpu_batch_) {
     resume_one_task();
     resumed++;
-#ifdef CORNET_METRICS
-    ctx.metrics().tasks_resumed++;
-#endif
+    CORNET_METRICS_ADD(ctx.metrics().tasks_resumed);
   }
 
   size_t inflight = ctx.io_uring().running_task_nr();

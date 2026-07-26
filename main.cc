@@ -1,8 +1,4 @@
-#include <iostream>
 #include "cornet/net/socket.h"
-
-#include <filesystem>
-
 #include "cornet/concurrency/combinators.h"
 
 using namespace cornet;
@@ -61,7 +57,7 @@ coro_t<expected<void>> connect_baidu(context_t& ctx)
 {
   tcp::v4::socket_t s;
   // auto ok = co_await s.connect("www.baidu.com", 80, std::chrono::milliseconds(500));
-  auto ok = co_await with_timeout(ctx, s.connect(ctx, "www.baidu.com", 80), std::chrono::milliseconds(1000));
+  auto ok = co_await with_timeout(ctx, s.connect(ctx, "www.baidu.com", 1234), std::chrono::milliseconds(1000));
   if (!ok)
   {
     SPDLOG_ERROR("failed to connect: {}", ok.error().message());
@@ -80,24 +76,16 @@ coro_t<expected<void>> connect_baidu(context_t& ctx)
     recieved = co_await s.recv(ctx, buf, sizeof(buf));
     SPDLOG_INFO("{}", buf);
   } while (recieved.value() != 0);
+  co_return {};
 }
 
 int main(int argc, char* argv[]) {
-  cornet::config_t::load("conf/default.toml");
-  cornet::logging::init();
   context_t ctx;
-  // std::thread client_thread([&] {
-  //   std::this_thread::sleep_for(std::chrono::milliseconds(200));
-  //   context_t ctx;
-  //   ctx.spawn(client(ctx));
-  //   ctx.run();
-  // });
 
   ctx.spawn(server(ctx));
   ctx.spawn(client(ctx));
 
   ctx.run();
-  // client_thread.join();
 
   ctx.spawn(connect_baidu(ctx));
   ctx.run();

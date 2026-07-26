@@ -1,5 +1,5 @@
-#include "net/socket.h"
-#include "concurrency/combinators.h"
+#include "cornet/net/socket.h"
+#include "cornet/concurrency/combinators.h"
 
 #include <gtest/gtest.h>
 

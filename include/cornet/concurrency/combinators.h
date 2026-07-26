@@ -5,6 +5,7 @@
 #include "cornet/coroutine/cancel.h"
 #include "cornet/scheduling/context.h"
 #include "cornet/concurrency/scope.h"
+
 #include <tuple>
 #include <memory>
 #include <optional>
@@ -500,34 +501,6 @@ auto when_any(context_t& ctx, canceler_t& canceler, coro_t<Ts>... coros) {
   auto state = std::make_shared<detail::when_any_state<Ts...>>(&canceler);
   return awaiter{ctx, std::move(state), std::tuple{std::move(coros)...}};
 }
-
-/**
- * @brief structured concurrency scope.
- * Guarantees that all child tasks spawned via scope.spawn() complete (or are cancelled)
- * before the scope exits. Provides structured lifetime management for concurrent tasks.
- *
- * Key guarantees:
- * - No child task outlives the scope
- * - If any child fails with an exception, all siblings are cancelled
- * - If the scope is cancelled externally, all children are cancelled
- * - The scope blocks (suspends) until all children finish
- *
- * Usage:
- *   co_await task_scope([](scope_t& scope) -> coro_t<void> {
- *       scope.spawn(task1());
- *       scope.spawn(task2());
- *       // scope exits here, waits for task1 and task2 to complete
- *   });
- *
- *   // with result collection:
- *   int result1, result2;
- *   co_await task_scope([&](scope_t& scope) -> coro_t<void> {
- *       scope.spawn(compute1(), result1);
- *       scope.spawn(compute2(), result2);
- *       co_return;
- *   });
- *   // result1 and result2 are safely populated here
- */
 
 } // namespace cornet
 

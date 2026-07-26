@@ -8,9 +8,7 @@ namespace cornet {
 utask_t::~utask_t() {
   if (slot_data_ != 0 && ctx) {
     ctx->io_slots().free(slot_data_);
-#ifdef CORNET_METRICS
-    ctx->metrics().slot_frees++;
-#endif
+    CORNET_METRICS_ADD(ctx->metrics().slot_frees);
   }
 }
 
@@ -27,9 +25,7 @@ utask_t::utask_t(utask_t&& other) noexcept {
 
 void utask_t::prepare_into(io_uring_sqe* sqe) {
   slot_data_ = ctx->io_slots().alloc(this);
-#ifdef CORNET_METRICS
-  ctx->metrics().slot_allocs++;
-#endif
+  CORNET_METRICS_ADD(ctx->metrics().slot_allocs);
   prepare_fn(this, sqe);
   io_uring_sqe_set_data(sqe, reinterpret_cast<void*>(slot_data_));
 }
@@ -45,9 +41,7 @@ int utask_t::process_utask(context_t& ctx, cqe_t cqe) {
   if (data == 0) return 1;
   auto* task = ctx.io_slots().lookup(data);
   if (!task) {
-#ifdef CORNET_METRICS
-    ctx.metrics().slot_stale_cqes++;
-#endif
+    CORNET_METRICS_ADD(ctx.metrics().slot_stale_cqes);
     return 1;
   }
   task->complete(ctx, cqe);
@@ -56,24 +50,16 @@ int utask_t::process_utask(context_t& ctx, cqe_t cqe) {
 
 void utask_t::complete(context_t& ctx, cqe_t cqe) {
   ctx.io_slots().free(slot_data_);
-#ifdef CORNET_METRICS
-  ctx.metrics().slot_frees++;
-#endif
+  CORNET_METRICS_ADD(ctx.metrics().slot_frees);
   slot_data_ = 0;
 
   value = cqe->res;
   completed = true;
 
   if (value < 0) {
-#ifdef CORNET_METRICS
-    ctx.metrics().tasks_failed++;
-#else
-    (void)value;
-#endif
+    CORNET_METRICS_ADD(ctx.metrics().tasks_failed);
   } else {
-#ifdef CORNET_METRICS
-    ctx.metrics().tasks_completed++;
-#endif
+    CORNET_METRICS_ADD(ctx.metrics().tasks_completed);
   }
 
   if (handle) {

@@ -2,7 +2,7 @@
 #define CORNET_URING_H
 
 #include <liburing.h>
-#include <queue>
+
 #include "cornet/base/defines.h"
 #include "cornet/base/metrics.h"
 
@@ -70,22 +70,16 @@ class uring_t {
   template<typename Rep, typename Period>
   uint32_t wait_cqes(context_t &ctx, uint32_t wait_nr,
                      std::chrono::duration<Rep, Period> timeout, sigset_t *mask = nullptr) {
-#ifdef CORNET_METRICS
-    if (metrics_) metrics_->wait_calls++;
-#endif
+    CORNET_METRICS_ADD(metrics_->wait_calls);
     cqe_t cqe;
     __kernel_timespec ts = to_kernel_timespec(timeout);
     int ret = io_uring_wait_cqes(uring.get(), &cqe, wait_nr, &ts, mask);
     if (ret == -ETIME) {
-#ifdef CORNET_METRICS
-      if (metrics_) metrics_->wait_timeouts++;
-#endif
+      CORNET_METRICS_ADD(metrics_->wait_timeouts);
       return 0;
     }
     uint32_t n = process_cqes(ctx, cqe);
-#ifdef CORNET_METRICS
-    if (metrics_) metrics_->wait_cqes_processed += n;
-#endif
+    CORNET_METRICS_ADD(metrics_->wait_cqes_processed);
     return n;
   }
 
@@ -159,8 +153,10 @@ class uring_t {
   size_t registered_buffer_nr{0};
   // registered file descriptors
   std::unique_ptr<int[]> registered_files{};
+  #ifdef CORNET_METRICS
   // metrics pointer (set by context after construction)
   context_metrics_t* metrics_{nullptr};
+  #endif
 
   uint32_t process_cqes(context_t& ctx, cqe_t cqe);
 

@@ -1,4 +1,4 @@
-#include "scheduling/context.h"
+#include "cornet/scheduling/context.h"
 
 #include <gtest/gtest.h>
 #include <stdexcept>

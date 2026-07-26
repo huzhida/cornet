@@ -1,5 +1,5 @@
-#include "scheduling/context.h"
-#include "concurrency/combinators.h"
+#include "cornet/scheduling/context.h"
+#include "cornet/concurrency/combinators.h"
 
 #include <gtest/gtest.h>
 

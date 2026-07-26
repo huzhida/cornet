@@ -1,11 +1,12 @@
 #ifndef CORNET_EXECUTOR_H
 #define CORNET_EXECUTOR_H
 
+#include <vector>
+
 #ifdef BLOCK_SIZE
 #undef BLOCK_SIZE
 #endif
 #include <concurrentqueue/moodycamel/blockingconcurrentqueue.h>
-#include <vector>
 
 namespace cornet {
 struct atask_t;

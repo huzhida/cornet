@@ -3,12 +3,14 @@
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/sinks/basic_file_sink.h>
 
+#include "cornet/utils/config.h"
+
 namespace cornet::logging {
 
 std::once_flag init_flag;
 
-static void logging_init() {
-  auto logging_conf = config_t::get()["cornet"]["logging"];
+static void logging_init(const config_t& config) {
+  auto logging_conf = config["cornet"]["logging"];
   if (!logging_conf) return;
 
   std::vector<spdlog::sink_ptr> sinks;
@@ -52,8 +54,8 @@ static void logging_init() {
   spdlog::set_default_logger(logger);
 }
 
-void init() {
-  std::call_once(init_flag, logging_init);
+void init(const cornet::config_t& config = {}) {
+  std::call_once(init_flag, logging_init, config);
 }
 
 }

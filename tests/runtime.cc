@@ -1,5 +1,5 @@
-#include "scheduling/runtime.h"
-#include "concurrency/combinators.h"
+#include "cornet/scheduling/runtime.h"
+#include "cornet/io_uring/awaiters.h"
 
 #include <gtest/gtest.h>
 #include <atomic>

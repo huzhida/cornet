@@ -1,6 +1,6 @@
-#include "io_uring/awaiters.h"
-#include "scheduling/context.h"
-#include "concurrency/combinators.h"
+#include "cornet/io_uring/awaiters.h"
+#include "cornet/scheduling/context.h"
+#include "cornet/concurrency/combinators.h"
 
 #include <gtest/gtest.h>
 #include <fcntl.h>

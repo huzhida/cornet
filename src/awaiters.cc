@@ -1,8 +1,10 @@
 #include "cornet/io_uring/awaiters.h"
-#include "cornet/scheduling/context.h"
+
 #include <unistd.h>
 #include <fcntl.h>
 #include <poll.h>
+
+#include "cornet/scheduling/context.h"
 
 namespace cornet {
 
