@@ -100,6 +100,12 @@ if(CORNET_ENABLE_TESTS)
     gtest_discover_tests(unit)
 endif()
 
+# ─── metrics ───
+option(CORNET_METRICS "Build with cornet metrics" OFF)
+if(CORNET_METRICS)
+    add_compile_definitions(CORNET_METRICS)
+endif()
+
 # ─── 安装 ───
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)

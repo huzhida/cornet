@@ -1,6 +1,6 @@
 # cornet.context.uring
 [cornet.context.uring]
-capacity=1024
+capacity=4096
 
 # cornet.context.scheduler
 [cornet.context.scheduler]
@@ -23,5 +23,5 @@ pattern="%^%L%$ [%Y-%m-%d %T %t %@] %v"
 # cornet.benchmark
 [cornet.benchmark]
 num_connections=1024
-message_size=1024
+message_size=4096
 total_messages=100000

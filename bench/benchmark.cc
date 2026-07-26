@@ -4,19 +4,17 @@
 #include "asio_coro_bench.h"
 #include "libuv_bench.h"
 
-#include "utils/config.h"
-#include "utils/logging.h"
+#include "cornet/utils/config.h"
+#include "cornet/utils/logging.h"
 
-#include <iostream>
-#include <map>
 #include <csignal>
 
 using namespace bench;
 
 int main(int argc, char* argv[]) {
   signal(SIGPIPE, SIG_IGN);
-  cornet::config_t::load("conf/default.toml");
-  cornet::logging::init();
+  auto config = cornet::config_t::from_file("conf/default.toml");
+  cornet::logging::init(config);
   signal(SIGPIPE, SIG_IGN);
   auto scenarios = default_scenarios();
 

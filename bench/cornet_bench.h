@@ -2,11 +2,11 @@
 #define CORNET_BENCH_CORNET_H
 
 #include <iostream>
+
 #include "common.h"
-#include "net/socket.h"
-#include "scheduling/context.h"
-#include "scheduling/scheduler.h"
-#include "concurrency/combinators.h"
+#include "cornet/net/socket.h"
+#include "cornet/scheduling/context.h"
+#include "cornet/scheduling/scheduler.h"
 
 namespace bench {
 
@@ -63,7 +63,7 @@ inline result_t run_cornet(const scenario_t& scenario, cornet::scheduler_type_t 
       auto t0 = std::chrono::steady_clock::now();
       auto s = co_await sock.send(ctx, send_buf.data(), send_buf.size());
       if (!s || *s <= 0) break;
-      auto r = co_await sock.recv(ctx, recv_buf.data(), scenario.message_size, MSG_WAITALL);
+      auto r = co_await sock.recv(ctx, recv_buf.data(), scenario.message_size);
       if (!r || *r <= 0) break;
 
       auto latency = std::chrono::duration_cast<std::chrono::microseconds>(

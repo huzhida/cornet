@@ -1,12 +1,13 @@
 #ifndef CORNET_RUNTIME_H
 #define CORNET_RUNTIME_H
 
-#include "cornet/scheduling/context.h"
 #include <thread>
 #include <vector>
 #include <functional>
 #include <atomic>
 #include <mutex>
+
+#include "cornet/scheduling/context.h"
 
 namespace cornet {
 

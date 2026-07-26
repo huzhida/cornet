@@ -1,20 +1,23 @@
 #include "cornet/scheduling/context.h"
-#include "cornet/concurrency/combinators.h"
+
 #include <sys/eventfd.h>
 #include <sys/signalfd.h>
 #include <signal.h>
 #include <unistd.h>
 
+#include "cornet/io_uring/awaiters.h"
+
 namespace cornet {
 
-context_t::context_t()
-: uring(config_t::get()["cornet"]["context"]["uring"]["capacity"].value_or(32)) {
+context_t::context_t(config_t* config)
+: uring(config ? config->at_path("cornet.context.uring.capacity").value_or(128) : 128) {
   cancellation_.init(*this);
+  #ifdef CORNET_METRICS
   uring.metrics_ = &metrics_;
-  if (auto scheduler_name = config_t::get()["cornet"]["context"]["scheduler"]["name"]) {
-    scheduler_type = scheduler_t::to_scheduler_type(scheduler_name.as_string()->value_or(""));
-  }
-  scheduler = scheduler_t::scheduler(scheduler_type);
+  #endif
+  scheduler = scheduler_t::scheduler(config);
+  executor_thread_nr = config ? config->at_path("cornet.context.executor.thread_nr").value_or(1) : 1;
+  executor_max_task_nr = config ? config->at_path("cornet.context.executor.max_task_nr").value_or(16384) : 16384;
 
   wakeup_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
   if (wakeup_fd < 0) {

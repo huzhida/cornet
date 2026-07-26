@@ -2,7 +2,6 @@
 #define CORNET_ATASK_H
 
 #include "cornet/base/task.h"
-#include <coroutine>
 #include <exception>
 
 namespace cornet {

@@ -1,26 +1,23 @@
 #ifndef CORNET_CONTEXT_H
 #define CORNET_CONTEXT_H
 
-#include "cornet/io_uring/uring.h"
-#include "cornet/base/task.h"
-#include "cornet/io_uring/utask.h"
-#include "cornet/coroutine/atask.h"
-#include "cornet/coroutine/coro.h"
-#include "cornet/io_uring/awaiters.h"
-#include "cornet/scheduling/scheduler.h"
-#include "cornet/scheduling/executor.h"
-#include "cornet/io_uring/io_slot.h"
-#include "cornet/base/metrics.h"
-#include "cornet/utils/config.h"
-#include "cornet/utils/logging.h"
-#include "cornet/io_uring/context_cancellation.h"
 #include <functional>
 #include <memory>
 #include <optional>
-#include <concurrentqueue/moodycamel/concurrentqueue.h>
-#ifdef BLOCK_SIZE
-#undef BLOCK_SIZE
-#endif
+
+#include <spdlog/spdlog.h>
+
+#include "cornet/base/task.h"
+#include "cornet/base/metrics.h"
+#include "cornet/utils/config.h"
+#include "cornet/io_uring/utask.h"
+#include "cornet/io_uring/uring.h"
+#include "cornet/io_uring/io_slot.h"
+#include "cornet/io_uring/context_cancellation.h"
+#include "cornet/coroutine/atask.h"
+#include "cornet/coroutine/coro.h"
+#include "cornet/scheduling/scheduler.h"
+#include "cornet/scheduling/executor.h"
 
 namespace cornet {
 
@@ -50,6 +47,8 @@ struct context_t {
     // context terminated, all tasks done
     Terminated
   };
+  
+  context_t(config_t* config = nullptr);
 
   ~context_t();
 
@@ -285,6 +284,7 @@ struct context_t {
     return slots;
   }
 
+  #ifdef CORNET_METRICS
   /**
    * @brief return context metrics for performance diagnostics.
    * @return metrics reference
@@ -292,6 +292,7 @@ struct context_t {
   CORNET_NODISCARD inline context_metrics_t& metrics() {
     return metrics_;
   }
+  #endif
 
   /**
    * @brief return context_t owned executor.
@@ -347,15 +348,10 @@ struct context_t {
     return "Unknown";
   }
 
-  context_t();
-
 
   void ensure_executor() {
     if (!executor) {
-      executor = std::make_unique<executor_t>(
-          config_t::get()["cornet"]["context"]["executor"]["thread_nr"].value_or(1),
-          config_t::get()["cornet"]["context"]["executor"]["max_task_nr"].value_or(16384)
-      );
+      executor = std::make_unique<executor_t>(executor_thread_nr, executor_max_task_nr);
     }
   }
 
@@ -369,30 +365,36 @@ private:
   uring_t uring;
   // context owned io slot table for safe user_data management
   io_slot_table_t slots;
-  // context performance metrics
-  context_metrics_t metrics_;
   // eventfd for cross-thread wakeup
   int wakeup_fd{-1};
+  // signalfd for async signal handling (-1 if not used)
+  int signal_fd{-1};
   // context current state
   std::atomic<state_t> state{state_t::Terminated};
   // context current scheduler type
-  scheduler_type_t scheduler_type{scheduler_type_t::RoundRobin};
+  scheduler_type_t scheduler_type{scheduler_type_t::Adaptive};
   // context scheduler
   std::unique_ptr<scheduler_t> scheduler;
   // context executor
   std::unique_ptr<executor_t> executor;
-  // signalfd for async signal handling (-1 if not used)
-  int signal_fd{-1};
+  // context executor default thread number
+  int executor_thread_nr{1};
+  // context executor default max task number
+  int executor_max_task_nr{16384};
   // per-signal handler callbacks
   std::unordered_map<int, std::function<void(int)>> signal_handlers;
   // MPSC queue for cross-thread task submission
   moodycamel::ConcurrentQueue<std::function<void()>> remote_queue_;
   // keep-alive flag: prevents auto-exit when user tasks are idle
   bool keep_alive_{false};
-
   // graceful shutdown deadline: when Draining and user_idle() is false,
   // this deadline triggers a forced Canceling transition
   std::optional<std::chrono::steady_clock::time_point> shutdown_deadline_;
+  
+  #ifdef CORNET_METRICS
+  // context performance metrics
+  context_metrics_t metrics_;
+  #endif
 
   // internal: signal watch coroutine
   coro_t<void> signal_watch_loop();

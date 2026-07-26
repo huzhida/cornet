@@ -1,6 +1,5 @@
 #include "cornet/scheduling/runtime.h"
 #include <latch>
-#include <barrier>
 
 namespace cornet {
 

@@ -3,7 +3,10 @@
 
 #include <vector>
 #include <unordered_map>
-#include "cornet/base/task.h"
+#include <coroutine>
+
+#include "cornet/base/defines.h"
+#include "cornet/utils/config.h"
 
 
 namespace cornet {
@@ -86,6 +89,8 @@ inline const char* scheduler_name(scheduler_type_t type) {
 struct scheduler_t {
   using queue_t = ring_queue_t;
 
+  scheduler_t(config_t* config) {};
+
   virtual ~scheduler_t() = default;
 
   /**
@@ -121,14 +126,21 @@ struct scheduler_t {
    * @param scheduler_type scheduler's type
    * @return scheduler instance
    */
-  static std::unique_ptr<scheduler_t> scheduler(scheduler_type_t scheduler_type);
+  static std::unique_ptr<scheduler_t> scheduler(scheduler_type_t scheduler_type, config_t* config = nullptr);
+
+  /**
+   * @brief create scheduler by type
+   * @param copnfig global config
+   * @return scheduler instance
+   */
+  static std::unique_ptr<scheduler_t> scheduler(config_t* config);
 
   /**
    * @brief register scheduler type
    * @param type scheduler type
    * @param create create factory function
    */
-  static inline void register_scheduler(scheduler_type_t type, std::unique_ptr<scheduler_t> (*create)()) {
+  static inline void register_scheduler(scheduler_type_t type, std::unique_ptr<scheduler_t> (*create)(config_t*)) {
     registry[type] = {scheduler_name(type), create};
   }
 
@@ -164,7 +176,7 @@ protected:
 
 private:
   // scheduler registry
-  static std::unordered_map<scheduler_type_t, std::pair<std::string, std::unique_ptr<scheduler_t>(*)()>> registry;
+  static std::unordered_map<scheduler_type_t, std::pair<std::string, std::unique_ptr<scheduler_t>(*)(config_t*)>> registry;
 };
 
 /**
@@ -172,11 +184,11 @@ private:
  * cpu / io has their own budget
  */
 struct time_slice_scheduler_t : scheduler_t {
-  static inline std::unique_ptr<scheduler_t> create() {
-    return std::make_unique<time_slice_scheduler_t>();
-  }
+  time_slice_scheduler_t(config_t* config);
 
-  time_slice_scheduler_t();
+  static inline std::unique_ptr<scheduler_t> create(config_t* config) {
+    return std::make_unique<time_slice_scheduler_t>(config);
+  }
 
   void sched(context_t& ctx) final;
 
@@ -198,8 +210,10 @@ private:
  * process all cpu tasks until io_uring full or ready tasks empty, then wait io.
  */
 struct round_robin_scheduler_t : scheduler_t {
-  static inline std::unique_ptr<scheduler_t> create() {
-    return std::make_unique<round_robin_scheduler_t>();
+  round_robin_scheduler_t(config_t* config) : scheduler_t(config) {}
+
+  static inline std::unique_ptr<scheduler_t> create(config_t* config) {
+    return std::make_unique<round_robin_scheduler_t>(config);
   }
 
   void sched(context_t& ctx) final;
@@ -210,10 +224,10 @@ struct round_robin_scheduler_t : scheduler_t {
  * try best to make batch then submit, then wait io.
  */
 struct batch_scheduler_t : scheduler_t {
-  batch_scheduler_t();
+  batch_scheduler_t(config_t* config);
 
-  static inline std::unique_ptr<scheduler_t> create() {
-    return std::make_unique<batch_scheduler_t>();
+  static inline std::unique_ptr<scheduler_t> create(config_t* config) {
+    return std::make_unique<batch_scheduler_t>(config);
   }
 
   void sched(context_t& ctx) final;
@@ -230,8 +244,9 @@ private:
  * Automatically balances between CPU-bound and I/O-bound workloads without configuration.
  */
 struct adaptive_scheduler_t : scheduler_t {
-  static inline std::unique_ptr<scheduler_t> create() {
-    return std::make_unique<adaptive_scheduler_t>();
+  adaptive_scheduler_t(config_t* config) : scheduler_t(config) {}
+  static inline std::unique_ptr<scheduler_t> create(config_t* config) {
+    return std::make_unique<adaptive_scheduler_t>(config);
   }
 
   void sched(context_t& ctx) final;

@@ -2,8 +2,7 @@
 #define CORNET_RINGBUFFER_H
 
 #include <atomic>
-#include <memory>
-#include "base/defines.h"
+#include "cornet/base/defines.h"
 
 namespace cornet {
 /**

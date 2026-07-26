@@ -3,8 +3,11 @@
 
 #include <coroutine>
 #include <memory>
+
+#include <spdlog/spdlog.h>
+
 #include "cornet/coroutine/cancel.h"
-#include "cornet/base/expected.h"
+#include "cornet/scheduling/context.h"
 
 namespace cornet {
 

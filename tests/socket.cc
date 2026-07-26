@@ -1,4 +1,5 @@
-#include "net/socket.h"
+#include "cornet/net/socket.h"
+#include "cornet/scheduling/context.h"
 
 #include <gtest/gtest.h>
 #include <thread>

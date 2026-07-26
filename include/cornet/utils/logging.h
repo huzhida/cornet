@@ -1,16 +1,16 @@
 #ifndef CORNET_LOGGING_H
 #define CORNET_LOGGING_H
 
-#include "cornet/utils/config.h"
 #include <spdlog/spdlog.h>
 
-namespace cornet::logging {
+#include "cornet/utils/config.h"
 
+namespace cornet::logging {
 /**
  * @brief initialize spdlog logging from config.
  * Must be called after config_t::load().
  */
-void init();
+void init(const config_t& config);
 
 }
 

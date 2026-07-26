@@ -3,7 +3,6 @@
 
 #include <cstdint>
 #include <vector>
-#include "cornet/base/defines.h"
 
 namespace cornet {
 
