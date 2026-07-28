@@ -4,6 +4,7 @@
 #include <vector>
 #include <unordered_map>
 #include <coroutine>
+#include <array>
 
 #include "cornet/base/defines.h"
 #include "cornet/utils/config.h"

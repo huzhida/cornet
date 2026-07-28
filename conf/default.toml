@@ -6,7 +6,7 @@ capacity=4096
 [cornet.context.scheduler]
 name="TimeSlice"
 cpu_budget="10ms"
-io_budget="100us"
+io_budget="1ms"
 batch=2048
 
 # cornet.logging.stdout
