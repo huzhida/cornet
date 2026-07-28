@@ -3,6 +3,7 @@
 
 #include "cornet/base/task.h"
 #include <exception>
+#include <variant>
 
 namespace cornet {
 
@@ -24,46 +25,26 @@ struct atask_t : task_t {
  * @tparam R return type of callable
  */
 template<typename F, typename R = std::invoke_result_t<F>>
-struct typed_atask_t : atask_t {
+struct async_task_t : atask_t {
   // the callable to execute
   F func_;
   // storage for the callable's return value
-  R result_{};
+  std::conditional_t<std::is_void_v<R>, std::monostate, R> result_{};
 
   /**
    * @brief construct from a callable
    * @param f callable to execute on worker thread
    */
-  explicit typed_atask_t(F&& f) : func_(std::forward<F>(f)) {
+  explicit async_task_t(F&& f) : func_(std::forward<F>(f)) {
     this->fn = [](atask_t* self) {
-      auto* t = static_cast<typed_atask_t*>(self);
+      auto* t = static_cast<async_task_t*>(self);
       try {
-        t->result_ = t->func_();
-      } catch (...) {
-        t->exception = std::current_exception();
-      }
-    };
-  }
-};
-
-/**
- * @brief typed async task specialization for void-returning callables.
- * @tparam F callable type
- */
-template<typename F>
-struct typed_atask_t<F, void> : atask_t {
-  // the callable to execute
-  F func_;
-
-  /**
-   * @brief construct from a void-returning callable
-   * @param f callable to execute on worker thread
-   */
-  explicit typed_atask_t(F&& f) : func_(std::forward<F>(f)) {
-    this->fn = [](atask_t* self) {
-      auto* t = static_cast<typed_atask_t*>(self);
-      try {
-        t->func_();
+        if constexpr (std::is_void_v<R>) {
+          t->func_();
+          return;
+        } else {
+          t->result_ = t->func_();
+        }
       } catch (...) {
         t->exception = std::current_exception();
       }

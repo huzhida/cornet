@@ -26,61 +26,61 @@ class uring_t {
    * @param entries_nr number of entries in the ring
    * @param flags io_uring_setup flags
    */
-  explicit uring_t(uint32_t entries_nr = 32, uint32_t flags = 0);
+   explicit uring_t(uint32_t entries_nr = 32, uint32_t flags = 0);
 
-  ~uring_t();
+   ~uring_t();
 
-  uring_t(const uring_t&) = delete;
+   uring_t(const uring_t&) = delete;
 
-  uring_t(uring_t&& r) noexcept;
+   uring_t(uring_t&& r) noexcept;
 
-  uring_t& operator=(const uring_t&) = delete;
+   uring_t& operator=(const uring_t&) = delete;
 
-  uring_t& operator=(uring_t&& r) noexcept;
+   uring_t& operator=(uring_t&& r) noexcept;
 
-  /**
-   * @brief get an SQE from the ring. If the ring is full, submits pending SQEs first.
-   * @return pointer to an available io_uring_sqe
-   */
-  io_uring_sqe* get_sqe();
+   /**
+    * @brief get an SQE from the ring. If the ring is full, submits pending SQEs first.
+    * @return pointer to an available io_uring_sqe
+    */
+   io_uring_sqe* get_sqe();
 
-  /**
-   * @brief atomically get multiple SQEs from the ring.
-   * If SQ space is insufficient, submits pending SQEs first, then acquires all at once.
-   * Guarantees all returned SQEs are in the same submission batch (safe for IOSQE_IO_LINK).
-   * @param out pointer to array that receives the SQE pointers
-   * @param n number of SQEs to acquire
-   */
-  void get_sqes(io_uring_sqe** out, size_t n);
+   /**
+    * @brief atomically get multiple SQEs from the ring.
+    * If SQ space is insufficient, submits pending SQEs first, then acquires all at once.
+    * Guarantees all returned SQEs are in the same submission batch (safe for IOSQE_IO_LINK).
+    * @param out pointer to array that receives the SQE pointers
+    * @param n number of SQEs to acquire
+    */
+   void get_sqes(io_uring_sqe** out, size_t n);
 
-  /**
-   * @brief submit all prepared SQEs to kernel
-   * @return < 0 submit failed, > 0 submitted count
-   */
-  int submit();
+   /**
+    * @brief submit all prepared SQEs to kernel
+    * @return < 0 submit failed, > 0 submitted count
+    */
+   int submit();
 
-  /**
-   * @brief wait for CQEs and process them (with timeout)
-   * @param ctx context reference
-   * @param wait_nr minimum number of CQEs to wait for
-   * @param timeout timeout period
-   * @param mask signal mask
-   * @return number of processed CQEs
-   */
-  template<typename Rep, typename Period>
-  uint32_t wait_cqes(context_t &ctx, uint32_t wait_nr,
-                     std::chrono::duration<Rep, Period> timeout, sigset_t *mask = nullptr) {
-    CORNET_METRICS_ADD(metrics_->wait_calls);
-    cqe_t cqe;
-    __kernel_timespec ts = to_kernel_timespec(timeout);
-    int ret = io_uring_wait_cqes(uring.get(), &cqe, wait_nr, &ts, mask);
-    if (ret == -ETIME) {
-      CORNET_METRICS_ADD(metrics_->wait_timeouts);
-      return 0;
-    }
-    uint32_t n = process_cqes(ctx, cqe);
-    CORNET_METRICS_ADD(metrics_->wait_cqes_processed);
-    return n;
+   /**
+    * @brief wait for CQEs and process them (with timeout)
+    * @param ctx context reference
+    * @param wait_nr minimum number of CQEs to wait for
+    * @param timeout timeout period
+    * @param mask signal mask
+    * @return number of processed CQEs
+    */
+   template <typename Rep, typename Period>
+   uint32_t wait_cqes(context_t& ctx, uint32_t wait_nr, std::chrono::duration<Rep, Period> timeout,
+                      sigset_t* mask = nullptr) {
+     CORNET_METRICS_ADD(metrics_->wait_calls);
+     cqe_t cqe;
+     __kernel_timespec ts = to_kernel_timespec(timeout);
+     int ret = io_uring_wait_cqes(uring.get(), &cqe, wait_nr, &ts, mask);
+     if (ret == -ETIME) {
+       CORNET_METRICS_ADD(metrics_->wait_timeouts);
+       return 0;
+     }
+     uint32_t n = process_cqes(ctx, cqe);
+     CORNET_METRICS_ADD(metrics_->wait_cqes_processed);
+     return n;
   }
 
   /**
@@ -147,12 +147,6 @@ class uring_t {
   uint32_t persistent_task_nr{0};
   // io_uring handle
   std::unique_ptr<io_uring> uring;
-  // registered buffers
-  std::unique_ptr<iovec[]> registered_buffers{};
-  // registered buffer count
-  size_t registered_buffer_nr{0};
-  // registered file descriptors
-  std::unique_ptr<int[]> registered_files{};
   #ifdef CORNET_METRICS
   // metrics pointer (set by context after construction)
   context_metrics_t* metrics_{nullptr};

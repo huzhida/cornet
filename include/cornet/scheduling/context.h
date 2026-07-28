@@ -7,8 +7,11 @@
 
 #include <spdlog/spdlog.h>
 
-#include "cornet/base/task.h"
+#ifdef CORNET_METRICS
 #include "cornet/base/metrics.h"
+#endif
+
+#include "cornet/base/task.h"
 #include "cornet/utils/config.h"
 #include "cornet/io_uring/utask.h"
 #include "cornet/io_uring/uring.h"
@@ -121,7 +124,7 @@ struct context_t {
   template<typename F, typename R = std::invoke_result_t<F>>
   struct async_awaiter {
     context_t& ctx_;
-    typed_atask_t<std::decay_t<F>, R> task_;
+    async_task_t<std::decay_t<F>, R> task_;
     explicit async_awaiter(context_t& ctx, F&& f)
       : ctx_(ctx), task_(std::forward<F>(f)) {}
     bool await_ready() { return false; }
