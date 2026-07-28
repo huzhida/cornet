@@ -13,11 +13,6 @@ uring_t::uring_t(uint32_t entries_nr, uint32_t flags)
 }
 
 uring_t::~uring_t() {
-  if (registered_buffers) {
-    for (size_t i = 0; i < registered_buffer_nr; ++i) {
-      free(registered_buffers[i].iov_base);
-    }
-  }
   if (uring) io_uring_queue_exit(uring.get());
 }
 
@@ -25,35 +20,18 @@ uring_t::uring_t(uring_t&& r) noexcept {
   if (this != &r) {
     this->uring = std::move(r.uring);
     this->task_nr = r.task_nr;
-    this->registered_buffers = std::move(r.registered_buffers);
-    this->registered_buffer_nr = r.registered_buffer_nr;
-    this->registered_files = std::move(r.registered_files);
     r.uring = nullptr;
     r.task_nr = 0;
-    r.registered_buffers = nullptr;
-    r.registered_buffer_nr = 0;
-    r.registered_files = nullptr;
   }
 }
 
 uring_t& uring_t::operator=(uring_t&& r) noexcept {
   if (this != &r) {
-    if (registered_buffers) {
-      for (size_t i = 0; i < registered_buffer_nr; ++i) {
-        free(registered_buffers[i].iov_base);
-      }
-    }
     if (uring) io_uring_queue_exit(uring.get());
     this->uring = std::move(r.uring);
     this->task_nr = r.task_nr;
-    this->registered_buffers = std::move(r.registered_buffers);
-    this->registered_buffer_nr = r.registered_buffer_nr;
-    this->registered_files = std::move(r.registered_files);
     r.uring = nullptr;
     r.task_nr = 0;
-    r.registered_buffers = nullptr;
-    r.registered_buffer_nr = 0;
-    r.registered_files = nullptr;
   }
   return *this;
 }
@@ -101,7 +79,7 @@ int uring_t::submit() {
   CORNET_METRICS_SCOPE_TIMER(metrics_->submit_latency);
   int submit_nr = io_uring_submit(uring.get());
   if (submit_nr < 0) {
-  CORNET_METRICS_ADD(metrics_->submit_failures);
+    CORNET_METRICS_ADD(metrics_->submit_failures);
     SPDLOG_ERROR("io_uring submit sqe failed with error: {}", strerror(-submit_nr));
     return submit_nr;
   }

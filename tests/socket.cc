@@ -2,7 +2,6 @@
 #include "cornet/scheduling/context.h"
 
 #include <gtest/gtest.h>
-#include <thread>
 #include <asio/buffer.hpp>
 
 using namespace cornet;

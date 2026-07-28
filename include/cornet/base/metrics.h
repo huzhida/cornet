@@ -1,13 +1,14 @@
 #ifndef CORNET_METRICS_H
 #define CORNET_METRICS_H
 
+#ifdef CORNET_METRICS
 #include <chrono>
 #include <algorithm>
 #include <cstdio>
 
 namespace cornet {
 
-#ifdef CORNET_METRICS
+
 
 /**
  * @brief lightweight latency histogram with fixed buckets (in microseconds).
