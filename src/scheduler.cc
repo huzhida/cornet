@@ -28,7 +28,7 @@ std::unique_ptr<scheduler_t> scheduler_t::scheduler(scheduler_type_t scheduler_t
 }
 
 std::unique_ptr<scheduler_t> scheduler_t::scheduler(config_t* config) {
-  auto scheduler_type = to_scheduler_type(config ? config->at_path("cornet.scheduler").as_string()->value_or("Adaptive") : "Adaptive") ;
+  auto scheduler_type = to_scheduler_type(config ? config->at_path("cornet.context.scheduler.name").as_string()->value_or("Adaptive") : "Adaptive") ;
   return scheduler_t::scheduler(scheduler_type, config);
 }
 

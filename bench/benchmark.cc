@@ -38,12 +38,15 @@ int main(int argc, char* argv[]) {
   };
 
   std::vector<bench_entry> benches = {
-    {"Cornet/Adaptive",   [](const scenario_t& s) { return run_cornet(s, cornet::scheduler_type_t::Adaptive); }},
-    {"Cornet/RoundRobin", [](const scenario_t& s) { return run_cornet(s, cornet::scheduler_type_t::RoundRobin); }},
-    {"Cornet/Batch",      [](const scenario_t& s) { return run_cornet(s, cornet::scheduler_type_t::Batch); }},
-    {"Asio/Callback",     [](const scenario_t& s) { return run_asio_callback(s); }},
-    {"Asio/Coroutine",    [](const scenario_t& s) { return run_asio_coro(s); }},
-    {"Libuv",             [](const scenario_t& s) { return run_libuv(s); }},
+    {"Cornet/Adaptive",
+     [&config](const scenario_t& s) { return run_cornet(s, cornet::scheduler_type_t::Adaptive, config); }},
+    {"Cornet/RoundRobin",
+     [&config](const scenario_t& s) { return run_cornet(s, cornet::scheduler_type_t::RoundRobin, config); }},
+    {"Cornet/Batch", [&config](const scenario_t& s) { return run_cornet(s, cornet::scheduler_type_t::Batch, config); }},
+    {"Cornet/TimeSlice",[&config](const scenario_t& s) { return run_cornet(s, cornet::scheduler_type_t::TimeSlice, config); }},
+    {"Asio/Callback", [](const scenario_t& s) { return run_asio_callback(s); }},
+    {"Asio/Coroutine", [](const scenario_t& s) { return run_asio_coro(s); }},
+    {"Libuv", [](const scenario_t& s) { return run_libuv(s); }},
   };
 
   for (size_t si = 0; si < scenarios.size(); ++si) {
@@ -52,7 +55,7 @@ int main(int argc, char* argv[]) {
 
     // Warmup
     printf("  预热中...\n");
-    run_cornet(scenario, cornet::scheduler_type_t::Adaptive);
+    run_cornet(scenario, cornet::scheduler_type_t::Adaptive, config);
     run_asio_callback(scenario);
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
 

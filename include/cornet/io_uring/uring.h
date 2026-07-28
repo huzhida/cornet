@@ -3,6 +3,8 @@
 
 #include <liburing.h>
 
+#include <memory>
+
 #include "cornet/base/defines.h"
 #include "cornet/base/metrics.h"
 

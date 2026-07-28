@@ -6,6 +6,7 @@ namespace cornet {
 
 uring_t::uring_t(uint32_t entries_nr, uint32_t flags)
   : uring(std::make_unique<io_uring>()) {
+  SPDLOG_INFO("n = {}", entries_nr);
   if (io_uring_queue_init(entries_nr, uring.get(), flags) < 0) {
     SPDLOG_ERROR("failed to init io_uring queue with error: {}", strerror(errno));
     throw std::runtime_error("failed to init io_uring queue");

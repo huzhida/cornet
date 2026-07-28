@@ -10,11 +10,11 @@
 
 namespace bench {
 
-inline result_t run_cornet(const scenario_t& scenario, cornet::scheduler_type_t sched_type) {
+inline result_t run_cornet(const scenario_t& scenario, cornet::scheduler_type_t sched_type, cornet::config_t& config) {
   using namespace cornet;
 
   // Server context: created on a dedicated thread
-  context_t server_ctx;
+  context_t server_ctx(&config);
   server_ctx.set_scheduler_type(sched_type);
 
   std::atomic<bool> server_running{true};
@@ -27,7 +27,7 @@ inline result_t run_cornet(const scenario_t& scenario, cornet::scheduler_type_t 
   auto server_session = [&](context_t& ctx, int sock_fd) -> coro_t<void> {
     tcp::v4::socket_t sock(sock_fd);
     std::vector<char> buf(scenario.message_size + 64);
-    while (server_running.load(std::memory_order_acquire)) {
+    while (true) {
       auto n = co_await sock.recv(ctx, buf.data(), buf.size());
       if (!n || *n <= 0) break;
       auto s = co_await sock.send(ctx, buf.data(), *n);
@@ -82,7 +82,7 @@ inline result_t run_cornet(const scenario_t& scenario, cornet::scheduler_type_t 
   }
 
   // Client context: created on the main thread
-  context_t client_ctx;
+  context_t client_ctx(&config);
   client_ctx.set_scheduler_type(sched_type);
 
   size_t rss_before = get_current_rss_kb();
