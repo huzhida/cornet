@@ -42,7 +42,7 @@ nop_awaiter::nop_awaiter(context_t& ctx) {
 }
 
 void async_close(context_t& ctx, int fd) {
-  if (ctx.is_shutting_down()) {
+  if (!ctx.is_running()) {
     ::close(fd);
   } else {
     ctx.io_detach([fd](io_uring_sqe* sqe) {

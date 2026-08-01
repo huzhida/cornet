@@ -7,6 +7,13 @@
 // CPU cache line size for alignment purposes
 #define CORNET_CACHE_LINE 64
 
+// Linux kernel version check (5.19 = 393779) — IORING_ASYNC_CANCEL_ANY support
+#include <linux/version.h>
+#ifndef KERNEL_VERSION
+#define KERNEL_VERSION(a,b,c) (((a) << 16) + ((b) << 8) + (c))
+#endif
+#define CORNET_LINUX_VERSION_GE_5_19 (LINUX_VERSION_CODE >= KERNEL_VERSION(5,19,0))
+
 // suppress unused warnings
 #define CORNET_MAYBE_UNUSED [[maybe_unused]]
 // enforce callers to check return value

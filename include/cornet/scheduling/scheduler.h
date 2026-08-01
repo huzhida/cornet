@@ -5,9 +5,12 @@
 #include <unordered_map>
 #include <coroutine>
 #include <array>
+#include <memory>
 
 #include "cornet/base/defines.h"
 #include "cornet/utils/config.h"
+#include "cornet/scheduling/task_tracker.h"
+#include "cornet/scheduling/schedule_policy.h"
 
 
 namespace cornet {
@@ -53,14 +56,15 @@ private:
   size_t tail_;
 };
 
-#define CORNET_REGISTER_SCHEDULER(name, cls) \
-struct register_##cls { \
-register_##cls() {                 \
-cornet::scheduler_t::register_scheduler(name, cls::create);\
+#define CORNET_REGISTER_SCHEDULER(name, factory_func) \
+struct register_##factory_func { \
+register_##factory_func() {                 \
+cornet::scheduler_t::register_policy(name, factory_func);\
 }\
-} register_##cls##_instance;
+} register_##factory_func##_instance;
 
 
+struct config_t;
 struct context_t;
 struct atask_t;
 /**
@@ -85,20 +89,55 @@ inline const char* scheduler_name(scheduler_type_t type) {
 }
 
 /**
- * @brief context scheduler, schedule and process task
+ * @brief scheduler with injectable scheduling policy.
+ *
+ * Infrastructure (ready queue, I/O flushing, async task collection)
+ * is unified in this class. The scheduling strategy — when to stop
+ * resuming tasks and when to flush I/O — is delegated to a
+ * schedule_policy_t object.
+ *
+ * Switching policy at runtime is a simple pointer replacement;
+ * no task queue transfer is needed.
  */
 struct scheduler_t {
   using queue_t = ring_queue_t;
+  using policy_factory_t = std::unique_ptr<schedule_policy_t> (*)(config_t*);
 
-  scheduler_t(config_t* config) {};
+  scheduler_t(task_tracker_t& tracker, config_t* config)
+    : tracker_(tracker), config_(config) {
+    auto scheduler_type =
+      to_scheduler_type(config ? config->at_path("cornet.context.scheduler.name").value_or("Adaptive") : "Adaptive");
+    set_policy(scheduler_type);
+  }
+
+  scheduler_t(task_tracker_t& tracker, scheduler_type_t type, config_t* config = nullptr)
+    : tracker_(tracker), config_(config) {
+    set_policy(type);
+  }
 
   virtual ~scheduler_t() = default;
 
   /**
-   * @brief schedule interface
+   * @brief schedule interface: resume ready tasks, then flush I/O.
+   * The concrete stopping condition is delegated to policy_->should_stop_cpu().
    * @param ctx owner context
    */
-  virtual void sched(context_t& ctx) = 0;
+  void sched(context_t& ctx);
+
+  /**
+   * @brief swap the scheduling policy at runtime.
+   * Preserves tracker_, ready_tasks, and all infrastructure.
+   * Only the scheduling strategy changes.
+   * @param type new scheduler type
+   */
+  void set_policy(scheduler_type_t type) {
+    auto iter = registry.find(type);
+    if (iter == registry.end()) {
+      throw std::runtime_error("scheduler policy not registered: " +
+                               std::string(scheduler_name(type)));
+    }
+    policy_ = iter->second.second(config_);
+  }
 
   /**
    * @brief push coroutine handle to ready queue.
@@ -106,6 +145,7 @@ struct scheduler_t {
    */
   inline void schedule(std::coroutine_handle<> h) {
     ready_tasks.push(h);
+    tracker_.coroutine_add();
   }
 
   /**
@@ -117,38 +157,18 @@ struct scheduler_t {
   }
 
   /**
-   * @brief transfer tasks ownership to another scheduler
-   * @param scheduler destination scheduler
-   */
-  void transfer_to(scheduler_t& scheduler);
-
-  /**
-   * @brief create scheduler by type
-   * @param scheduler_type scheduler's type
-   * @return scheduler instance
-   */
-  static std::unique_ptr<scheduler_t> scheduler(scheduler_type_t scheduler_type, config_t* config = nullptr);
-
-  /**
-   * @brief create scheduler by type
-   * @param copnfig global config
-   * @return scheduler instance
-   */
-  static std::unique_ptr<scheduler_t> scheduler(config_t* config);
-
-  /**
-   * @brief register scheduler type
+   * @brief register a scheduling policy by type.
    * @param type scheduler type
-   * @param create create factory function
+   * @param factory factory function that creates a schedule_policy_t
    */
-  static inline void register_scheduler(scheduler_type_t type, std::unique_ptr<scheduler_t> (*create)(config_t*)) {
-    registry[type] = {scheduler_name(type), create};
+  static inline void register_policy(scheduler_type_t type, policy_factory_t factory) {
+    registry[type] = {scheduler_name(type), factory};
   }
 
   /**
    * @brief from name to scheduler type
    * @param name scheduler name
-   * @return scheduler name correspond to name
+   * @return scheduler type corresponding to name
    */
   static inline scheduler_type_t to_scheduler_type(std::string_view name) {
     for (const auto& kv : registry) {
@@ -160,6 +180,8 @@ struct scheduler_t {
   }
 
 protected:
+  // work tracker (owned by context_t, set after construction)
+  task_tracker_t& tracker_;
   // ready to resume queue
   queue_t ready_tasks;
   // resume one task from the ready queue
@@ -176,91 +198,12 @@ protected:
   std::array<atask_t*, 32> async_tasks;
 
 private:
-  // scheduler registry
-  static std::unordered_map<scheduler_type_t, std::pair<std::string, std::unique_ptr<scheduler_t>(*)(config_t*)>> registry;
-};
-
-/**
- * @brief time-slice scheduler implementation
- * cpu / io has their own budget
- */
-struct time_slice_scheduler_t : scheduler_t {
-  time_slice_scheduler_t(config_t* config);
-
-  static inline std::unique_ptr<scheduler_t> create(config_t* config) {
-    return std::make_unique<time_slice_scheduler_t>(config);
-  }
-
-  void sched(context_t& ctx) final;
-
-private:
-  /**
-   * @brief whether cpu timeout
-   * @param start start time
-   * @return true for yes/ false for no.
-   */
-  bool cpu_timeout(std::chrono::steady_clock::time_point& start) const;
-  // cpu budget in ns
-  std::chrono::nanoseconds cpu_budget{10000000};
-  // io budget in ns
-  std::chrono::nanoseconds io_budget{1000000};
-};
-
-/**
- * @brief round-robin scheduler implementation
- * process all cpu tasks until io_uring full or ready tasks empty, then wait io.
- */
-struct round_robin_scheduler_t : scheduler_t {
-  round_robin_scheduler_t(config_t* config) : scheduler_t(config) {}
-
-  static inline std::unique_ptr<scheduler_t> create(config_t* config) {
-    return std::make_unique<round_robin_scheduler_t>(config);
-  }
-
-  void sched(context_t& ctx) final;
-};
-
-/**
- * @brief batch scheduler implementation
- * try best to make batch then submit, then wait io.
- */
-struct batch_scheduler_t : scheduler_t {
-  batch_scheduler_t(config_t* config);
-
-  static inline std::unique_ptr<scheduler_t> create(config_t* config) {
-    return std::make_unique<batch_scheduler_t>(config);
-  }
-
-  void sched(context_t& ctx) final;
-private:
-  // batch size
-  uint32_t batch_nr{32};
-};
-
-/**
- * @brief adaptive scheduler implementation.
- * Dynamically adjusts CPU batch size and I/O wait timeout based on feedback signals:
- * - I/O saturation: ratio of ready CQEs to inflight tasks
- * - CPU pressure: whether ready queue has pending tasks
- * Automatically balances between CPU-bound and I/O-bound workloads without configuration.
- */
-struct adaptive_scheduler_t : scheduler_t {
-  adaptive_scheduler_t(config_t* config) : scheduler_t(config) {}
-  static inline std::unique_ptr<scheduler_t> create(config_t* config) {
-    return std::make_unique<adaptive_scheduler_t>(config);
-  }
-
-  void sched(context_t& ctx) final;
-
-private:
-  void adapt(size_t resumed, uint32_t cqes_ready, size_t inflight);
-
-  // dynamic parameters
-  size_t cpu_batch_{64};
-  std::chrono::nanoseconds io_wait_{std::chrono::milliseconds(1)};
-
-  // feedback signals (exponential moving average)
-  double io_saturation_{0.0};
+  // scheduling policy (injected, not inherited)
+  std::unique_ptr<schedule_policy_t> policy_;
+  // saved config pointer for use in set_policy and policy factory
+  config_t* config_ = nullptr;
+  // scheduler registry: type -> (name, policy_factory)
+  static std::unordered_map<scheduler_type_t, std::pair<std::string, policy_factory_t>> registry;
 };
 
 } // cornet

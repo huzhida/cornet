@@ -74,11 +74,13 @@ struct utask_t : task_t {
    */
   void prepare_into(io_uring_sqe* sqe);
 
+#if !CORNET_LINUX_VERSION_GE_5_19
   /**
    * @brief the io_uring user_data token for this task (encoded slot index + generation).
    * Used by cancellation to target the inflight operation. 0 means not submitted.
    */
   CORNET_NODISCARD inline uint64_t io_token() const { return slot_data_; }
+#endif
 
   /**
    * @brief the raw result of the async syscall (negative errno on failure).
@@ -97,9 +99,11 @@ protected:
   // owner context
   context_t* ctx{nullptr};
 
+#if !CORNET_LINUX_VERSION_GE_5_19
 private:
   // encoded slot data (index + generation) for safe lifetime tracking
   uint64_t slot_data_{0};
+#endif
 };
 
 } // namespace cornet

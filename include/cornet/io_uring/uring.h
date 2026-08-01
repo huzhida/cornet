@@ -7,6 +7,8 @@
 
 #include "cornet/base/defines.h"
 #include "cornet/base/metrics.h"
+#include "cornet/scheduling/task_tracker.h"
+#include "cornet/utils/config.h"
 
 namespace cornet {
 
@@ -28,17 +30,23 @@ class uring_t {
    * @param entries_nr number of entries in the ring
    * @param flags io_uring_setup flags
    */
-   explicit uring_t(uint32_t entries_nr = 32, uint32_t flags = 0);
+   /**
+    * @brief initialize io_uring instance.
+    * Reads capacity and flags from config.
+    * @param tracker work tracker
+    * @param config configuration pointer (may be nullptr)
+    */
+   uring_t(task_tracker_t& tracker, config_t* config);
 
    ~uring_t();
 
    uring_t(const uring_t&) = delete;
 
-   uring_t(uring_t&& r) noexcept;
+   uring_t(uring_t&& r) = delete;
 
    uring_t& operator=(const uring_t&) = delete;
 
-   uring_t& operator=(uring_t&& r) noexcept;
+   uring_t& operator=(uring_t&& r) = delete;
 
    /**
     * @brief get an SQE from the ring. If the ring is full, submits pending SQEs first.
@@ -97,10 +105,9 @@ class uring_t {
   /**
    * @brief peek available CQEs without blocking
    * @param ctx context reference
-   * @param peek_nr maximum number of CQEs to peek
    * @return number of processed CQEs
    */
-  uint32_t peek_cqes( context_t& ctx, uint32_t peek_nr = 1);
+  uint32_t peek_cqes( context_t& ctx);
 
   /**
    * @brief get raw io_uring pointer for low-level operations
@@ -110,10 +117,10 @@ class uring_t {
 
   /**
    * @brief check if all user IO is done (only persistent watchers remain)
-   * @return true if task count equals persistent count
+   * @return true if no user work is inflight
    */
   inline bool user_idle() const {
-    return task_nr <= persistent_task_nr;
+    return tracker_.user_idle();
   }
 
   /**
@@ -121,7 +128,7 @@ class uring_t {
    * @return true if no tasks inflight
    */
   inline bool idle() const {
-    return task_nr == 0;
+    return !tracker_.idle();
   }
 
   /**
@@ -129,24 +136,14 @@ class uring_t {
    * @return task count
    */
   inline size_t running_task_nr() const {
-    return task_nr;
+    return tracker_.inflight_io();
   }
 
-  /**
-   * @brief increment persistent task count (for long-lived watchers like signalfd)
-   */
-  inline void add_persistent() { persistent_task_nr++; }
-
-  /**
-   * @brief decrement persistent task count
-   */
-  inline void remove_persistent() { persistent_task_nr--; }
-
  private:
-  // submitted task count
-  uint32_t task_nr{0};
-  // persistent watcher task count (not considered for idle)
-  uint32_t persistent_task_nr{0};
+  // work tracker (owned by context_t, bound during construction)
+  task_tracker_t& tracker_;
+  // saved config pointer for use in policy factory
+  config_t* config_ = nullptr;
   // io_uring handle
   std::unique_ptr<io_uring> uring;
   #ifdef CORNET_METRICS
