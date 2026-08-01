@@ -4,9 +4,14 @@
 
 namespace cornet {
 
-uring_t::uring_t(uint32_t entries_nr, uint32_t flags)
-  : uring(std::make_unique<io_uring>()) {
-  SPDLOG_INFO("n = {}", entries_nr);
+uring_t::uring_t(task_tracker_t& tracker, config_t* config)
+  : tracker_(tracker),
+    config_(config),
+    uring(std::make_unique<io_uring>()) {
+  auto entries_nr = config
+    ? config->at_path("cornet.context.uring.capacity").value_or(128)
+    : 128u;
+  auto flags = config ? config->at_path("cornet.context.uring.flags").value_or(0u) : 0u;
   if (io_uring_queue_init(entries_nr, uring.get(), flags) < 0) {
     SPDLOG_ERROR("failed to init io_uring queue with error: {}", strerror(errno));
     throw std::runtime_error("failed to init io_uring queue");
@@ -17,25 +22,6 @@ uring_t::~uring_t() {
   if (uring) io_uring_queue_exit(uring.get());
 }
 
-uring_t::uring_t(uring_t&& r) noexcept {
-  if (this != &r) {
-    this->uring = std::move(r.uring);
-    this->task_nr = r.task_nr;
-    r.uring = nullptr;
-    r.task_nr = 0;
-  }
-}
-
-uring_t& uring_t::operator=(uring_t&& r) noexcept {
-  if (this != &r) {
-    if (uring) io_uring_queue_exit(uring.get());
-    this->uring = std::move(r.uring);
-    this->task_nr = r.task_nr;
-    r.uring = nullptr;
-    r.task_nr = 0;
-  }
-  return *this;
-}
 
 io_uring_sqe* uring_t::get_sqe() {
   CORNET_METRICS_ADD(metrics_->get_sqe_calls);
@@ -43,7 +29,7 @@ io_uring_sqe* uring_t::get_sqe() {
   if (!sqe) {
     CORNET_METRICS_ADD(metrics_->get_sqe_submit_forced);
     int ret = io_uring_submit(uring.get());
-    if (ret > 0) task_nr += ret;
+    if (ret > 0) tracker_.io_submit(static_cast<uint32_t>(ret));
     sqe = io_uring_get_sqe(uring.get());
     if (!sqe) {
       SPDLOG_ERROR("failed to get sqe even after submit");
@@ -62,7 +48,7 @@ void uring_t::get_sqes(io_uring_sqe** out, size_t n) {
       // not enough space, submit pending and retry all from scratch
       CORNET_METRICS_ADD(metrics_->get_sqe_submit_forced);
       int ret = io_uring_submit(uring.get());
-      if (ret > 0) task_nr += ret;
+      if (ret > 0) tracker_.io_submit(static_cast<uint32_t>(ret));
       for (size_t j = 0; j < n; ++j) {
         out[j] = io_uring_get_sqe(uring.get());
         if (!out[j]) {
@@ -84,7 +70,7 @@ int uring_t::submit() {
     SPDLOG_ERROR("io_uring submit sqe failed with error: {}", strerror(-submit_nr));
     return submit_nr;
   }
-  task_nr += submit_nr;
+  if (submit_nr > 0) tracker_.io_submit(static_cast<uint32_t>(submit_nr));
   CORNET_METRICS_ADD_N(metrics_->submit_sqes, submit_nr);
   return submit_nr;
 }
@@ -96,7 +82,7 @@ uint32_t uring_t::process_cqes(context_t &ctx, cqe_t cqe) {
     ++count;
   }
   io_uring_cq_advance(uring.get(), count);
-  task_nr -= count;
+  tracker_.io_complete(count);
   return count;
 }
 
@@ -113,20 +99,20 @@ uint32_t uring_t::wait_cqes(context_t &ctx, uint32_t wait_nr, sigset_t *mask) {
   return n;
 }
 
-uint32_t uring_t::peek_cqes(context_t& ctx, uint32_t peek_nr) {
+uint32_t uring_t::peek_cqes(context_t& ctx) {
   CORNET_METRICS_ADD(metrics_->peek_calls);
   cqe_t cqe;
   uint32_t count = 0, head;
   io_uring_for_each_cqe(uring.get(), head, cqe) {
     utask_t::process_utask(ctx, cqe);
-    if (++count >= peek_nr) break;
+    ++count;
   }
   if (count == 0) {
     CORNET_METRICS_ADD(metrics_->peek_empty);
     return 0;
   }
   io_uring_cq_advance(uring.get(), count);
-  task_nr -= count;
+  tracker_.io_complete(count);
   CORNET_METRICS_ADD_N(metrics_->peek_cqes_processed, count);
   return count;
 }

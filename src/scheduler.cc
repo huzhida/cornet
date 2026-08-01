@@ -9,44 +9,19 @@
 
 namespace cornet {
 
-std::unordered_map<scheduler_type_t, std::pair<std::string, std::unique_ptr<scheduler_t>(*)(config_t*)>> scheduler_t::registry;
+std::unordered_map<scheduler_type_t, std::pair<std::string, scheduler_t::policy_factory_t>> scheduler_t::registry;
 
-std::unique_ptr<scheduler_t> scheduler_t::scheduler(scheduler_type_t scheduler_type, config_t* config) {
-  auto iter = registry.find(scheduler_type);
-  if (iter == registry.end()) {
-    std::vector<std::string> registered_schedulers;
-    registered_schedulers.reserve(registry.size());
-    for (const auto& kv : registry) {
-      registered_schedulers.emplace_back(kv.second.first);
-    }
-    SPDLOG_ERROR("scheduler '{}' not exist, available scheduler: [{}]",
-                 cornet::scheduler_name(scheduler_type),
-                 fmt::join(registered_schedulers.begin(), registered_schedulers.end(), ","));
-    throw std::runtime_error("scheduler not found");
-  }
-  return iter->second.second(config);
-}
-
-std::unique_ptr<scheduler_t> scheduler_t::scheduler(config_t* config) {
-  auto scheduler_type = to_scheduler_type(config ? config->at_path("cornet.context.scheduler.name").as_string()->value_or("Adaptive") : "Adaptive") ;
-  return scheduler_t::scheduler(scheduler_type, config);
-}
-
-void scheduler_t::transfer_to(scheduler_t &scheduler) {
-  scheduler.ready_tasks = std::move(ready_tasks);
-}
 void scheduler_t::resume_one_task() {
   auto task = ready_tasks.front();
   ready_tasks.pop();
+  tracker_.coroutine_remove();
   if (task && !task.done()) task.resume();
 }
 
 void scheduler_t::process_async_tasks(context_t& ctx) {
-  auto& executor = ctx.async_executor();
-  if (!executor) return;
-  auto completed = executor->get_completed(async_tasks);
+  auto completed = ctx.executor().get_completed(async_tasks);
   for (size_t idx = 0; idx < completed; ++idx) {
-    this->ready_tasks.push(async_tasks[idx]->handle);
+    this->schedule(async_tasks[idx]->handle);
   }
 }
 
@@ -61,130 +36,94 @@ uint32_t scheduler_t::flush_io(context_t& ctx, std::chrono::nanoseconds wait_tim
   ctx.drain_remote_queue();
 
   uint32_t cqes = 0;
-  if (!uring.user_idle()) {
-    // user IO tasks inflight, try to harvest completions
-    cqes = uring.peek_cqes(ctx, uring.running_task_nr());
-    if (cqes == 0 && ready_tasks.empty()) {
-      cqes = uring.wait_cqes(ctx, 1, wait_timeout);
-    }
-  } else if (ready_tasks.empty()) {
-    // no user IO, no CPU tasks. bounded wait to avoid hot-loop
-    cqes = uring.wait_cqes(ctx, 1, wait_timeout);
+
+  if (uring.running_task_nr() > 0) {
+    cqes = uring.peek_cqes(ctx);
+  }
+
+  if (cqes == 0 && ready_tasks.empty()) {
+    uring.wait_cqes(ctx, 1, wait_timeout);
   }
 
   return cqes;
 }
 
-CORNET_REGISTER_SCHEDULER(scheduler_type_t::TimeSlice, time_slice_scheduler_t);
-time_slice_scheduler_t::time_slice_scheduler_t(config_t* config) : scheduler_t(config) {
-  if (config) {
-    auto conf = (*config)["cornet"]["context"]["scheduler"];
-    cpu_budget = parse_time_str(conf["cpu_budget"].value_or("10ms"));
-    io_budget = parse_time_str(conf["io_budget"].value_or("1ms"));
-  }
-  else {
-    cpu_budget = parse_time_str("10ms");
-    io_budget = parse_time_str("1ms");
-  }
-
-}
-void time_slice_scheduler_t::sched(context_t& ctx) {
+void scheduler_t::sched(context_t& ctx) {
   CORNET_METRICS_SCOPE_TIMER(ctx.metrics().sched_latency);
   CORNET_METRICS_ADD(ctx.metrics().sched_cycles);
+  auto& uring = ctx.io_uring();
+  uint32_t cqes = 0;
 
-  auto start = std::chrono::steady_clock::now();
+  sched_stats stats;
+  stats.start = std::chrono::steady_clock::now();
 
-  while (!ready_tasks.empty() && !cpu_timeout(start)) {
+  while (!ready_tasks.empty() && !policy_->should_stop_cpu(stats)) {
     resume_one_task();
+    stats.tasks_resumed++;
     CORNET_METRICS_ADD(ctx.metrics().tasks_resumed);
   }
 
-  flush_io(ctx, io_budget);
-}
+  uring.submit();
 
-bool time_slice_scheduler_t::cpu_timeout(std::chrono::steady_clock::time_point& start) const {
-  return std::chrono::duration_cast<std::chrono::nanoseconds>(
-    std::chrono::steady_clock::now() - start
-    ) > cpu_budget;
-}
+  // collect executor completions first, may fill ready_tasks
+  process_async_tasks(ctx);
 
-CORNET_REGISTER_SCHEDULER(scheduler_type_t::RoundRobin, round_robin_scheduler_t);
-void round_robin_scheduler_t::sched(context_t& ctx) {
-  CORNET_METRICS_SCOPE_TIMER(ctx.metrics().sched_latency);
-  CORNET_METRICS_ADD(ctx.metrics().sched_cycles);
+  // drain cross-thread task submissions
+  ctx.drain_remote_queue();
 
-  while (!ready_tasks.empty()) {
-    resume_one_task();
-    CORNET_METRICS_ADD(ctx.metrics().tasks_resumed);
+  if (uring.running_task_nr() > 0) {
+    cqes = uring.peek_cqes(ctx);
   }
 
-  flush_io(ctx);
+  if (cqes == 0 && ready_tasks.empty()) {
+    uring.wait_cqes(ctx, 1, policy_->get_io_wait());
+  }
+
+  policy_->on_sched_done(stats, cqes, uring.running_task_nr());
 }
 
-CORNET_REGISTER_SCHEDULER(scheduler_type_t::Batch, batch_scheduler_t);
-batch_scheduler_t::batch_scheduler_t(config_t* config) : scheduler_t(config) {
+// ---- Policy factory functions and registrations ----
+
+static std::unique_ptr<schedule_policy_t> make_round_robin(config_t*) {
+  return std::make_unique<round_robin_policy_t>();
+}
+CORNET_REGISTER_SCHEDULER(scheduler_type_t::RoundRobin, make_round_robin);
+
+static std::unique_ptr<schedule_policy_t> make_batch(config_t* config) {
+  auto p = std::make_unique<batch_policy_t>();
   if (config) {
     if (auto batch_num = (*config)["cornet"]["context"]["scheduler"]["batch"]) {
-      batch_nr = batch_num.value_or(32);
+      p->max_batch = batch_num.value_or(32);
     }
   }
-  else {
-    batch_nr = 32;
-  }
-
+  return p;
 }
-void batch_scheduler_t::sched(context_t& ctx) {
-  CORNET_METRICS_SCOPE_TIMER(ctx.metrics().sched_latency);
-  CORNET_METRICS_ADD(ctx.metrics().sched_cycles);
-  size_t processed = 0;
+CORNET_REGISTER_SCHEDULER(scheduler_type_t::Batch, make_batch);
 
-  while (!ready_tasks.empty() && ++processed < batch_nr) {
-    resume_one_task();
-    CORNET_METRICS_ADD(ctx.metrics().tasks_resumed);
+static std::unique_ptr<schedule_policy_t> make_time_slice(config_t* config) {
+  auto p = std::make_unique<time_slice_policy_t>();
+  if (config) {
+    auto conf = (*config)["cornet"]["context"]["scheduler"];
+    p->cpu_budget = parse_time_str(conf["cpu_budget"].value_or("10ms"));
+    p->io_budget = parse_time_str(conf["io_budget"].value_or("1ms"));
   }
-
-  flush_io(ctx);
+  return p;
 }
+CORNET_REGISTER_SCHEDULER(scheduler_type_t::TimeSlice, make_time_slice);
 
-CORNET_REGISTER_SCHEDULER(scheduler_type_t::Adaptive, adaptive_scheduler_t);
-void adaptive_scheduler_t::sched(context_t& ctx) {
-  CORNET_METRICS_SCOPE_TIMER(ctx.metrics().sched_latency);
-  CORNET_METRICS_ADD(ctx.metrics().sched_cycles);
-
-  size_t resumed = 0;
-  while (!ready_tasks.empty() && resumed < cpu_batch_) {
-    resume_one_task();
-    resumed++;
-    CORNET_METRICS_ADD(ctx.metrics().tasks_resumed);
+static std::unique_ptr<schedule_policy_t> make_adaptive(config_t* config) {
+  auto p = std::make_unique<adaptive_policy_t>();
+  if (config) {
+    auto conf = (*config)["cornet"]["context"]["scheduler"];
+    if (auto batch = conf["cpu_batch"]) {
+      p->cpu_batch_ = batch.value_or(64);
+    }
+    if (auto wait = conf["io_wait"]) {
+      p->io_wait_ = parse_time_str(wait.value_or("1ms"));
+    }
   }
-
-  size_t inflight = ctx.io_uring().running_task_nr();
-  uint32_t cqes_ready = flush_io(ctx, io_wait_);
-  adapt(resumed, cqes_ready, inflight);
+  return p;
 }
-
-void adaptive_scheduler_t::adapt(size_t resumed, uint32_t cqes_ready, size_t inflight) {
-  // update I/O saturation (exponential moving average)
-  double sat = inflight > 0 ? double(cqes_ready) / double(inflight) : 0.0;
-  io_saturation_ = io_saturation_ * 0.9 + sat * 0.1;
-
-  // adjust cpu_batch based on I/O saturation
-  if (io_saturation_ > 0.5 && cpu_batch_ > 8) {
-    // I/O completions piling up, reduce CPU batch to process them faster
-    cpu_batch_ = std::max(size_t(8), cpu_batch_ * 3 / 4);
-  } else if (io_saturation_ < 0.1 && resumed >= cpu_batch_) {
-    // I/O idle and CPU saturated, allow more CPU work per cycle
-    cpu_batch_ = std::min(size_t(1024), cpu_batch_ + cpu_batch_ / 4 + 1);
-  }
-
-  // adjust wait timeout based on load
-  if (resumed == 0 && cqes_ready == 0) {
-    // nothing happening, increase wait to save CPU
-    io_wait_ = std::min(std::chrono::nanoseconds(10000000), io_wait_ * 2);
-  } else if (cqes_ready > 0 || resumed > 0) {
-    // active workload, keep wait tight
-    io_wait_ = std::max(std::chrono::nanoseconds(50000), io_wait_ * 3 / 4);
-  }
-}
+CORNET_REGISTER_SCHEDULER(scheduler_type_t::Adaptive, make_adaptive);
 
 } // cornet

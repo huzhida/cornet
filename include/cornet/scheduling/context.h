@@ -1,8 +1,8 @@
 #ifndef CORNET_CONTEXT_H
 #define CORNET_CONTEXT_H
 
+#include "cornet/base/defines.h"
 #include <functional>
-#include <memory>
 #include <optional>
 
 #include <spdlog/spdlog.h>
@@ -21,6 +21,8 @@
 #include "cornet/coroutine/coro.h"
 #include "cornet/scheduling/scheduler.h"
 #include "cornet/scheduling/executor.h"
+#include "cornet/coroutine/cancel.h"
+#include "cornet/scheduling/task_tracker.h"
 
 namespace cornet {
 
@@ -77,16 +79,16 @@ struct context_t {
     if constexpr (std::is_pointer_v<R>) {
       static_assert(std::is_base_of_v<task_t, std::remove_pointer_t<R> >,
                     "T must be derived from task_t");
-      scheduler->schedule(task->handle);
+      scheduler_.schedule(task->handle);
     } else if constexpr (std::is_same_v<R, std::coroutine_handle<>>) {
-      scheduler->schedule(task);
+      scheduler_.schedule(task);
     } else {
       static_assert(std::is_base_of_v<task_t, R>,
                     "T must be derived from task_t");
       if constexpr (std::is_rvalue_reference_v<decltype(task)>) {
         task.detach();
       }
-      scheduler->schedule(task.handle);
+      scheduler_.schedule(task.handle);
     }
   }
 
@@ -130,8 +132,7 @@ struct context_t {
     bool await_ready() { return false; }
     void await_suspend(std::coroutine_handle<> h) {
       task_.handle = h;
-      ctx_.ensure_executor();
-      if (!ctx_.async_executor()->add(&task_)) {
+      if (!ctx_.executor().add(&task_)) {
         task_.exception = std::make_exception_ptr(
             std::system_error(ENOBUFS, std::system_category(), "executor queue full"));
         ctx_.spawn(h);
@@ -183,23 +184,13 @@ struct context_t {
   void wakeup();
 
   /**
-   * @brief whether the context is shutting down (draining, canceling, or terminated).
-   * Users should check this in accept loops to stop accepting new connections.
+   * @brief whether the context running now.
+   * Users should check this in accept loops to stop accepting new task.
    * @return true if not in Running state
    */
-  CORNET_NODISCARD inline bool is_shutting_down() const {
-    auto s = state.load(std::memory_order_acquire);
-    return s != state_t::Running;
-  }
-
-  /**
-   * @brief whether the context is in draining state (shutting down gracefully).
-   * Users should check this in accept loops to stop accepting new connections.
-   * @return true if draining or later state
-   * @deprecated use is_shutting_down() instead
-   */
-  CORNET_NODISCARD inline bool is_draining() const {
-    return is_shutting_down();
+  CORNET_NODISCARD inline bool is_running() const {
+    auto s = state_.load(std::memory_order_relaxed);
+    return s == state_t::Running;
   }
 
   /**
@@ -207,7 +198,7 @@ struct context_t {
    * @return true if terminated
    */
   CORNET_NODISCARD inline bool is_terminated() const {
-    return state.load(std::memory_order_acquire) == state_t::Terminated;
+    return state_.load(std::memory_order_acquire) == state_t::Terminated;
   }
 
   /**
@@ -257,7 +248,7 @@ struct context_t {
    */
   template<typename F>
   void io_detach(F&& f) {
-    auto* sqe = uring.get_sqe();
+    auto* sqe = uring_.get_sqe();
     f(sqe);
     io_uring_sqe_set_data(sqe, nullptr);
   }
@@ -269,14 +260,35 @@ struct context_t {
    * @param enabled whether to enable keep-alive
    */
   void set_keep_alive(bool enabled) { keep_alive_ = enabled; }
-  void set_scheduler_type(scheduler_type_t type);
+
+  /**
+   * @brief RAII guard for persistent io work (watcher loops).
+   * Ensures the persistent counter is always decremented, even on exception.
+   */
+  struct persistent_guard {
+    context_t& ctx;
+    explicit persistent_guard(context_t& ctx) : ctx(ctx) {
+      ctx.tracker_.io_persistent_add(1);
+    }
+    ~persistent_guard() {
+      ctx.tracker_.io_persistent_remove(1);
+    }
+    persistent_guard(const persistent_guard&) = delete;
+  };
+
+  /**
+   * @brief return scheduler reference 
+   */
+  CORNET_NODISCARD inline scheduler_t& scheduler() {
+    return this->scheduler_;
+  }
 
   /**
    * @brief return context_t owned io_uring wrapper.
    * @return context_t owned io_uring wrapper reference
    */
   CORNET_NODISCARD inline uring_t& io_uring() {
-    return uring;
+    return uring_;
   }
 
   /**
@@ -284,7 +296,7 @@ struct context_t {
    * @return io slot table reference
    */
   CORNET_NODISCARD inline io_slot_table_t& io_slots() {
-    return slots;
+    return slots_;
   }
 
   #ifdef CORNET_METRICS
@@ -301,8 +313,8 @@ struct context_t {
    * @brief return context_t owned executor.
    * @return context_t owned executor reference
    */
-  CORNET_NODISCARD inline std::unique_ptr<executor_t>& async_executor() {
-    return executor;
+  CORNET_NODISCARD inline executor_t& executor() {
+    return executor_;
   }
 
   /**
@@ -313,18 +325,17 @@ struct context_t {
    */
   CORNET_NODISCARD inline bool user_idle() {
     if (keep_alive_) return false;
-    if (executor && !executor->idle()) return false;
-    return scheduler->idle() && uring.user_idle();
+    return tracker_.user_idle();
   }
 
   /**
    * @brief whether the context is truly idle (nothing at all remains).
    * Used as the run loop exit condition.
-   * @return true if no IO inflight (including persistent) and no ready tasks
+   * @return true if no work inflight (including persistent)
    */
   CORNET_NODISCARD inline bool idle() {
-    if (executor && !executor->idle()) return false;
-    return scheduler->idle() && uring.idle();
+    if (keep_alive_) return false;
+    return tracker_.idle();
   }
 
   /**
@@ -352,48 +363,44 @@ struct context_t {
   }
 
 
-  void ensure_executor() {
-    if (!executor) {
-      executor = std::make_unique<executor_t>(executor_thread_nr, executor_max_task_nr);
-    }
+  /**
+   * @brief return context config.
+   * @return context config pointer
+   */
+  CORNET_NODISCARD inline config_t* config() {
+    return this->config_;
   }
 
 private:
   void switch_to(state_t s) {
-    state.store(s, std::memory_order_release);
+    state_.store(s, std::memory_order_release);
     SPDLOG_DEBUG("context switch to state:{}", to_string(s));
   }
-
+  // context config (read by scheduler, executor, uring)
+  config_t* config_ = nullptr;
+  // unified work counter: single source of truth for all in-flight work
+  task_tracker_t tracker_;
   // context owned io_uring wrapper
-  uring_t uring;
+  uring_t uring_;
   // context owned io slot table for safe user_data management
-  io_slot_table_t slots;
+  io_slot_table_t slots_;
   // eventfd for cross-thread wakeup
-  int wakeup_fd{-1};
+  int wakeup_fd_{-1};
   // signalfd for async signal handling (-1 if not used)
-  int signal_fd{-1};
+  int signal_fd_{-1};
   // context current state
-  std::atomic<state_t> state{state_t::Terminated};
-  // context current scheduler type
-  scheduler_type_t scheduler_type{scheduler_type_t::Adaptive};
-  // context scheduler
-  std::unique_ptr<scheduler_t> scheduler;
-  // context executor
-  std::unique_ptr<executor_t> executor;
-  // context executor default thread number
-  int executor_thread_nr{1};
-  // context executor default max task number
-  int executor_max_task_nr{16384};
+  std::atomic<state_t> state_{state_t::Terminated};
+  // context scheduler (direct member, policy switchable at runtime)
+  scheduler_t scheduler_;
+  // context executor (thread pool for async offload)
+  executor_t executor_;
   // per-signal handler callbacks
-  std::unordered_map<int, std::function<void(int)>> signal_handlers;
+  std::unordered_map<int, std::function<void(int)>> signal_handlers_;
   // MPSC queue for cross-thread task submission
   moodycamel::ConcurrentQueue<std::function<void()>> remote_queue_;
   // keep-alive flag: prevents auto-exit when user tasks are idle
   bool keep_alive_{false};
-  // graceful shutdown deadline: when Draining and user_idle() is false,
-  // this deadline triggers a forced Canceling transition
-  std::optional<std::chrono::steady_clock::time_point> shutdown_deadline_;
-  
+
   #ifdef CORNET_METRICS
   // context performance metrics
   context_metrics_t metrics_;

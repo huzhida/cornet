@@ -56,11 +56,21 @@ void canceler_io_t::cancel_active_tasks() {
   active_head_ = nullptr;
 
   for (auto* node = head; node; node = node->next) {
+#if CORNET_LINUX_VERSION_GE_5_19
+    // 5.19+ cancel_awaiter uses CANCEL_ANY; per-task cancel not needed
+    // but if called, target by raw this pointer
+    if (node->task) {
+      auto* sqe = ctx_->io_uring().get_sqe();
+      io_uring_prep_cancel(sqe, reinterpret_cast<void*>(node->task), 0);
+      io_uring_sqe_set_data(sqe, nullptr);
+    }
+#else
     if (node->task && node->task->io_token() != 0) {
       auto* sqe = ctx_->io_uring().get_sqe();
       io_uring_prep_cancel(sqe, reinterpret_cast<void*>(node->task->io_token()), 0);
       io_uring_sqe_set_data(sqe, nullptr);
     }
+#endif
   }
 }
 

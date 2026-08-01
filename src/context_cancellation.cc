@@ -22,6 +22,7 @@ coro_t<expected<int>> context_cancellation_t::cancel_pending_io() {
   // Try CANCEL_ANY first (5.19+)
   if (!ctx_->io_uring().idle()) {
     auto ret = co_await context_t::cancel_awaiter{*ctx_, nullptr, IORING_ASYNC_CANCEL_ANY};
+#if !CORNET_LINUX_VERSION_GE_5_19
     if (!ret && ret.error().code == EINVAL) {
       // Kernel doesn't support CANCEL_ANY, fallback to per-slot cancel
       std::vector<uint64_t> active;
@@ -32,6 +33,7 @@ coro_t<expected<int>> context_cancellation_t::cancel_pending_io() {
       }
       co_return canceled_nr;
     }
+#endif
     // CANCEL_ANY supported
     if (!ret) {
       if (ret.error().code == ENOENT) co_return canceled_nr;

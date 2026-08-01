@@ -15,7 +15,7 @@ inline result_t run_cornet(const scenario_t& scenario, cornet::scheduler_type_t 
 
   // Server context: created on a dedicated thread
   context_t server_ctx(&config);
-  server_ctx.set_scheduler_type(sched_type);
+  server_ctx.scheduler().set_policy(sched_type);
 
   std::atomic<bool> server_running{true};
   std::atomic<bool> server_ready{false};
@@ -83,7 +83,7 @@ inline result_t run_cornet(const scenario_t& scenario, cornet::scheduler_type_t 
 
   // Client context: created on the main thread
   context_t client_ctx(&config);
-  client_ctx.set_scheduler_type(sched_type);
+  client_ctx.scheduler().set_policy(sched_type);
 
   size_t rss_before = get_current_rss_kb();
   auto start = std::chrono::steady_clock::now();

@@ -8,6 +8,9 @@
 #endif
 #include <concurrentqueue/moodycamel/blockingconcurrentqueue.h>
 
+#include "cornet/scheduling/task_tracker.h"
+#include "cornet/utils/config.h"
+
 namespace cornet {
 struct atask_t;
 
@@ -21,13 +24,20 @@ class executor_t {
   using queue_t = moodycamel::BlockingConcurrentQueue<atask_t*>;
 
   /**
-   * @brief construct executor with worker threads
-   * @param thread_nr number of worker threads
-   * @param max_task_nr maximum pending task capacity
+   * @brief construct executor (threads started lazily on first add()).
+   * Reads thread_nr and max_task_nr from config.
+   * @param tracker work tracker
+   * @param config configuration pointer (may be nullptr)
    */
-  explicit executor_t(int thread_nr, size_t max_task_nr = 16384);
+  executor_t(task_tracker_t& tracker, config_t* config);
 
   ~executor_t();
+
+  /**
+   * @brief ensure worker threads are running (called before add).
+   * Threads are started lazily on the first task submission.
+   */
+  void ensure_workers();
 
   /**
    * @brief submit a task to be executed on a worker thread
@@ -48,26 +58,22 @@ class executor_t {
    */
   void terminate();
 
-  /**
-   * @brief whether all submitted tasks have completed
-   * @return true if no tasks are in-flight
-   */
-  bool idle() const;
-
  private:
   static void worker(executor_t* p_executor);
 
   std::atomic<bool> terminated{false};
+  // maximum pending task capacity
+  const size_t max_task_nr;
   // pending tasks waiting for worker threads
   queue_t pending_tasks;
   // completed tasks waiting for owner thread to collect
   queue_t completed_tasks;
   // worker thread pool
   std::vector<std::thread> workers;
-  // maximum pending task capacity
-  const size_t max_task_nr;
-  // number of tasks currently in-flight (pending + executing)
-  std::atomic<size_t> running_task_nr{0};
+  // number of worker threads (used for lazy start)
+  int thread_nr_;
+  // work tracker (owned by context_t, set after construction)
+  task_tracker_t& tracker_;
 };
 
 }
