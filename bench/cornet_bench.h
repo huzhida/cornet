@@ -13,6 +13,10 @@ namespace bench {
 inline result_t run_cornet(const scenario_t& scenario, cornet::scheduler_type_t sched_type, cornet::config_t& config) {
   using namespace cornet;
 
+  // RSS profiler: capture memory from the very start of the test
+  rss_profiler_t profiler;
+  profiler.start();
+
   // Server context: created on a dedicated thread
   context_t server_ctx(&config);
   server_ctx.scheduler().set_policy(sched_type);
@@ -85,7 +89,8 @@ inline result_t run_cornet(const scenario_t& scenario, cornet::scheduler_type_t 
   context_t client_ctx(&config);
   client_ctx.scheduler().set_policy(sched_type);
 
-  size_t rss_before = get_current_rss_kb();
+
+  size_t hwm_before = get_vmmhwm_kb();
   auto start = std::chrono::steady_clock::now();
   for (int i = 0; i < scenario.connections; ++i) {
     client_ctx.spawn(client_session(client_ctx, i));
@@ -97,9 +102,11 @@ inline result_t run_cornet(const scenario_t& scenario, cornet::scheduler_type_t 
   server_ctx.stop();
   server_thread.join();
 
+  profiler.stop();
+
   std::string name = "Cornet/";
   name += scheduler_name(sched_type);
-  
+
   #ifdef CORNET_METRICS
   std::cout << scenario.name << " " << name << " client metrics:" << std::endl;
   client_ctx.metrics().dump();
@@ -107,7 +114,9 @@ inline result_t run_cornet(const scenario_t& scenario, cornet::scheduler_type_t 
   server_ctx.metrics().dump();
   #endif
 
-  return collector.compute(name, scenario.name, elapsed, rss_before);
+  result_t r = collector.compute(name, scenario.name, elapsed, hwm_before);
+  collector.fill_profile(r, profiler);
+  return r;
 }
 
 } // namespace bench

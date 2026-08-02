@@ -76,14 +76,16 @@ int main(int argc, char* argv[]) {
       scenario_rounds.push_back(std::move(runs));
     }
 
-    // 多轮波动展示
-    print_rounds_variance(scenario_rounds);
+    // 收集中位数结果用于图表
+    std::vector<result_t> scenario_medians;
+    for (auto& runs : scenario_rounds)
+      if (!runs.empty()) scenario_medians.push_back(median_result(runs));
 
-    // 稳定性分析
-    print_stability_analysis(all_results, scenario.name);
-
-    // 场景推荐
-    print_scenario_recommendation(all_results, scenario);
+    // 性能可视化图表
+    print_rps_latency_chart(scenario_medians);
+    print_latency_profile_chart(scenario_medians);
+    print_throughput_chart(scenario_medians);
+    print_stability_chart(scenario_medians);
 
     all_rounds.push_back(std::move(scenario_rounds));
   }

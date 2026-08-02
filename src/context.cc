@@ -41,6 +41,7 @@ context_t::~context_t() {
 }
 
 void context_t::run() {
+  uring_.enable();
   spawn(wakeup_watch_loop());
   switch_to(state_t::Running);
   state_t current_state;
@@ -152,14 +153,6 @@ void context_t::wakeup() {
   uint64_t val = 1;
   auto _ = ::write(wakeup_fd_, &val, sizeof(val));
 }
-
-void context_t::drain_remote_queue() {
-  std::function<void()> fn;
-  while (remote_queue_.try_dequeue(fn)) {
-    fn();
-  }
-}
-
 
 context_t::cancel_awaiter::cancel_awaiter(context_t& ctx, void* user_data, int flags)
   : user_data_(user_data), flags_(flags) {

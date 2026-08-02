@@ -2,10 +2,8 @@
 #define CORNET_SCHEDULE_POLICY_H
 
 #include <chrono>
-#include <memory>
 
 #include "cornet/base/defines.h"
-#include "cornet/utils/config.h"
 
 namespace cornet {
 
@@ -85,7 +83,7 @@ struct round_robin_policy_t : schedule_policy_t {
     return false; // never stop early
   }
   std::chrono::nanoseconds default_get_io_wait() const {
-    return std::chrono::milliseconds(10);
+    return std::chrono::milliseconds(1);
   }
   void default_on_sched_done(const sched_stats&, uint32_t, size_t) const {
     // no-op
@@ -168,7 +166,7 @@ private:
     double sat = still_inflight > 0
                    ? static_cast<double>(cqes_ready) / static_cast<double>(still_inflight)
                    : 0.0;
-    io_saturation_ = io_saturation_ * 0.9 + sat * 0.1;
+    io_saturation_ = io_saturation_ * 0.8 + sat * 0.2;
 
     // adjust cpu_batch based on I/O saturation
     if (io_saturation_ > 0.5 && cpu_batch_ > 8) {
@@ -184,8 +182,9 @@ private:
       // nothing happening, increase wait to save CPU
       io_wait_ = std::min(std::chrono::nanoseconds(10000000), io_wait_ * 2);
     } else if (cqes_ready > 0 || resumed > 0) {
-      // active workload, keep wait tight
-      io_wait_ = std::max(std::chrono::nanoseconds(50000), io_wait_ * 3 / 4);
+      // active workload — keep wait tight but don't shrink below 250us
+      // (50us is too aggressive for io_uring: causes busy-polling-like behavior)
+      io_wait_ = std::max(std::chrono::nanoseconds(250000), io_wait_ * 3 / 4);
     }
   }
 };

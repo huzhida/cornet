@@ -2,19 +2,23 @@
 
 ## context_t
 
-`context_t` 是 Cornet 的核心事件循环，每个线程拥有一个实例（thread-local 单例）。
+`context_t` 是 Cornet 的核心事件循环，每个线程拥有一个实例。
 
-### 获取 Context
+### 创建 Context
 
 ```cpp
-// 当前线程的 context（自动创建）
-auto& ctx = context_t::current();
+// 栈上创建
+context_t ctx;
+
+// 带配置创建
+cornet::config_t::load("conf/default.toml");
+context_t ctx(&cornet::config_t::current());
 ```
 
 ### 生命周期管理
 
 ```cpp
-auto& ctx = context_t::current();
+context_t ctx;
 
 // 注册信号处理
 ctx.on_signal({SIGINT, SIGTERM}, [&](int sig) {
@@ -22,9 +26,9 @@ ctx.on_signal({SIGINT, SIGTERM}, [&](int sig) {
 });
 
 // 启动协程
-ctx.spawn(my_coroutine());
+ctx.spawn(my_coroutine(ctx));
 
-// 运行事件循环（阻塞直到所有任务完成或 terminate）
+// 运行事件循环（阻塞直到所有任务完成或 stop() 调用）
 ctx.run();
 ```
 
@@ -32,10 +36,10 @@ ctx.run();
 
 ```cpp
 // fire-and-forget：右值 coro_t 自动 detach，完成后自动销毁协程帧
-ctx.spawn(my_coro());
+ctx.spawn(my_coro(ctx));
 
 // 保留所有权：左值 coro_t 不 detach，可以后续获取返回值
-auto coro = my_coro();
+auto coro = my_coro(ctx);
 ctx.spawn(coro);
 // ... 等 coro.done() 后读 coro.value()
 ```
@@ -66,8 +70,9 @@ auto result = co_await ctx.async([] {
 
 ```cpp
 // 从任意线程向目标 context 投递协程
-other_ctx->spawn_remote([data = std::move(data)]() -> coro_t<void> {
-    co_await process(other_ctx, data);
+target_ctx.spawn_remote([data = std::move(data)]() -> coro_t<void> {
+    context_t& ctx = context_t::current_from_thread();
+    co_await process(ctx, data);
 });
 ```
 
@@ -130,19 +135,19 @@ run loop 保证：`idle()` 为 true 时所有 IO（含 persistent）已彻底 dr
 ### 状态查询
 
 ```cpp
-ctx.is_shutting_down();  // true if not in Running state
-ctx.is_terminated();     // true if run loop has exited
+ctx.is_running();      // true 如果仍在 Running 状态
+ctx.is_terminated();   // true 如果 run loop 已退出
 ```
-
-> `is_draining()` 已废弃，请使用 `is_shutting_down()`。
 
 ### 指标监控
 
 ```cpp
+#ifdef CORNET_METRICS
 auto& metrics = ctx.metrics();
 // ... 运行一段时间后 ...
 metrics.dump(stderr);  // 输出性能统计
 metrics.reset();       // 重置计数器
+#endif
 ```
 
 ---
@@ -198,6 +203,8 @@ io_budget = "100us"
 ```toml
 [cornet.context.scheduler]
 name = "Adaptive"
+cpu_batch = 64    # CPU 阶段每次批量处理的任务数
+io_wait = "1ms"   # IO 阶段等待超时
 ```
 
 - 动态调整 CPU batch size 和 IO wait timeout
@@ -208,7 +215,23 @@ name = "Adaptive"
 ### 运行时切换
 
 ```cpp
-ctx.set_scheduler_type(scheduler_type_t::Batch);
+ctx.scheduler().set_policy(scheduler_type_t::Batch);
 ```
 
 切换时自动将未完成任务转移到新调度器。
+
+### 内部接口
+
+```cpp
+// 访问调度器
+scheduler_t& scheduler = ctx.scheduler();
+
+// 访问 io_uring
+uring_t& uring = ctx.io_uring();
+
+// 访问 io slot 表
+io_slot_table_t& slots = ctx.io_slots();
+
+// 访问线程池
+executor_t& executor = ctx.executor();
+```

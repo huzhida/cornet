@@ -13,6 +13,8 @@
 #include <cmath>
 #include <fstream>
 #include <map>
+#include <thread>
+#include <mutex>
 
 namespace bench {
 
@@ -22,6 +24,100 @@ struct scenario_t {
   int connections;
   int message_size;
   int total_messages;
+};
+
+// Single RSS time-series sample point.
+struct rss_sample_t {
+  double timestamp_sec;  // elapsed seconds from benchmark start
+  size_t rss_kb;          // process RSS in KB
+};
+
+// VmHWM reader for peak memory measurement.
+static size_t get_vmmhwm_kb() {
+  std::ifstream f("/proc/self/status");
+  std::string line;
+  while (std::getline(f, line)) {
+    if (line.rfind("VmHWM:", 0) == 0) {
+      size_t val = 0;
+      sscanf(line.c_str(), "VmHWM: %zu", &val);
+      return val;
+    }
+  }
+  return 0;
+}
+
+// RSS profiler: background thread reads /proc/self/status periodically.
+// Uses VmHWM (historical peak RSS) to measure incremental memory.
+// Since VmHWM never resets within a process, each run's delta is measured
+// from the VmHWM captured at the start of this specific run.
+class rss_profiler_t {
+public:
+  void start() {
+    // Capture VmHWM as baseline — this is the peak RSS before this run.
+    // VmHWM is cumulative (never decreases), so the delta from this point
+    // forward reflects memory allocated specifically during this run.
+    baseline_ = get_vmmhwm_kb();
+    start_time_ = std::chrono::steady_clock::now();
+    running_.store(true);
+    sample_thread_ = std::thread([this]() {
+      while (running_.load(std::memory_order_acquire)) {
+        size_t hwm = get_vmmhwm_kb();
+        auto now = std::chrono::steady_clock::now();
+        double elapsed = std::chrono::duration<double>(now - start_time_).count();
+        size_t delta = hwm > baseline_ ? hwm - baseline_ : 0;
+        std::lock_guard<std::mutex> lock(mu_);
+        samples_.push_back({elapsed, delta});
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      }
+    });
+  }
+
+  void stop() {
+    running_.store(false, std::memory_order_release);
+    if (sample_thread_.joinable()) sample_thread_.join();
+    compute_stats();
+  }
+
+  const std::vector<rss_sample_t>& samples() const { return samples_; }
+
+  size_t peak_kb() const { return peak_kb_; }
+  size_t min_kb() const { return min_kb_; }
+  double mean_kb() const { return mean_kb_; }
+  double stddev_kb() const { return stddev_kb_; }
+
+  size_t baseline_kb() const { return baseline_; }
+
+private:
+  void compute_stats() {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (samples_.empty()) {
+      peak_kb_ = min_kb_ = mean_kb_ = stddev_kb_ = 0;
+      return;
+    }
+    peak_kb_ = min_kb_ = samples_[0].rss_kb;
+    double sum = 0;
+    for (auto& s : samples_) {
+      sum += s.rss_kb;
+      if (s.rss_kb > peak_kb_) peak_kb_ = s.rss_kb;
+      if (s.rss_kb < min_kb_) min_kb_ = s.rss_kb;
+    }
+    mean_kb_ = sum / samples_.size();
+    double variance = 0;
+    for (auto& s : samples_) {
+      double diff = (double)s.rss_kb - mean_kb_;
+      variance += diff * diff;
+    }
+    stddev_kb_ = std::sqrt(variance / samples_.size());
+  }
+
+  size_t baseline_ = 0;
+  std::chrono::steady_clock::time_point start_time_;
+  std::atomic<bool> running_{false};
+  std::vector<rss_sample_t> samples_;
+  std::mutex mu_;
+  std::thread sample_thread_;
+  size_t peak_kb_ = 0, min_kb_ = 0;
+  double mean_kb_ = 0, stddev_kb_ = 0;
 };
 
 struct result_t {
@@ -40,33 +136,39 @@ struct result_t {
   int failed_messages{0};
   double elapsed_sec{0};
   size_t peak_rss_kb{0};
+  size_t rss_mean_kb{0};
+  size_t rss_min_kb{0};
+  size_t rss_max_kb{0};
+  double rss_stddev_kb{0};
+  std::vector<rss_sample_t> rss_profile;  // time-series samples for plotting (delta from baseline)
+  size_t rss_baseline_kb{0};              // absolute RSS at start of benchmark
 };
 
-inline size_t get_peak_rss_kb() {
-  std::ifstream f("/proc/self/status");
-  std::string line;
-  while (std::getline(f, line)) {
-    if (line.rfind("VmHWM:", 0) == 0) {
-      size_t val = 0;
-      sscanf(line.c_str(), "VmHWM: %zu", &val);
-      return val;
-    }
-  }
-  return 0;
+// --- ASCII chart helpers ---
+
+// Draw a horizontal bar: right-padded label + "|" + █ fill + value suffix.
+// value/max_ref controls bar length (capped at max_len).
+inline void draw_bar(const char* label, size_t label_width,
+                     double value, double max_ref, size_t max_len) {
+  size_t bar_len = max_ref > 0 ? static_cast<size_t>((value / max_ref) * max_len) : 0;
+  if (bar_len > max_len) bar_len = max_len;
+  printf("    %-*s |", static_cast<int>(label_width), label);
+  for (size_t i = 0; i < bar_len; ++i) printf("█");
+  printf(" %.2f", value);
 }
 
-inline size_t get_current_rss_kb() {
-  std::ifstream f("/proc/self/status");
-  std::string line;
-  while (std::getline(f, line)) {
-    if (line.rfind("VmRSS:", 0) == 0) {
-      size_t val = 0;
-      sscanf(line.c_str(), "VmRSS: %zu", &val);
-      return val;
-    }
+// Find the maximum value from a lambda over result_t pointers.
+// Returns at least 1.0 to avoid divide-by-zero.
+inline double find_max(const std::vector<const result_t*>& items, auto fn) {
+  double mx = 0.0;
+  for (auto* r : items) {
+    double v = fn(r);
+    if (v > mx) mx = v;
   }
-  return 0;
+  return mx > 0.0 ? mx : 1.0;
 }
+
+// --- End chart helpers ---
 
 struct latency_collector_t {
   std::vector<uint64_t> samples;
@@ -86,15 +188,19 @@ struct latency_collector_t {
     failed_messages.fetch_add(1, std::memory_order_relaxed);
   }
 
-  result_t compute(const std::string& framework, const std::string& scenario, double elapsed_sec, size_t rss_before_kb) {
+  result_t compute(const std::string& framework, const std::string& scenario, double elapsed_sec, size_t hwm_before_kb) {
     result_t r;
     r.framework = framework;
     r.scenario = scenario;
     r.elapsed_sec = elapsed_sec;
     r.total_messages = total_messages.load();
     r.failed_messages = failed_messages.load();
-    size_t rss_now = get_current_rss_kb();
-    r.peak_rss_kb = rss_now > rss_before_kb ? rss_now - rss_before_kb : 0;
+    // Use VmHWM delta to measure peak memory allocated during the benchmark.
+    // VmHWM tracks the highest RSS ever reached by the process and never resets.
+    // Subtracting the baseline (captured before the benchmark) gives the actual
+    // peak memory usage of this run, even when threads allocate/deallocate freely.
+    size_t hwm_now = get_vmmhwm_kb();
+    r.peak_rss_kb = hwm_now > hwm_before_kb ? hwm_now - hwm_before_kb : 0;
 
     if (r.total_messages == 0 || elapsed_sec == 0) return r;
 
@@ -130,6 +236,16 @@ struct latency_collector_t {
     return r;
   }
 
+  // Merge RSS profiler data into a result_t after compute() has returned.
+  void fill_profile(result_t& r, const rss_profiler_t& profiler) const {
+    r.rss_mean_kb = size_t(profiler.mean_kb());
+    r.rss_min_kb = profiler.min_kb();
+    r.rss_max_kb = profiler.peak_kb();
+    r.rss_stddev_kb = profiler.stddev_kb();
+    r.rss_profile = profiler.samples();
+    r.rss_baseline_kb = profiler.baseline_kb();
+  }
+
   void reset() {
     samples.clear();
     total_bytes = 0;
@@ -142,19 +258,19 @@ inline std::vector<scenario_t> default_scenarios() {
   return {
     {"small_msg_high_conc",
      "小消息高并发: 模拟即时通讯/推送场景, 大量连接传输小包",
-     512, 64, 200000},
+     512, 64, 100000},
     {"medium_msg",
      "中等消息: 模拟典型 Web API 请求/响应, 中等连接数和消息体",
-     128, 1024, 100000},
+     128, 1024, 50000},
     {"large_msg",
      "大消息: 模拟文件传输/流媒体场景, 少连接但大数据块",
-     32, 65536, 20000},
+     32, 65536, 10000},
     {"extreme_conc",
      "极高并发: 压测连接数上限, 模拟 C10K+ 场景",
-     2048, 128, 200000},
+     2048, 128, 100000},
     {"sustained_throughput",
      "持续吞吐: 模拟数据管道/日志采集, 稳定中等连接持续传输",
-     64, 4096, 100000},
+     64, 4096, 50000},
   };
 }
 
@@ -169,19 +285,19 @@ inline void print_scenario_header(const scenario_t& s) {
 }
 
 inline void print_result_header() {
-  printf("%-18s %8s %8s %8s %8s %8s %8s %8s %8s %8s %6s %8s\n",
-         "框架", "RPS", "MB/s", "平均(us)", "P50", "P95", "P99", "P999", "标准差", "抖动", "失败", "内存(KB)");
-  printf("%-18s %8s %8s %8s %8s %8s %8s %8s %8s %8s %6s %8s\n",
-         "──────────", "──────", "──────", "──────", "──────", "──────", "──────", "──────", "──────", "──────", "────", "──────");
+  printf("%-18s %8s %8s %8s %8s %8s %8s %8s %8s %8s %6s %8s %8s\n",
+         "框架", "RPS", "MB/s", "平均(us)", "P50", "P95", "P99", "P999", "标准差", "抖动", "失败", "均值KB", "峰值KB");
+  printf("%-18s %8s %8s %8s %8s %8s %8s %8s %8s %8s %6s %8s %8s\n",
+         "──────────", "──────", "──────", "──────", "──────", "──────", "──────", "──────", "──────", "──────", "────", "──────", "──────");
 }
 
 inline void print_result(const result_t& r) {
-  printf("%-18s %8.0f %8.2f %8.0f %8.0f %8.0f %8.0f %8.0f %8.0f %8.0f %6d %8zu\n",
+  printf("%-18s %8.0f %8.2f %8.0f %8.0f %8.0f %8.0f %8.0f %8.0f %8.0f %6d %8zu %8zu\n",
          r.framework.c_str(),
          r.rps, r.throughput_mbps,
          r.avg_latency_us, r.p50_latency_us, r.p95_latency_us,
          r.p99_latency_us, r.p999_latency_us, r.stddev_latency_us, r.jitter_us,
-         r.failed_messages, r.peak_rss_kb);
+         r.failed_messages, r.rss_mean_kb, r.rss_max_kb);
 }
 
 inline void print_stability_analysis(const std::vector<result_t>& results, const std::string& scenario) {
@@ -256,6 +372,290 @@ inline void print_rounds_variance(const std::vector<std::vector<result_t>>& all_
     printf("    %-18s %8.0f ~ %8.0f ~ %8.0f  (CV=%.1f%%)\n",
            sorted[0].framework.c_str(),
            sorted.front().rps, sorted[sorted.size()/2].rps, sorted.back().rps, cv);
+  }
+}
+
+// Print detailed memory profile per framework/scenario: absolute RSS, delta,
+// mean, peak, min, stddev, plus an ASCII mini chart.
+inline void print_memory_profile(const std::vector<result_t>& results) {
+  printf("\n  [内存使用详情]\n");
+  printf("    %-18s %10s %10s %8s %8s %8s %6s\n",
+         "框架", "基线KB", "均值增量", "峰值增量", "最低增量", "标准差", "样本");
+  printf("    %-18s %10s %10s %8s %8s %8s %6s\n",
+         "──────────", "────────", "────────", "──────", "──────", "──────", "────");
+
+  for (auto& r : results) {
+    if (r.rss_profile.empty()) continue;
+    printf("    %-18s %10zu %10zu %8zu %8zu %8.0f %6zu\n",
+           r.framework.c_str(),
+           r.rss_baseline_kb, r.rss_mean_kb, r.rss_max_kb, r.rss_min_kb,
+           r.rss_stddev_kb, r.rss_profile.size());
+  }
+
+  // Per-scenario memory chart: group by scenario so all frameworks share
+  // the same peak_delta reference, making bar lengths proportional to each
+  // framework's actual incremental memory.
+  std::map<std::string, std::vector<const result_t*>> by_scenario;
+  for (auto& r : results) {
+    if (r.rss_profile.empty()) continue;
+    by_scenario[r.scenario].push_back(&r);
+  }
+
+  for (auto& [scenario_name, items] : by_scenario) {
+    printf("\n  [场景: %s]\n", scenario_name.c_str());
+    size_t bar_max = 40;
+    // Find the maximum peak delta across all frameworks for this scenario
+    size_t peak_delta = 0;
+    for (auto* r : items)
+      if (r->rss_max_kb > peak_delta) peak_delta = r->rss_max_kb;
+    if (peak_delta == 0) peak_delta = 1;
+
+    for (auto* r : items) {
+      size_t bar_len = (r->rss_max_kb * bar_max) / peak_delta;
+      printf("    %-18s |", r->framework.c_str());
+      for (size_t i = 0; i < bar_len; ++i) printf("█");
+      printf(" +%zuKB", r->rss_max_kb);
+      printf(" (基线 %zuKB)\n", r->rss_baseline_kb);
+    }
+  }
+}
+
+// Helper: compute CV% from a result_t pointer.
+inline double calc_cv(const result_t* r) {
+  return r->avg_latency_us > 0 ? (r->stddev_latency_us / r->avg_latency_us * 100) : 0;
+}
+
+// Helper: compute tail ratio (P99/P50) from a result_t pointer.
+inline double calc_tail(const result_t* r) {
+  return r->p50_latency_us > 0 ? (r->p99_latency_us / r->p50_latency_us) : 0;
+}
+
+// Helper: get stability tag string from CV% and tail ratio.
+inline const char* stability_tag(double cv, double tail) {
+  if (cv < 30 && tail < 3.0) return "优秀";
+  if (cv < 60 && tail < 5.0) return "良好";
+  if (cv < 100 && tail < 10.0) return "一般";
+  return "较差";
+}
+
+// === Dual-axis RPS + latency grouped bar chart ===
+inline void print_rps_latency_chart(const std::vector<result_t>& results) {
+  if (results.empty()) return;
+
+  std::map<std::string, std::vector<const result_t*>> by_scenario;
+  for (auto& r : results) by_scenario[r.scenario].push_back(&r);
+
+  for (auto& [scenario_name, items] : by_scenario) {
+    printf("\n");
+    printf("┌────────────────────────────────────────────────────────────────────────────┐\n");
+    printf("│ 场景: %-53s │\n", scenario_name.c_str());
+    printf("├────────────────────────────────────────────────────────────────────────────┤\n");
+    printf("│ %-12s %-22s %-35s │\n", "框架", "RPS (左轴, req/s)", "延迟百分位 us (右轴)");
+    printf("└────────────────────────────────────────────────────────────────────────────┘\n");
+
+    const size_t rps_bar_max = 22;
+    const size_t lat_bar_max = 16;
+    double max_rps = find_max(items, [](const result_t* r) { return r->rps; });
+    double max_lat = find_max(items, [](const result_t* r) { return r->p99_latency_us; });
+
+    for (auto* r : items) {
+      printf("│  %-12s |", r->framework.substr(0, 12).c_str());
+
+      bool is_cornet = r->framework.rfind("Cornet/", 0) == 0;
+      const char* green = "\033[32m";
+      const char* reset = "\033[0m";
+
+      // RPS bar
+      size_t rps_len = static_cast<size_t>((r->rps / max_rps) * rps_bar_max);
+      if (rps_len > rps_bar_max) rps_len = rps_bar_max;
+      if (is_cornet) printf("%s", green);
+      for (size_t i = 0; i < rps_len; ++i) printf("█");
+      for (size_t i = rps_len; i < rps_bar_max; ++i) printf(" ");
+      if (is_cornet) printf("%s", reset);
+      printf(" %5.0f", r->rps);
+
+      printf("  ");
+
+      // Latency sub-bars using ▓ DARK SHADE for visual distinction
+      auto draw_lat_sub = [lat_bar_max, &max_lat, is_cornet, green, reset](const char* label, double val) {
+        size_t len = static_cast<size_t>((val / max_lat) * lat_bar_max);
+        if (len > lat_bar_max) len = lat_bar_max;
+        printf("%s[", label);
+        if (is_cornet) printf("%s", green);
+        for (size_t i = 0; i < len; ++i) printf("▓");
+        for (size_t i = len; i < lat_bar_max; ++i) printf(" ");
+        if (is_cornet) printf("%s", reset);
+        printf("]%.0f  ", val);
+      };
+
+      draw_lat_sub("均值", r->avg_latency_us);
+      draw_lat_sub("P50", r->p50_latency_us);
+      draw_lat_sub("P95", r->p95_latency_us);
+      draw_lat_sub("P99", r->p99_latency_us);
+
+      printf("│\n");
+    }
+    printf("\n");
+  }
+}
+
+// === Latency percentile distribution chart ===
+inline void print_latency_profile_chart(const std::vector<result_t>& results) {
+  if (results.empty()) return;
+
+  std::map<std::string, std::vector<const result_t*>> by_scenario;
+  for (auto& r : results) by_scenario[r.scenario].push_back(&r);
+
+  for (auto& [scenario_name, items] : by_scenario) {
+    printf("\n");
+    printf("┌──────────────────────────────────────────────────────────────────────────────────────────┐\n");
+    printf("│ 场景: %-56s │\n", scenario_name.c_str());
+    printf("├──────────────────────────────────────────────────────────────────────────────────────────┤\n");
+    printf("│ %-12s %-8s %-8s %-8s %-8s %-10s │\n", "框架", "平均", "P50", "P95", "P99", "P999");
+    printf("└──────────────────────────────────────────────────────────────────────────────────────────┘\n");
+
+    const size_t bar_max = 30;
+    double max_lat = find_max(items, [](const result_t* r) { return r->p999_latency_us; });
+
+    for (auto* r : items) {
+      printf("│  %-12s ", r->framework.substr(0, 12).c_str());
+
+      bool is_cornet = r->framework.rfind("Cornet/", 0) == 0;
+      const char* green = "\033[32m";
+      const char* reset = "\033[0m";
+
+      auto draw_pctile = [bar_max, &max_lat, is_cornet, green, reset](const char* label, double val) {
+        size_t len = static_cast<size_t>((val / max_lat) * bar_max);
+        if (len > bar_max) len = bar_max;
+        printf(" %-8s[", label);
+        if (is_cornet) printf("%s", green);
+        for (size_t i = 0; i < len; ++i) printf("█");
+        for (size_t i = len; i < bar_max; ++i) printf(" ");
+        if (is_cornet) printf("%s", reset);
+        printf("]%.0f  ", val);
+      };
+
+      draw_pctile("均值", r->avg_latency_us);
+      draw_pctile("P50", r->p50_latency_us);
+      draw_pctile("P95", r->p95_latency_us);
+      draw_pctile("P99", r->p99_latency_us);
+      draw_pctile("P999", r->p999_latency_us);
+      printf("│\n");
+    }
+    printf("\n");
+  }
+}
+
+// === Throughput comparison chart ===
+inline void print_throughput_chart(const std::vector<result_t>& results) {
+  if (results.empty()) return;
+
+  std::map<std::string, std::vector<const result_t*>> by_scenario;
+  for (auto& r : results) by_scenario[r.scenario].push_back(&r);
+
+  for (auto& [scenario_name, items] : by_scenario) {
+    printf("\n  [场景: %s -- 吞吐量 MB/s]\n", scenario_name.c_str());
+
+    const size_t bar_max = 40;
+    double max_tp = find_max(items, [](const result_t* r) { return r->throughput_mbps; });
+    const char* green = "\033[32m";
+    const char* reset = "\033[0m";
+
+    for (auto* r : items) {
+      size_t bar_len = static_cast<size_t>((r->throughput_mbps / max_tp) * bar_max);
+      if (bar_len > bar_max) bar_len = bar_max;
+      printf("    %-18s |", r->framework.c_str());
+      bool is_cornet = r->framework.rfind("Cornet/", 0) == 0;
+      if (is_cornet) printf("%s", green);
+      for (size_t i = 0; i < bar_len; ++i) printf("█");
+      if (is_cornet) printf("%s", reset);
+      printf(" %6.2f MB/s (%.0f RPS)\n", r->throughput_mbps, r->rps);
+    }
+  }
+}
+
+// === Stability visualization chart ===
+inline void print_stability_chart(const std::vector<result_t>& results) {
+  if (results.empty()) return;
+
+  std::map<std::string, std::vector<const result_t*>> by_scenario;
+  for (auto& r : results) by_scenario[r.scenario].push_back(&r);
+
+  for (auto& [scenario_name, items] : by_scenario) {
+    printf("\n");
+    printf("┌────────────────────────────────────────────────────────────────────────────┐\n");
+    printf("│ 场景: %-53s │\n", scenario_name.c_str());
+    printf("├────────────────────────────────────────────────────────────────────────────┤\n");
+
+    const size_t bar_max = 30;
+
+    // --- CV% chart ---
+    double max_cv = find_max(items, calc_cv);
+    const char* green = "\033[32m";
+    const char* reset = "\033[0m";
+    printf("\n  变异系数 CV%% (越低越稳定):\n");
+    for (auto* r : items) {
+      double cv = calc_cv(r);
+      size_t len = static_cast<size_t>((cv / max_cv) * bar_max);
+      if (len > bar_max) len = bar_max;
+      printf("    %-18s |", r->framework.c_str());
+      bool is_cornet = r->framework.rfind("Cornet/", 0) == 0;
+      if (is_cornet) printf("%s", green);
+      for (size_t i = 0; i < len; ++i) printf("█");
+      if (is_cornet) printf("%s", reset);
+      printf(" %5.1f%%  [%s]\n", cv, stability_tag(cv, calc_tail(r)));
+    }
+
+    // --- Tail ratio chart ---
+    double max_tail = find_max(items, calc_tail);
+    printf("\n  尾部放大比 P99/P50 (越低越稳定):\n");
+    for (auto* r : items) {
+      double tail = calc_tail(r);
+      size_t len = static_cast<size_t>((tail / max_tail) * bar_max);
+      if (len > bar_max) len = bar_max;
+      printf("    %-18s |", r->framework.c_str());
+      bool is_cornet = r->framework.rfind("Cornet/", 0) == 0;
+      if (is_cornet) printf("%s", green);
+      for (size_t i = 0; i < len; ++i) printf("█");
+      if (is_cornet) printf("%s", reset);
+      printf(" %5.1fx  [%s]\n", tail, stability_tag(calc_cv(r), tail));
+    }
+
+    // --- Star heatmap ---
+    printf("\n  综合稳定性评级:\n");
+    printf("    %-18s  CV%%     尾部比    评级\n", "框架");
+    printf("    %-18s  ─────   ─────   ────────────\n", "──────────");
+
+    for (auto* r : items) {
+      double cv = calc_cv(r);
+      double tail = calc_tail(r);
+
+      // Per-metric ratings (evaluate independently)
+      const char* cv_tag = stability_tag(cv, 0.0); // tail=0 always passes < 3.0
+      if (cv >= 100) cv_tag = "较差";
+      else if (cv >= 60) cv_tag = "一般";
+      else if (cv >= 30) cv_tag = "良好";
+      else cv_tag = "优秀";
+
+      const char* tail_tag = stability_tag(0.0, tail); // cv=0 always passes < 30
+      if (tail >= 10.0) tail_tag = "较差";
+      else if (tail >= 5.0) tail_tag = "一般";
+      else if (tail >= 3.0) tail_tag = "良好";
+      else tail_tag = "优秀";
+
+      // 4-star scale: CV<30→1, CV<60→1, tail<3→1, tail<5→1
+      int stars = 0;
+      if (cv < 30) stars++;
+      if (cv < 60) stars++;
+      if (tail < 3.0) stars++;
+      if (tail < 5.0) stars++;
+
+      printf("    %-18s [%-4s]  [%-4s]  ", r->framework.c_str(), cv_tag, tail_tag);
+      for (int i = 0; i < stars; ++i) printf("★");
+      for (int i = stars; i < 4; ++i) printf("☆");
+      printf("\n");
+    }
+    printf("\n");
   }
 }
 
