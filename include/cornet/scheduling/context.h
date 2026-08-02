@@ -3,7 +3,6 @@
 
 #include "cornet/base/defines.h"
 #include <functional>
-#include <optional>
 
 #include <spdlog/spdlog.h>
 
@@ -28,12 +27,12 @@ namespace cornet {
 
 namespace detail {
 /**
- * @brief wrapper coroutine that moves a callable into its coroutine frame,
- * then co_awaits the coroutine produced by the callable.
- * This ensures the callable (and its captures) outlives the inner coroutine.
+ * @brief helper to create a wrapper coroutine from a callable on the calling thread.
+ * The callable (and its captures) are moved into the coroutine frame, preventing
+ * lifetime issues with dangling references to local state (e.g. dangling this).
  */
 template<typename F>
-coro_t<void> spawn_remote_runner(F f) {
+coro_t<void> make_remote_coro(F f) {
   co_await f();
 }
 } // namespace detail
@@ -93,28 +92,88 @@ struct context_t {
   }
 
   /**
-   * @brief submit a coroutine factory to be executed on this context's thread.
+   * @brief submit a task or coroutine handle directly to this context's scheduler.
    * Thread-safe: can be called from any thread.
-   * The callable is invoked on this context's owner thread to produce a coroutine,
-   * which is then spawned into the scheduler.
-   * Uses a wrapper coroutine to move the callable into the coroutine frame,
-   * preventing the lambda coroutine lifetime issue (dangling this).
-   * @tparam F callable type that returns coro_t<void>
-   * @param fn callable to invoke on this context's thread
+   * Accepts the same inputs as spawn() — task-like objects, coroutine handles,
+   * or task pointers. The handle is enqueued directly and resumed
+   * on this context's owner thread.
+   * @tparam T task-like type (coro_t, task_t*, coroutine_handle)
+   * @param task task-like object to schedule
    */
-  template<typename F>
-  void spawn_remote(F&& fn) {
-    remote_queue_.enqueue([this, f = std::decay_t<F>(std::forward<F>(fn))]() mutable {
-      this->spawn(detail::spawn_remote_runner(std::move(f)));
-    });
+  template <typename T>
+  CORNET_MAYBE_UNUSED inline void spawn_remote(T&& task)
+    requires std::is_same_v<std::decay_t<T>, std::coroutine_handle<>>
+          || std::is_base_of_v<task_t, std::decay_t<T>>
+          || std::is_pointer_v<std::decay_t<T>>
+  {
+    using R = std::decay_t<T>;
+    std::coroutine_handle<> h;
+    if constexpr (std::is_pointer_v<R>) {
+      static_assert(std::is_base_of_v<task_t, std::remove_pointer_t<R> >,
+                    "T must be derived from task_t");
+      h = task->handle;
+    } else if constexpr (std::is_same_v<R, std::coroutine_handle<>>) {
+      h = task;
+    } else {
+      static_assert(std::is_base_of_v<task_t, R>,
+                    "T must be derived from task_t");
+      if constexpr (std::is_rvalue_reference_v<decltype(task)>) {
+        task.detach();
+      }
+      h = task.handle;
+    }
+    scheduler_.schedule_remote(h);
     wakeup();
   }
 
   /**
-   * @brief drain all pending remote tasks into the scheduler.
-   * Called from the scheduler during flush_io. Single-consumer (owner thread only).
+   * @brief submit a coroutine factory to be executed on this context's thread.
+   * Thread-safe: can be called from any thread.
+   * A wrapper coroutine is created on the calling thread to capture the callable,
+   * then its handle is enqueued. On the owner thread, the wrapper resumes, calls
+   * the factory to produce the target coroutine, and co_awaits it — keeping the
+   * callable alive for the full lifetime of the inner coroutine.
+   * @tparam F callable type that returns a task-like object or coroutine handle
+   * @param fn callable to invoke on this context's thread
    */
-  void drain_remote_queue();
+  template <typename F>
+  CORNET_MAYBE_UNUSED inline void spawn_remote(F&& fn)
+    requires (!(std::is_same_v<std::decay_t<F>, std::coroutine_handle<>>
+              || std::is_base_of_v<task_t, std::decay_t<F>>
+              || std::is_pointer_v<std::decay_t<F>>))
+  {
+    auto wrapper = detail::make_remote_coro([f = std::decay_t<F>(std::forward<F>(fn))]() mutable {
+      return f();
+    });
+    wrapper.detach();
+    scheduler_.schedule_remote(wrapper.handle);
+    wakeup();
+  }
+
+  /**
+   * @brief submit a coroutine factory with arguments to be executed on this context's thread.
+   * Thread-safe: can be called from any thread.
+   * A wrapper coroutine is created on the calling thread to capture the callable
+   * and arguments, then its handle is enqueued. On the owner thread, the wrapper
+   * resumes, invokes the factory with the forwarded arguments, and co_awaits the result.
+   * @tparam F callable type
+   * @tparam Args argument types forwarded to the callable
+   * @param fn callable to invoke on this context's thread
+   * @param args arguments forwarded to the callable
+   */
+  template <typename F, typename... Args>
+  CORNET_MAYBE_UNUSED inline void spawn_remote(F&& fn, Args&&... args)
+    requires (sizeof...(Args) > 0)
+  {
+    auto wrapper = detail::make_remote_coro([f = std::decay_t<F>(std::forward<F>(fn)),
+                                               ...as = std::decay_t<Args>(std::forward<Args>(args))]() mutable {
+      return f(std::move(as)...);
+    });
+    wrapper.detach();
+    scheduler_.schedule_remote(wrapper.handle);
+    wakeup();
+  }
+
 
   /**
    * @brief awaiter for executing a callable on the thread pool.
@@ -396,8 +455,6 @@ private:
   executor_t executor_;
   // per-signal handler callbacks
   std::unordered_map<int, std::function<void(int)>> signal_handlers_;
-  // MPSC queue for cross-thread task submission
-  moodycamel::ConcurrentQueue<std::function<void()>> remote_queue_;
   // keep-alive flag: prevents auto-exit when user tasks are idle
   bool keep_alive_{false};
 

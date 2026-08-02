@@ -1,16 +1,18 @@
 #ifndef CORNET_CORO_H
 #define CORNET_CORO_H
 
-#include <coroutine>
-#include <utility>
-#include <variant>
-#include <exception>
-#include <iterator>
-#include <type_traits>
-#include <concepts>
-
 #include "cornet/base/task.h"
 #include "cornet/coroutine/cancel.h"
+
+#include <concepts>
+#include <coroutine>
+#include <exception>
+#include <iterator>
+#include <memory_resource>
+
+#include <type_traits>
+#include <utility>
+#include <variant>
 
 namespace cornet {
 
@@ -76,9 +78,9 @@ struct coro_final_awaiter {
    * @return the coroutine to resume next
    */
   CORNET_MAYBE_UNUSED std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> h) noexcept {
+    std::coroutine_handle<> cont = h.promise().continuation;
     if (h.promise().detached) h.destroy();
-    if (h.promise().continuation) return h.promise().continuation;
-    return std::noop_coroutine();
+    return cont ? cont : std::noop_coroutine();
   }
 
   CORNET_MAYBE_UNUSED void await_resume() noexcept {}

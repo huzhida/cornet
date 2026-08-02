@@ -5,7 +5,7 @@
 Cornet 提供分层的 Socket 抽象：
 
 ```
-cornet::socket_t           (基类：fd 管理, recv, send, connect, bind, close)
+cornet::socket_t           (基类：fd 管理, recv, send, connect, bind, close, shutdown)
 ├── cornet::tcp::socket_t  (TCP：listen, accept)
 │   ├── cornet::tcp::v4::socket_t   (IPv4 TCP)
 │   ├── cornet::tcp::v6::socket_t   (IPv6 TCP)
@@ -44,11 +44,11 @@ if (!ret) {
     // ret.error().message() 获取错误信息
 }
 
-// accept 返回新的 socket
-while (!ctx.is_shutting_down()) {
+// accept 返回新的 tcp::socket_t
+while (!ctx.is_running()) {
     auto client = co_await listener.accept(ctx);
     if (!client) continue;
-    ctx.spawn(handle(std::move(*client)));
+    ctx.spawn(handle(std::move(*client), ctx));
 }
 ```
 
@@ -63,6 +63,9 @@ if (!ret) {
     // 连接失败
 }
 ```
+
+> `connect(ctx, host, port)` 返回 `ccoro_t<expected<void>>`（可取消协程）。
+> 不带 canceler 时走快速路径（IP）或线程池异步 DNS（域名），返回 `expected<void>`。
 
 ### 数据收发
 
@@ -94,26 +97,33 @@ co_await sock.close(ctx);
 co_await sock.shutdown(ctx, SHUT_WR);   // 关闭写端，通知对端 EOF
 co_await sock.shutdown(ctx, SHUT_RD);   // 关闭读端
 
-// 析构时自动异步关闭：
-// - 同线程：ctx.spawn(async_close(fd))
-// - 跨线程：同步 ::close(fd)
+// 析构时自动同步关闭 fd
 ```
 
-### 带超时/取消的 connect
+### 带取消的 connect
 
 ```cpp
-// 带超时
+// 不带取消参数：返回 ccoro_t<expected<void>>，协程级 with_cancel 可取消
 auto ret = co_await sock.connect(ctx, "example.com", 80);
 
-// 带取消
+// 带 canceler 参数：返回 coro_t<expected<void>>，手动控制取消
 canceler_t canceler(ctx);
-auto ret = co_await sock.connect(ctx, "example.com", 80, canceler);
+auto ret2 = co_await sock.connect(ctx, "example.com", 80, canceler);
 // 其他协程中调用 canceler.cancel() 可取消连接
 ```
 
-> **注意**：不带超时/取消参数的 `connect(host, port)` 返回 `ccoro_t<expected<void>>`，
-> 支持通过协程级 `with_cancel` / `with_timeout` 自动传播取消。
-> 带超时/取消参数的重载返回普通 `coro_t<expected<void>>`。
+### 用解析结果连接
+
+```cpp
+// 异步解析（通过线程池）
+auto resolved = co_await cornet::resolve(ctx, "example.com", 80);
+if (!resolved) {
+    // 解析失败
+}
+
+// 用解析结果连接（避免重复 DNS）
+auto ret = co_await sock.connect(ctx, *resolved);
+```
 
 ## UDP
 
@@ -121,7 +131,8 @@ auto ret = co_await sock.connect(ctx, "example.com", 80, canceler);
 
 ```cpp
 udp::v4::socket_t sock;
-sock.bind("0.0.0.0", 9000);
+auto bind_ret = sock.bind("0.0.0.0", 9000);
+if (!bind_ret) { /* error */ }
 
 // 接收
 sockaddr_storage from_addr{};
@@ -150,17 +161,17 @@ auto m = co_await sock.recvmsg(ctx, &msg, 0);
 ### 自动解析（connect 内置）
 
 ```cpp
-// IP 地址走快速路径（同步），域名走线程池异步解析
+// IP 地址走快速路径（同步 getaddrinfo），域名走线程池异步解析
 auto ret = co_await sock.connect(ctx, "example.com", 443);
 ```
 
 ### 手动解析（复用地址）
 
 ```cpp
-// 异步解析
+// 异步解析（通过线程池，不阻塞事件循环）
 auto resolved = co_await cornet::resolve(ctx, "example.com", 443);
 if (!resolved) {
-    // resolved.error().message() — 解析错误信息
+    // resolved.error() — 解析错误
 }
 
 // 用解析结果连接多个 socket
@@ -174,21 +185,21 @@ auto ret2 = co_await sock2.connect(ctx, *resolved);
 
 ```cpp
 tcp::local::socket_t server;
-server.listen("/tmp/my.sock");
+auto ret = server.listen("/tmp/my.sock");
 
 auto client = co_await server.accept(ctx);
 
 // 客户端
 tcp::local::socket_t cli;
-auto ret = co_await cli.connect(ctx, "/tmp/my.sock");
+auto ret2 = co_await cli.connect(ctx, "/tmp/my.sock");
 ```
 
 ### UDP 风格
 
 ```cpp
 udp::local::socket_t sock;
-sock.bind("/tmp/dgram.sock");
-auto ret = co_await sock.connect(ctx, "/tmp/peer.sock");
+auto ret = sock.bind("/tmp/dgram.sock");
+auto ret2 = co_await sock.connect(ctx, "/tmp/peer.sock");
 ```
 
 ## 错误处理
@@ -198,7 +209,7 @@ auto ret = co_await sock.connect(ctx, "/tmp/peer.sock");
 ```cpp
 auto n = co_await sock.recv(ctx, buf, len);
 if (!n) {
-    error_t err = n.error();
+    auto& err = n.error();
     int code = err.code;              // errno 值
     const char* msg = err.message();  // strerror(code)
     error_domain domain = err.domain; // system / resolve / internal
@@ -216,7 +227,8 @@ sock6.v6_only(true);       // IPV6_V6ONLY (仅 v6 socket)
 ## 注意事项
 
 - Socket 不可拷贝，仅可移动
-- 析构时自动关闭 fd（同线程异步，跨线程同步）
+- 析构时同步关闭 fd（`::close`）
 - `recv` 返回 0 表示对端关闭连接
-- `connect` 是协程（`coro_t<expected<void>>`），需要 `co_await`
+- `connect` 是协程（`ccoro_t<expected<void>>`），需要 `co_await`
 - 所有 awaiter 操作必须在拥有 context 的线程上执行
+- `bind`、`listen` 是同步操作（返回 `expected<void>`），在 spawn 之前调用

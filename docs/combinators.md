@@ -91,9 +91,10 @@ when_all_result<Ts...> {
 
 ```cpp
 auto result = co_await when_all(ctx, task1(), task2(), task3());
-for_each_error(result, [](auto& r) {
-    if (!r) handle_error(r.error());
-});
+// 逐个检查结果
+if (!result.get<0>()) handle_error(result.get<0>().error());
+if (!result.get<1>()) handle_error(result.get<1>().error());
+if (!result.get<2>()) handle_error(result.get<2>().error());
 ```
 
 ### 安全性
@@ -143,18 +144,31 @@ when_any_result<Ts...> {
 ```cpp
 canceler_t canceler(ctx);
 
-coro_t<Data> cancellable_fetch(context_t& ctx, const std::string& url, canceler_t& c) {
+// 使用 ccoro_t 使协程内部 IO 自动可取消
+ccoro_t<Data> cancellable_fetch(context_t& ctx, const std::string& url) {
     tcp::v4::socket_t sock;
     auto conn = co_await sock.connect(ctx, url, 80);
-    auto n = co_await with_cancel(ctx, sock.recv(ctx, buf, 4096), c);
+    if (!conn) co_return Data{};
+    auto n = co_await sock.recv(ctx, buf, 4096);
+    if (!n) co_return Data{};
+    co_return parse(buf, *n);
+}
+
+// 手动包装 IO 为可取消
+coro_t<Data> manually_cancellable(context_t& ctx) {
+    tcp::v4::socket_t sock;
+    auto conn = co_await sock.connect(ctx, "server", 80);
+    if (!conn) co_return Data{};
+    // 用 with_cancel 包裹具体 IO 操作
+    auto n = co_await with_cancel(ctx, sock.recv(ctx, buf, 4096), canceler);
     if (!n) co_return Data{};
     co_return parse(buf, *n);
 }
 
 // 第一个完成时，canceler 自动触发，取消其他协程的 IO
 auto result = co_await when_any(ctx, canceler,
-    cancellable_fetch("server-a", canceler),
-    cancellable_fetch("server-b", canceler)
+    manually_cancellable(ctx),
+    manually_cancellable(ctx)
 );
 ```
 

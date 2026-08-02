@@ -129,6 +129,9 @@ inline void on_connect(uv_connect_t* req, int status) {
 } // namespace detail_uv
 
 inline result_t run_libuv(const scenario_t& scenario) {
+  rss_profiler_t profiler;
+  profiler.start();
+
   std::atomic<bool> server_running{true};
   latency_collector_t collector;
   collector.reserve(scenario.total_messages);
@@ -180,7 +183,7 @@ inline result_t run_libuv(const scenario_t& scenario) {
     uv_tcp_connect(&ctx->connect_req, &ctx->handle, (const struct sockaddr*)&addr, detail_uv::on_connect);
   }
 
-  size_t rss_before = get_current_rss_kb();
+  size_t hwm_before = get_vmmhwm_kb();
   auto start = std::chrono::steady_clock::now();
   uv_run(&client_loop, UV_RUN_DEFAULT);
   auto elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
@@ -189,7 +192,11 @@ inline result_t run_libuv(const scenario_t& scenario) {
   server_running = false;
   server_thread.join();
 
-  return collector.compute("Libuv", scenario.name, elapsed, rss_before);
+  profiler.stop();
+
+  result_t r = collector.compute("Libuv", scenario.name, elapsed, hwm_before);
+  collector.fill_profile(r, profiler);
+  return r;
 }
 
 } // namespace bench

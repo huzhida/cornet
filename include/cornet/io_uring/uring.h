@@ -26,19 +26,20 @@ struct context_t;
 class uring_t {
  public:
   /**
-   * @brief initialize io_uring instance
-   * @param entries_nr number of entries in the ring
-   * @param flags io_uring_setup flags
+   * @brief initialize io_uring instance.
+   * Reads capacity and flags from config.
+   * @param tracker work tracker
+   * @param config configuration pointer (may be nullptr)
    */
-   /**
-    * @brief initialize io_uring instance.
-    * Reads capacity and flags from config.
-    * @param tracker work tracker
-    * @param config configuration pointer (may be nullptr)
-    */
    uring_t(task_tracker_t& tracker, config_t* config);
 
    ~uring_t();
+
+   /**
+    * @brief enable the io_uring ring (must be called on the owner thread).
+    * Required when the ring is initialized with IORING_SETUP_R_DISABLED.
+    */
+   void enable();
 
    uring_t(const uring_t&) = delete;
 

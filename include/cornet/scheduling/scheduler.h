@@ -7,6 +7,11 @@
 #include <array>
 #include <memory>
 
+#ifdef BLOCK_SIZE
+#undef BLOCK_SIZE
+#endif
+#include <moodycamel/concurrentqueue.h>
+
 #include "cornet/base/defines.h"
 #include "cornet/utils/config.h"
 #include "cornet/scheduling/task_tracker.h"
@@ -144,8 +149,16 @@ struct scheduler_t {
    * @param h coroutine handle
    */
   inline void schedule(std::coroutine_handle<> h) {
-    ready_tasks.push(h);
+    ready_tasks_.push(h);
     tracker_.coroutine_add();
+  }
+
+  /**
+   * @brief push coroutine handle to ready queue.
+   * @param h coroutine handle
+   */
+  inline void schedule_remote(std::coroutine_handle<> h) {
+    remote_queue_.enqueue(h);
   }
 
   /**
@@ -153,7 +166,7 @@ struct scheduler_t {
    * @return true for idle / false for busy
    */
   CORNET_NODISCARD inline bool idle() const {
-    return ready_tasks.empty();
+    return ready_tasks_.empty();
   }
 
   /**
@@ -183,19 +196,16 @@ protected:
   // work tracker (owned by context_t, set after construction)
   task_tracker_t& tracker_;
   // ready to resume queue
-  queue_t ready_tasks;
+  queue_t ready_tasks_;
+  // MPSC queue for cross-thread task submission
+  moodycamel::ConcurrentQueue<std::coroutine_handle<>> remote_queue_;
+  // async tasks buffer
+  std::array<atask_t*, 32> async_tasks;
+
   // resume one task from the ready queue
   void resume_one_task();
   // collect completed executor tasks into ready queue
   void process_async_tasks(context_t& ctx);
-  /**
-   * @brief common post-CPU-phase logic: submit SQEs, harvest CQEs, handle idle wait.
-   * @param ctx owner context
-   * @param wait_timeout how long to block when no CQEs ready and no CPU tasks pending
-   * @return number of CQEs processed
-   */
-  uint32_t flush_io(context_t& ctx, std::chrono::nanoseconds wait_timeout = std::chrono::milliseconds(10));
-  std::array<atask_t*, 32> async_tasks;
 
 private:
   // scheduling policy (injected, not inherited)

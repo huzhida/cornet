@@ -12,6 +12,9 @@
 namespace bench {
 
 inline result_t run_asio_coro(const scenario_t& scenario) {
+  rss_profiler_t profiler;
+  profiler.start();
+
   std::atomic<bool> server_running{true};
   latency_collector_t collector;
   collector.reserve(scenario.total_messages);
@@ -74,7 +77,7 @@ inline result_t run_asio_coro(const scenario_t& scenario) {
     asio::co_spawn(client_io, client_session(i), asio::detached);
   }
 
-  size_t rss_before = get_current_rss_kb();
+  size_t hwm_before = get_vmmhwm_kb();
   auto start = std::chrono::steady_clock::now();
   client_io.run();
   auto elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
@@ -83,7 +86,11 @@ inline result_t run_asio_coro(const scenario_t& scenario) {
   server_io.stop();
   server_thread.join();
 
-  return collector.compute("Asio/Coroutine", scenario.name, elapsed, rss_before);
+  profiler.stop();
+
+  result_t r = collector.compute("Asio/Coroutine", scenario.name, elapsed, hwm_before);
+  collector.fill_profile(r, profiler);
+  return r;
 }
 
 } // namespace bench

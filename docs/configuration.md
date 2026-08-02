@@ -112,7 +112,7 @@ capacity 过小会导致 SQE 队列满时频繁触发 forced submit（额外 sys
 不加载任何配置文件时，框架使用以下默认值：
 - uring capacity: 32
 - scheduler: RoundRobin
-- executor: 懒初始化，1 线程
+- executor: 懒初始化，首次 `ctx.async()` 调用时创建
 - 日志: 不初始化（需手动调用 `logging::init()`）
 
 ```cpp

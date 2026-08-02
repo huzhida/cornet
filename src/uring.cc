@@ -1,6 +1,7 @@
 #include "cornet/base/metrics.h"
 #include "cornet/io_uring/uring.h"
 #include "cornet/scheduling/context.h"
+#include <liburing.h>
 
 namespace cornet {
 
@@ -12,9 +13,22 @@ uring_t::uring_t(task_tracker_t& tracker, config_t* config)
     ? config->at_path("cornet.context.uring.capacity").value_or(128)
     : 128u;
   auto flags = config ? config->at_path("cornet.context.uring.flags").value_or(0u) : 0u;
-  if (io_uring_queue_init(entries_nr, uring.get(), flags) < 0) {
+  io_uring_params params{};
+  // IORING_SETUP_R_DISABLED: ring is not active until enable() is called on
+  // the owner thread. This avoids IORING_SETUP_SINGLE_ISSUER EEXIST when the
+  // ring is constructed on one thread but used on another.
+  params.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_R_DISABLED | flags;
+
+  if (io_uring_queue_init_params(entries_nr, uring.get(), &params) < 0) {
     SPDLOG_ERROR("failed to init io_uring queue with error: {}", strerror(errno));
     throw std::runtime_error("failed to init io_uring queue");
+  }
+}
+
+void uring_t::enable() {
+  if (io_uring_enable_rings(uring.get()) < 0) {
+    SPDLOG_ERROR("failed to enable io_uring ring with error: {}", strerror(errno));
+    throw std::runtime_error("failed to enable io_uring ring");
   }
 }
 

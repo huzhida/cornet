@@ -61,7 +61,7 @@ using namespace cornet;
 
 coro_t<void> handle_client(tcp::v4::socket_t client, context_t& ctx) {
     char buf[4096];
-    while (true) {
+    while (ctx.is_running()) {
         auto n = co_await client.recv(ctx, buf, sizeof(buf));
         if (!n || *n == 0) break;
         auto sent = co_await client.send(ctx, buf, *n);
@@ -69,13 +69,12 @@ coro_t<void> handle_client(tcp::v4::socket_t client, context_t& ctx) {
     }
 }
 
-coro_t<void> server() {
-    auto& ctx = context_t::current();
+coro_t<void> server(context_t& ctx) {
     tcp::v4::socket_t listener;
     listener.port_reuse(true);
     listener.listen("0.0.0.0", 8080);
 
-    while (!ctx.is_shutting_down()) {
+    while (ctx.is_running()) {
         auto client = co_await listener.accept(ctx);
         if (!client) continue;
         ctx.spawn(handle_client(std::move(*client), ctx));
@@ -83,9 +82,9 @@ coro_t<void> server() {
 }
 
 int main() {
-    auto& ctx = context_t::current();
+    context_t ctx;
     ctx.on_signal({SIGINT, SIGTERM}, [&](int) { ctx.shutdown(); });
-    ctx.spawn(server());
+    ctx.spawn(server(ctx));
     ctx.run();
 }
 ```
@@ -93,15 +92,20 @@ int main() {
 ### 异步 DNS + 超时连接
 
 ```cpp
-coro_t<expected<void>> connect_with_timeout(context_t& ctx) {
+ccoro_t<expected<void>> connect_with_timeout(context_t& ctx) {
     tcp::v4::socket_t sock;
-    // connect 自动检测：IP 走快速路径，域名走异步 DNS
-    // 带超时参数的 connect 内部自动处理取消
-    auto ret = co_await sock.connect(ctx, "example.com", 80, std::chrono::seconds(5));
+    // 不带超时参数的 connect：IP 走快速路径，域名走异步 DNS
+    auto ret = co_await sock.connect(ctx, "www.example.com", 80);
     if (!ret) {
         co_return unexpected(ret.error());
     }
     co_return {};
+}
+
+// 使用 with_timeout 为 IO 操作添加超时
+auto result = co_await with_timeout(ctx, connect_with_timeout(ctx), std::chrono::seconds(5));
+if (!result && result.error().code == ETIMEDOUT) {
+    // 连接超时
 }
 ```
 
@@ -109,16 +113,16 @@ coro_t<expected<void>> connect_with_timeout(context_t& ctx) {
 
 ```cpp
 // 需要自动取消传播的协程，使用 ccoro_t（cancelable_coro_t 的别名）
-ccoro_t<expected<Data>> fetch_data(context_t& ctx) {
+ccoro_t<expected<int>> fetch_data(context_t& ctx) {
     tcp::v4::socket_t sock;
     auto conn = co_await sock.connect(ctx, "server", 80);   // 自动可取消
     if (!conn) co_return unexpected(conn.error());
     auto n = co_await sock.recv(ctx, buf, 4096);            // 自动可取消
-    co_return parse(buf, *n);
+    co_return *n;
 }
 
 // 整个协程设定超时，内部所有 IO 自动获得取消能力
-auto result = co_await with_timeout(ctx, fetch_data(ctx), 5s);
+auto result = co_await with_timeout(ctx, fetch_data(ctx), std::chrono::seconds(5));
 if (!result && result.error().code == ETIMEDOUT) {
     // 协程整体超时，内部 IO 已自动取消
 }
@@ -127,11 +131,11 @@ if (!result && result.error().code == ETIMEDOUT) {
 ### 并发等待
 
 ```cpp
-coro_t<void> fetch_all() {
+coro_t<void> fetch_all(context_t& ctx) {
     auto result = co_await when_all(ctx,
-        fetch_from("service-a", 8001),
-        fetch_from("service-b", 8002),
-        fetch_from("service-c", 8003)
+        fetch_from(ctx, "service-a", 8001),
+        fetch_from(ctx, "service-b", 8002),
+        fetch_from(ctx, "service-c", 8003)
     );
     // result.get<0>(), result.get<1>(), result.get<2>()
 }
@@ -140,12 +144,40 @@ coro_t<void> fetch_all() {
 ### 线程池卸载
 
 ```cpp
-coro_t<void> heavy_work() {
-    auto& ctx = context_t::current();
+coro_t<void> heavy_work(context_t& ctx) {
     // 阻塞计算自动在工作线程执行，完成后回到协程
     auto hash = co_await ctx.async([] {
         return compute_sha256(large_data);
     });
+}
+```
+
+### 多线程 Runtime
+
+```cpp
+#include <cornet.h>
+
+coro_t<void> accept_loop(context_t& ctx, runtime_t& rt) {
+    tcp::v4::socket_t listener;
+    listener.listen("0.0.0.0", 8080);
+    while (ctx.is_running()) {
+        auto client = co_await listener.accept(ctx);
+        if (!client) continue;
+        // 通过 rt.spawn() 自动 round-robin 分发
+        rt.spawn([&](context_t& target_ctx) -> coro_t<void> {
+            co_await handle_client(std::move(*client), target_ctx);
+        });
+    }
+}
+
+int main() {
+    runtime_t rt;  // 默认 hardware_concurrency 线程
+    rt.start([](size_t idx, context_t& ctx) {
+        if (idx == 0) {
+            ctx.spawn(accept_loop(ctx, rt));
+        }
+    });
+    rt.join();
 }
 ```
 
@@ -163,13 +195,16 @@ batch = 32
 cpu_budget = "10ms"  # TimeSlice 专用
 io_budget = "100us"  # TimeSlice 专用
 
-[cornet.context.executor]
-thread_nr = 4
-max_task_nr = 16384
-
 [cornet.logging.stdout]
 level = "info"
 pattern = "%^%L%$ [%Y-%m-%d %T %t %@] %v"
+```
+
+加载配置：
+
+```cpp
+// 可选：不加载则使用默认值
+cornet::config_t::load("conf/default.toml");
 ```
 
 ## 项目结构
@@ -222,6 +257,7 @@ cornet/
 - [并发组合器](docs/combinators.md)
 - [线程池 Executor](docs/executor.md)
 - [配置参考](docs/configuration.md)
+- [多线程 Runtime](docs/runtime.md)
 
 ## 性能
 

@@ -249,10 +249,10 @@ return unexpected(ECANCELED, error_domain::internal);  // 内部错误
 
 ```cpp
 ccoro_t<expected<void>> my_handler(context_t& ctx) {
+    tcp::v4::socket_t sock;
     auto conn = co_await sock.connect(ctx, "server", 80);  // 自动可取消
     auto n = co_await sock.recv(ctx, buf, 4096);            // 自动可取消
-    auto sub = co_await compute_something();           // coro_t，不受影响
-    co_return expected<void>{};
+    co_return {};
 }
 
 canceler_t canceler(ctx);

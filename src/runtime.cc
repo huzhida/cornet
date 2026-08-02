@@ -3,12 +3,12 @@
 
 namespace cornet {
 
-runtime_t::runtime_t(size_t thread_nr)
-  : thread_nr_(thread_nr > 0 ? thread_nr : 1) {
+runtime_t::runtime_t(config_t* config, size_t thread_nr)
+  : config_(config), thread_nr_(thread_nr > 0 ? thread_nr : 1) {
   // Create all contexts upfront so they exist before threads start
   contexts_.reserve(thread_nr_);
   for (size_t i = 0; i < thread_nr_; ++i) {
-    contexts_.push_back(std::make_unique<context_t>());
+    contexts_.push_back(std::make_unique<context_t>(config_));
   }
 }
 
@@ -22,7 +22,7 @@ runtime_t::~runtime_t() {
 void runtime_t::start(std::function<void(size_t, context_t&)> init_fn) {
   std::latch init_done(thread_nr_);
 
-  for (size_t i = 0; i < thread_nr_; ++i) {
+  for (size_t i = 0; i < thread_nr_; ++i) { 
     workers_.emplace_back([this, i, &init_done, init_fn]() {
       context_t& ctx = *contexts_[i];
       ctx.set_keep_alive(true);
