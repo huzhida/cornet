@@ -1,6 +1,9 @@
 #ifndef CORNET_URING_TASK_H
 #define CORNET_URING_TASK_H
 
+#include <concepts>
+#include <type_traits>
+
 #include "cornet/base/task.h"
 #include "cornet/io_uring/uring.h"
 #include "cornet/base/expected.h"
@@ -74,6 +77,21 @@ struct utask_t : task_t {
    */
   void prepare_into(io_uring_sqe* sqe);
 
+  /**
+   * @brief reclassify this op as framework-internal.
+   * Framework io (watcher reads, the shutdown drain timer, cancellation) must
+   * not count as user work, otherwise the context can never reach user_idle()
+   * and graceful shutdown never starts draining. Must be called before the op
+   * is awaited. See as_system() for the intended spelling.
+   */
+  void mark_system() { user_work = false; }
+
+  /**
+   * @brief whether this op counts as user work.
+   * @return true for application io, false for framework-internal io
+   */
+  CORNET_NODISCARD bool is_user_work() const { return user_work; }
+
 #if !CORNET_LINUX_VERSION_GE_5_19
   /**
    * @brief the io_uring user_data token for this task (encoded slot index + generation).
@@ -94,6 +112,12 @@ protected:
   prepare_fn_t prepare_fn{nullptr};
   // completed flag (set by subclass on early failure, or by complete())
   bool completed{false};
+  // whether this op counts as user work for drain detection. Defaults to true
+  // so that forgetting to classify a framework op keeps the context alive
+  // (fail-safe) instead of draining it out from under running work.
+  bool user_work{true};
+  // whether this op has been counted into the tracker's user io total
+  bool user_io_counted{false};
   // the return value of the async system call
   int value{0};
   // owner context
@@ -105,6 +129,26 @@ private:
   uint64_t slot_data_{0};
 #endif
 };
+
+/**
+ * @brief mark an io operation as framework-internal before awaiting it.
+ *
+ * Usage: co_await as_system(async_read(ctx, fd, buf, len));
+ *
+ * Framework io must not count as user work, or user_idle() can never become
+ * true and graceful shutdown never starts draining. The default is "user", so
+ * omitting this call keeps the context alive (fail-safe) — only deliberately
+ * writing as_system() can move an op out of the user account.
+ * @tparam A utask_t-derived awaiter type
+ * @param op the operation to reclassify
+ * @return the same operation, moved
+ */
+template<typename A>
+  requires std::derived_from<std::decay_t<A>, utask_t>
+std::decay_t<A> as_system(A&& op) {
+  op.mark_system();
+  return std::forward<A>(op);
+}
 
 } // namespace cornet
 

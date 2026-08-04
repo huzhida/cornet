@@ -15,68 +15,95 @@ struct context_t; // forward declaration
  * Since every context is single-threaded (thread-per-core), all tracker accesses
  * happen on the owner thread — no atomics needed.
  *
- * Idle checks are a single load: can_idle() means no user work remains,
- * has_any_work() means even persistent watchers remain.
+ * Two independent axes are tracked, because the two idle questions need
+ * different answers:
  *
- * Failure mode: if any module forgets to inc/dec, the counter drifts upward
- * and can_idle() stays false — the system conservatively stays alive (fail-safe).
+ *   - Ownership: does any *user* work remain? Framework-internal io (watcher
+ *     reads, the drain timer, cancellation ops) is excluded, so user_idle()
+ *     becomes true as soon as the application is done. This drives the
+ *     Running -> Canceling transition.
+ *   - Liveness: is any SQE still in flight at all? This includes framework io
+ *     and fire-and-forget ops, and is the real run-loop exit condition —
+ *     leaving the loop with inflight io would tear the ring down underneath it.
+ *
+ * Both predicates are plain all-zero checks. Nothing is compared across
+ * categories, so adding a watcher or changing how many ops one keeps armed
+ * cannot skew the result.
+ *
+ * Failure mode: io ownership defaults to "user" (see utask_t::user_work), so a
+ * missed classification keeps the context alive rather than draining it early.
+ * A missed inc/dec likewise drifts the counter upward and idle() stays false —
+ * the system conservatively stays alive (fail-safe).
  */
 class task_tracker_t {
-  context_t* ctx_ = nullptr;
-  uint32_t user_task_{0};
-  uint32_t io_task_{0};
-  uint32_t cpu_task_{0};
-  uint32_t persistent_task_{0};
+  // owning context. Bound at construction and never rebound, so every module
+  // reached through the tracker can assume it is valid.
+  context_t& ctx_;
+  // ready-queue depth. Kind-agnostic on purpose: a queued handle is resumed on
+  // the next sched() cycle, so counting a framework handle here only delays
+  // idle detection by one cycle, and errs toward staying alive.
+  uint32_t ready_{0};
+  // work offloaded to the executor thread pool. Always user work — only
+  // ctx.async() reaches the executor.
+  uint32_t cpu_{0};
+  // io ops owned by user code (subset of io_inflight_)
+  uint32_t user_io_{0};
+  // every SQE submitted to the kernel, including framework io and
+  // fire-and-forget ops that have no utask to resolve them
+  uint32_t io_inflight_{0};
 
 public:
-  void bind(context_t* ctx) { ctx_ = ctx; }
+  explicit task_tracker_t(context_t& ctx) : ctx_(ctx) {}
 
-  // === IO work (via uring) ===
+  // === IO liveness (via uring, bulk at submit/completion) ===
   // Called when SQEs are submitted to the kernel.
-  void io_submit(uint32_t n) {
-    io_task_ += n;
+  inline void io_submit(uint32_t n) {
+    io_inflight_ += n;
   }
   // Called when CQEs are processed (completed or peeked).
-  void io_complete(uint32_t n) {
-    io_task_ -= n;
+  inline void io_complete(uint32_t n) {
+    io_inflight_ -= n;
   }
-  // Persistent watcher lifecycle (e.g., signalfd, eventfd watch loops).
-  void io_persistent_add(uint32_t n = 1) {
-    persistent_task_ += n;
+
+  // === IO ownership (via utask_t, per-op at prepare/complete) ===
+  // Only ops with user_work set reach these.
+  inline void user_io_add(uint32_t n = 1) {
+    user_io_ += n;
   }
-  void io_persistent_remove(uint32_t n = 1) {
-    persistent_task_ -= n;
+  inline void user_io_remove(uint32_t n = 1) {
+    user_io_ -= n;
   }
 
   // === CPU work (via executor thread pool) ===
-  void cpu_add(uint32_t n = 1) {
-    cpu_task_ += n;
+  inline void executor_add(uint32_t n = 1) {
+    cpu_ += n;
   }
-  void cpu_complete(uint32_t n = 1) {
-    cpu_task_ -= n;
+  inline void executor_remove(uint32_t n = 1) {
+    cpu_ -= n;
   }
 
   // === Coroutine work (via scheduler ready queue) ===
-  void coroutine_add(uint32_t n = 1) {
-    user_task_ += n;
+  inline void coroutine_add(uint32_t n = 1) {
+    ready_ += n;
   }
-  void coroutine_remove(uint32_t n = 1) {
-    user_task_ -= n;
+  inline void coroutine_remove(uint32_t n = 1) {
+    ready_ -= n;
   }
 
   // === Query ===
-  // True when no user work remains (persistent watchers may still be running).
+  // True when no user work remains. Framework io may still be armed.
   // Used as the drain trigger for graceful shutdown.
-  bool user_idle() const { return (user_task_ + io_task_ + cpu_task_) <= persistent_task_; }
+  inline bool user_idle() const { return (ready_ + cpu_ + user_io_) == 0; }
 
-  // True when literally nothing remains — used as the run-loop exit condition.
-  bool idle() const { return (user_task_ + io_task_ + cpu_task_) == 0 && persistent_task_ == 0; }
+  // True when literally nothing remains, including framework and
+  // fire-and-forget io — used as the run-loop exit condition.
+  inline bool idle() const { return user_idle() && io_inflight_ == 0; }
 
   // Debug helpers
-  uint32_t inflight_io() const { return io_task_; }
-  uint32_t inflight_persistent() const { return persistent_task_; }
+  inline uint32_t inflight_io() const { return io_inflight_; }
+  inline uint32_t inflight_user_io() const { return user_io_; }
 
-  context_t* context() const { return ctx_; }
+  inline context_t& context() const { return ctx_; }
 };
 
 } // namespace cornet

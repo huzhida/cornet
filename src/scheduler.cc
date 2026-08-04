@@ -18,32 +18,37 @@ void scheduler_t::resume_one_task() {
   if (task && !task.done()) task.resume();
 }
 
-void scheduler_t::process_async_tasks(context_t& ctx) {
+uint32_t scheduler_t::process_async_tasks(context_t& ctx) {
   auto completed = ctx.executor().get_completed(async_tasks);
   for (size_t idx = 0; idx < completed; ++idx) {
     this->schedule(async_tasks[idx]->handle);
   }
+  return static_cast<uint32_t>(completed);
+}
+
+uint32_t scheduler_t::harvest_remote() {
+  std::coroutine_handle<> h;
+  uint32_t n = 0;
+  while (remote_queue_.try_dequeue(h)) {
+    schedule(h);
+    ++n;
+  }
+  return n;
 }
 
 void scheduler_t::sched(context_t& ctx) {
   CORNET_METRICS_SCOPE_TIMER(ctx.metrics().sched_latency);
   CORNET_METRICS_ADD(ctx.metrics().sched_cycles);
   auto& uring = ctx.io_uring();
-  std::coroutine_handle<> h;
   uint32_t cqes = 0;
 
   sched_stats stats;
   stats.start = std::chrono::steady_clock::now();
 
   // harvest remote queue handles
-  while (remote_queue_.try_dequeue(h)) {
-    schedule(h);
-  }
+  harvest_remote();
   // harvest async completed handles
-  auto completed = ctx.executor().get_completed(async_tasks);
-  for (size_t idx = 0; idx < completed; ++idx) {
-    this->schedule(async_tasks[idx]->handle);
-  }
+  process_async_tasks(ctx);
   // resume ready handles
   while (!ready_tasks_.empty() && !policy_->should_stop_cpu(stats)) {
     resume_one_task();
@@ -56,9 +61,16 @@ void scheduler_t::sched(context_t& ctx) {
   if (uring.running_task_nr() > 0) {
     cqes = uring.peek_cqes(ctx);
   }
-  // wait if no ready task to resume
-  if (cqes == 0 && ready_tasks_.empty()) {
-    uring.wait_cqes(ctx, 1, policy_->get_io_wait());
+  // wait if no ready task to resume. peek_cqes above enqueues rather than
+  // resumes inline, so an empty ready queue already accounts for this cycle's
+  // CQEs
+  if (ready_tasks_.empty()) {
+    // park token + re-check on both producer queues: Dekker handshake with
+    // wakeup(), never blocks with remote work pending
+    context_t::park_scope park(ctx);
+    if (harvest_remote() == 0 && process_async_tasks(ctx) == 0) {
+      uring.wait_cqes(ctx, 1, policy_->get_io_wait());
+    }
   }
 
   policy_->on_sched_done(stats, cqes, uring.running_task_nr());

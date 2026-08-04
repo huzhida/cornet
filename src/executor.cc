@@ -1,5 +1,6 @@
 #include "cornet/scheduling/executor.h"
 #include "cornet/coroutine/atask.h"
+#include "cornet/scheduling/context.h"
 
 namespace cornet {
 executor_t::executor_t(task_tracker_t& tracker, config_t* config)
@@ -26,12 +27,12 @@ bool executor_t::add(atask_t* t) {
   ensure_workers();
   if (pending_tasks.size_approx() > max_task_nr) return false;
   bool ok = pending_tasks.try_enqueue(t);
-  if (ok) tracker_.cpu_add();
+  if (ok) tracker_.executor_add();
   return ok;
 }
 size_t executor_t::get_completed(std::array<atask_t*, 32>& tasks) {
   size_t completed = completed_tasks.try_dequeue_bulk(tasks.begin(), 32);
-  tracker_.cpu_complete(completed);
+  tracker_.executor_remove(completed);
   return completed;
 }
 void executor_t::terminate() {
@@ -67,6 +68,9 @@ void executor_t::worker(executor_t* p_executor) {
     while (!executor.completed_tasks.try_enqueue_bulk(tasks.begin(), dequeued)) {
       std::this_thread::yield();
     }
+    // enqueue-before-wakeup: the owner may be parked in wait_cqes and will not
+    // see these completions until its io timeout otherwise
+    executor.tracker_.context().wakeup();
   }
 }
 

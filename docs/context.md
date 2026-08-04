@@ -115,7 +115,7 @@ Running ──shutdown()──→ Draining ──timeout/user_idle──→ Canc
 |------|------|
 | Running | 正常运行，接受新连接和任务 |
 | Draining | 优雅关闭中，不再接受新连接，等待现有任务完成 |
-| Canceling | spawn `cancel_pending_io()` 取消所有 inflight IO（含 persistent watcher），spawn 后立即进入 Terminated |
+| Canceling | spawn `cancel_sweep()` 取消所有 inflight IO（含 watcher），sweep 完成前不会重复 spawn |
 | Terminated | `run()` 已返回，context 完全干净可复用 |
 
 ### idle 语义

@@ -15,7 +15,6 @@
 #include "cornet/io_uring/utask.h"
 #include "cornet/io_uring/uring.h"
 #include "cornet/io_uring/io_slot.h"
-#include "cornet/io_uring/context_cancellation.h"
 #include "cornet/coroutine/atask.h"
 #include "cornet/coroutine/coro.h"
 #include "cornet/scheduling/scheduler.h"
@@ -321,21 +320,6 @@ struct context_t {
   void set_keep_alive(bool enabled) { keep_alive_ = enabled; }
 
   /**
-   * @brief RAII guard for persistent io work (watcher loops).
-   * Ensures the persistent counter is always decremented, even on exception.
-   */
-  struct persistent_guard {
-    context_t& ctx;
-    explicit persistent_guard(context_t& ctx) : ctx(ctx) {
-      ctx.tracker_.io_persistent_add(1);
-    }
-    ~persistent_guard() {
-      ctx.tracker_.io_persistent_remove(1);
-    }
-    persistent_guard(const persistent_guard&) = delete;
-  };
-
-  /**
    * @brief return scheduler reference 
    */
   CORNET_NODISCARD inline scheduler_t& scheduler() {
@@ -377,10 +361,10 @@ struct context_t {
   }
 
   /**
-   * @brief whether all user tasks are done (only persistent watchers remain).
-   * Used to trigger the Terminated state transition.
+   * @brief whether all user tasks are done (only framework io remains).
+   * Used to trigger the Canceling state transition.
    * When keep_alive is set, always returns false to prevent auto-exit.
-   * @return true if no user IO inflight and no ready tasks
+   * @return true if no user io, cpu work, or ready coroutines remain
    */
   CORNET_NODISCARD inline bool user_idle() {
     if (keep_alive_) return false;
@@ -389,16 +373,46 @@ struct context_t {
 
   /**
    * @brief whether the context is truly idle (nothing at all remains).
-   * Used as the run loop exit condition.
-   * @return true if no work inflight (including persistent)
+   * Used as the run loop exit condition: leaving the loop with io still in
+   * flight would tear the ring down underneath it.
+   * @return true if no work inflight (including framework io)
    */
   CORNET_NODISCARD inline bool idle() {
     if (keep_alive_) return false;
     return tracker_.idle();
   }
 
+
+  /**
+   * @brief RAII park token, held while the owner thread is about to block in
+   * wait_cqes. Nested type, so it reaches parked_ without widening the public
+   * API. Owner thread only.
+   *
+   * The constructor and a re-check of the remote queue form the owner half of
+   * a Dekker handshake with wakeup(): a producer either sees the token and
+   * pokes the eventfd, or its enqueue is visible to that re-check. The caller
+   * MUST perform the re-check and skip blocking if anything was harvested —
+   * constructing this without the re-check can lose a wakeup.
+   *
+   * The destructor clears the token and is idempotent with a producer having
+   * consumed it already; in that case an extra eventfd notification is pending
+   * and gets drained as a harmless spurious wakeup.
+   */
+  struct park_scope {
+    explicit park_scope(context_t& ctx) : ctx_(ctx) {
+      ctx_.parked_.store(true, std::memory_order_seq_cst);
+    }
+    ~park_scope() { ctx_.parked_.store(false, std::memory_order_seq_cst); }
+    park_scope(const park_scope&) = delete;
+    park_scope& operator=(const park_scope&) = delete;
+  private:
+    context_t& ctx_;
+  };
+
   /**
    * @brief cancel awaiter, used for cancel io_uring async tasks.
+   * Pure mechanism: work ownership belongs to whoever awaits it, so framework
+   * callers must spell as_system(). Defaults to user work like any other op.
    */
   struct cancel_awaiter : utask_t {
     void* user_data_;
@@ -435,6 +449,7 @@ private:
     state_.store(s, std::memory_order_release);
     SPDLOG_DEBUG("context switch to state:{}", to_string(s));
   }
+
   // context config (read by scheduler, executor, uring)
   config_t* config_ = nullptr;
   // unified work counter: single source of truth for all in-flight work
@@ -443,12 +458,25 @@ private:
   uring_t uring_;
   // context owned io slot table for safe user_data management
   io_slot_table_t slots_;
+
+  // --- cross-thread wakeup mechanism, kept on its own cacheline ---
+  // parked_ is RMW'd by producer threads on every wakeup(); wakeup_fd_ is
+  // only read by them. They share a line deliberately. state_ and tracker_
+  // must NOT share it: the owner thread reads both on every run-loop
+  // iteration and producer traffic would keep invalidating its copy.
+  //
+  // park token: true while the owner thread is (about to be) blocked in
+  // wait_cqes. Held by park_scope. Producers consume it to decide whether the
+  // eventfd write is needed at all; when the owner is busy it will pick up
+  // remote work on its next sched() cycle without any syscall.
+  alignas(CORNET_CACHE_LINE) std::atomic<bool> parked_{false};
   // eventfd for cross-thread wakeup
   int wakeup_fd_{-1};
   // signalfd for async signal handling (-1 if not used)
   int signal_fd_{-1};
+
   // context current state
-  std::atomic<state_t> state_{state_t::Terminated};
+  alignas(CORNET_CACHE_LINE) std::atomic<state_t> state_{state_t::Terminated};
   // context scheduler (direct member, policy switchable at runtime)
   scheduler_t scheduler_;
   // context executor (thread pool for async offload)
@@ -463,13 +491,21 @@ private:
   context_metrics_t metrics_;
   #endif
 
-  // internal: signal watch coroutine
-  coro_t<void> signal_watch_loop();
-  // internal: wakeup eventfd watch coroutine
-  coro_t<void> wakeup_watch_loop();
+  // internal: generic fd watch coroutine, shared by the signalfd and the
+  // wakeup eventfd. Reads len bytes at a time and hands the buffer to on_data.
+  // Runs until its read is canceled; see the ECANCELED note in the definition.
+  coro_t<void> watch_loop(const char* name, int fd, size_t len,
+                          std::function<void(const void*)> on_data);
+  // internal: issues one full cancellation sweep, then clears cancel_inflight_.
+  // Sole point where the io_uring cancellation API is used; when a non-io_uring
+  // backend is added this moves with uring_ and slots_.
+  coro_t<void> cancel_sweep();
+  // true while a cancellation sweep is in flight; keeps run() from spawning a
+  // fresh sweep on every iteration while the previous one is still working
+  bool cancel_inflight_{false};
 
-  // cancellation infrastructure (io_uring-specific, isolated for future backend replacement)
-  context_cancellation_t cancellation_;
+  // utask_t adjusts the user-io ownership count at prepare/complete/destroy
+  friend struct utask_t;
 };
 
 } // cornet
