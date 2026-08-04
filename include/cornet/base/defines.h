@@ -12,8 +12,7 @@
 #ifndef KERNEL_VERSION
 #define KERNEL_VERSION(a,b,c) (((a) << 16) + ((b) << 8) + ((c) > 255 ? 255 : (c)))
 #endif
-// #define CORNET_LINUX_VERSION_GE_5_19 (LINUX_VERSION_CODE >= KERNEL_VERSION(5,19,0))
-#define CORNET_LINUX_VERSION_GE_5_19 0
+#define CORNET_LINUX_VERSION_GE_5_19 (LINUX_VERSION_CODE >= KERNEL_VERSION(5,19,0))
 
 // suppress unused warnings
 #define CORNET_MAYBE_UNUSED [[maybe_unused]]

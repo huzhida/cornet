@@ -6,7 +6,6 @@
 #include "cornet/io_uring/utask.h"
 #include "cornet/base/expected.h"
 #include "cornet/base/defines.h"
-#include "cornet/io_uring/cancel_io.h"
 
 namespace cornet {
 
@@ -50,18 +49,14 @@ struct canceler_t {
    * @brief construct a root canceler (no parent).
    * The context must be passed explicitly — no global context lookup.
    */
-  explicit canceler_t(context_t& ctx)
-    : io_() {
-    io_.ctx_ = &ctx;
-  }
+  explicit canceler_t(context_t& ctx) : ctx_(&ctx) {}
 
   /**
    * @brief construct a child canceler with a parent canceler.
    * The context must be passed explicitly — no global context lookup.
    */
   explicit canceler_t(context_t& ctx, canceler_t& parent)
-    : parent_(&parent), io_() {
-    io_.ctx_ = &ctx;  // Each canceler should have its own context, not inherit from parent
+    : ctx_(&ctx), parent_(&parent) {
     next_sibling_ = parent.first_child_;
     if (next_sibling_) {
       next_sibling_->prev_sibling_ = this;
@@ -100,22 +95,53 @@ struct canceler_t {
   CORNET_NODISCARD bool is_cancelled() const { return cancelled_; }
 
   expected<void> reset() {
-    if (io_.active_head_) {
+    if (active_head_) {
       return unexpected(EBUSY);
     }
     cancelled_ = false;
     return {};
   }
 
-  void link_node(cancel_node* node) { io_.link_node(node); }
-  void unlink_node(cancel_node* node) { io_.unlink_node(node); }
+  /**
+   * @brief register an inflight op so cancel() can reach it.
+   * Backend-agnostic intrusive list push; the node lives in the awaiter frame.
+   */
+  void link_node(cancel_node* node) {
+    node->prev = nullptr;
+    node->next = active_head_;
+    if (active_head_) {
+      active_head_->prev = node;
+    }
+    active_head_ = node;
+  }
+
+  /**
+   * @brief unregister an op that resolved on its own.
+   */
+  void unlink_node(cancel_node* node) {
+    if (node->prev) {
+      node->prev->next = node->next;
+    } else {
+      active_head_ = node->next;
+    }
+    if (node->next) {
+      node->next->prev = node->prev;
+    }
+    node->prev = node->next = nullptr;
+  }
 
 private:
   void cancel_subtree();
+  /**
+   * @brief issue the backend cancel ops for this canceler's own list.
+   * The only backend-specific piece of canceler_t; defined in cancel.cc behind
+   * the kernel-version switch.
+   */
   void cancel_active_tasks();
 
   bool cancelled_{false};
-  canceler_io_t io_;
+  context_t* ctx_{nullptr};
+  cancel_node* active_head_{nullptr};
   canceler_t* parent_{nullptr};
   canceler_t* first_child_{nullptr};
   canceler_t* next_sibling_{nullptr};
