@@ -54,7 +54,9 @@ class task_tracker_t {
 
 public:
   explicit task_tracker_t(context_t& ctx) : ctx_(ctx) {}
-
+  inline void status() {
+    SPDLOG_DEBUG("coroutine={} inflight_io={} inflight_executor_task={}", ready_, user_io_, cpu_);
+  }
   // === IO liveness (via uring, bulk at submit/completion) ===
   // Called when SQEs are submitted to the kernel.
   inline void io_submit(uint32_t n) {

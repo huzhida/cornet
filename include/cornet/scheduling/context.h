@@ -18,7 +18,6 @@
 #include "cornet/coroutine/atask.h"
 #include "cornet/coroutine/coro.h"
 #include "cornet/scheduling/scheduler.h"
-#include "cornet/scheduling/executor.h"
 #include "cornet/coroutine/cancel.h"
 #include "cornet/scheduling/task_tracker.h"
 
@@ -322,8 +321,8 @@ struct context_t {
   /**
    * @brief return scheduler reference 
    */
-  CORNET_NODISCARD inline scheduler_t& scheduler() {
-    return this->scheduler_;
+  CORNET_NODISCARD inline scheduler_t& scheduler() { 
+    return this->scheduler_; 
   }
 
   /**
@@ -357,7 +356,7 @@ struct context_t {
    * @return context_t owned executor reference
    */
   CORNET_NODISCARD inline executor_t& executor() {
-    return executor_;
+    return scheduler_.executor_;
   }
 
   /**
@@ -479,13 +478,13 @@ private:
   alignas(CORNET_CACHE_LINE) std::atomic<state_t> state_{state_t::Terminated};
   // context scheduler (direct member, policy switchable at runtime)
   scheduler_t scheduler_;
-  // context executor (thread pool for async offload)
-  executor_t executor_;
   // per-signal handler callbacks
   std::unordered_map<int, std::function<void(int)>> signal_handlers_;
   // keep-alive flag: prevents auto-exit when user tasks are idle
   bool keep_alive_{false};
-
+  // true while a cancellation sweep is in flight; keeps run() from spawning a
+  // fresh sweep on every iteration while the previous one is still working
+  bool cancel_inflight_{false};
   #ifdef CORNET_METRICS
   // context performance metrics
   context_metrics_t metrics_;
@@ -494,15 +493,11 @@ private:
   // internal: generic fd watch coroutine, shared by the signalfd and the
   // wakeup eventfd. Reads len bytes at a time and hands the buffer to on_data.
   // Runs until its read is canceled; see the ECANCELED note in the definition.
-  coro_t<void> watch_loop(const char* name, int fd, size_t len,
-                          std::function<void(const void*)> on_data);
+  coro_t<void> watch_loop(const char* name, int fd, size_t len, std::function<void(const void*)> on_data);
   // internal: issues one full cancellation sweep, then clears cancel_inflight_.
   // Sole point where the io_uring cancellation API is used; when a non-io_uring
   // backend is added this moves with uring_ and slots_.
   coro_t<void> cancel_sweep();
-  // true while a cancellation sweep is in flight; keeps run() from spawning a
-  // fresh sweep on every iteration while the previous one is still working
-  bool cancel_inflight_{false};
 
   // utask_t adjusts the user-io ownership count at prepare/complete/destroy
   friend struct utask_t;

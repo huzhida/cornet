@@ -19,8 +19,8 @@ context_t::context_t(config_t* config)
   : config_(config),
     tracker_(*this),
     uring_(tracker_, config),
-    scheduler_(tracker_, config),
-    executor_(tracker_, config) {
+    scheduler_(tracker_, config) 
+    {
   #ifdef CORNET_METRICS
   uring_.metrics_ = &metrics_;
   #endif
@@ -32,7 +32,6 @@ context_t::context_t(config_t* config)
 }
 
 context_t::~context_t() {
-  executor_.terminate();
   if (signal_fd_ >= 0) {
     ::close(signal_fd_);
     signal_fd_ = -1;

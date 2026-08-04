@@ -10,7 +10,7 @@ Cornet 是一个基于 C++20 协程和 Linux io_uring 的高性能异步网络�
 - **零开销协程分离** — `coro_t<V>` 零额外开销；`cancelable_coro_t<V>`（别名 `ccoro_t<V>`）按需支持自动取消传播
 - **CRTP 代码复用** — 两种协程类型通过 `basic_coro_t` 共享公共实现，维护只需改一处
 - **io_uring 深度集成** — SQE 批量提交、CQE 批量收割、link timeout、multishot 支持
-- **多种调度策略** — RoundRobin、Batch、TimeSlice、Adaptive 四种可切换调度器
+- **自适应调度器** — 动态调整 CPU batch 和 IO wait，自动平衡吞吐与延迟
 - **完整 TCP/UDP 抽象** — IPv4、IPv6、Unix Domain Socket 全覆盖
 - **异步 DNS 解析** — 域名解析自动卸载到线程池，IP 地址走快速路径
 - **并发组合器** — `when_all`、`when_any`、`sleep`、`with_timeout`、`with_cancel`
@@ -64,8 +64,7 @@ coro_t<void> handle_client(tcp::v4::socket_t client, context_t& ctx) {
     while (ctx.is_running()) {
         auto n = co_await client.recv(ctx, buf, sizeof(buf));
         if (!n || *n == 0) break;
-        auto sent = co_await client.send(ctx, buf, *n);
-        if (!sent) break;
+        co_await client.send(ctx, buf, *n);
     }
 }
 
@@ -190,10 +189,8 @@ int main() {
 capacity = 1024
 
 [cornet.context.scheduler]
-name = "Batch"       # RoundRobin | Batch | TimeSlice | Adaptive
-batch = 32
-cpu_budget = "10ms"  # TimeSlice 专用
-io_budget = "100us"  # TimeSlice 专用
+cpu_batch = 64    # CPU 阶段每周期最大 resume 任务数（默认 64，范围 32–2048）
+io_wait = "1ms"   # IO 阶段等待超时（默认 1ms，范围 50us–1ms）
 
 [cornet.logging.stdout]
 level = "info"
@@ -259,14 +256,14 @@ cornet/
 
 ## 性能
 
-在 Echo 场景下与 Boost.Asio、libuv 的对比（单线程，AMD EPYC）：
+在 Echo 场景下与 Boost.Asio 的对比（单线程）：
 
-| 场景 | Cornet/Batch | Asio/Callback | libuv |
-|------|-------------|---------------|-------|
-| 小消息高并发 (512conn, 64B) | 127K RPS | 111K RPS | 27K RPS |
-| 中等消息 (128conn, 1KB) | 122K RPS | 107K RPS | 29K RPS |
-| 大消息 (32conn, 64KB) | 35K RPS | 35K RPS | 14K RPS |
-| 极限并发 (2048conn, 128B) | 120K RPS | 109K RPS | 26K RPS |
+| 场景 | Cornet | Asio/Callback |
+|------|--------|---------------|
+| 小消息高并发 (512conn, 64B) | 127K RPS | 111K RPS |
+| 中等消息 (128conn, 1KB) | 122K RPS | 107K RPS |
+| 大消息 (32conn, 64KB) | 35K RPS | 35K RPS |
+| 极限并发 (2048conn, 128B) | 120K RPS | 109K RPS |
 
 ## License
 
