@@ -1,5 +1,4 @@
 #include "cornet/coroutine/cancel.h"
-#include "cornet/io_uring/cancel_io.h"
 #include "cornet/scheduling/context.h"
 
 namespace cornet {
@@ -27,38 +26,12 @@ void canceler_t::cancel_subtree() {
 }
 
 void canceler_t::cancel_active_tasks() {
-  io_.cancel_active_tasks();
-}
-
-void canceler_io_t::link_node(cancel_node* node) {
-  node->prev = nullptr;
-  node->next = active_head_;
-  if (active_head_) {
-    active_head_->prev = node;
-  }
-  active_head_ = node;
-}
-
-void canceler_io_t::unlink_node(cancel_node* node) {
-  if (node->prev) {
-    node->prev->next = node->next;
-  } else {
-    active_head_ = node->next;
-  }
-  if (node->next) {
-    node->next->prev = node->prev;
-  }
-  node->prev = node->next = nullptr;
-}
-
-void canceler_io_t::cancel_active_tasks() {
   auto* head = active_head_;
   active_head_ = nullptr;
 
   for (auto* node = head; node; node = node->next) {
 #if CORNET_LINUX_VERSION_GE_5_19
-    // 5.19+ cancel_awaiter uses CANCEL_ANY; per-task cancel not needed
-    // but if called, target by raw this pointer
+    // 5.19+ targets the op by its raw utask_t pointer, which is its user_data
     if (node->task) {
       auto* sqe = ctx_->io_uring().get_sqe();
       io_uring_prep_cancel(sqe, reinterpret_cast<void*>(node->task), 0);
