@@ -225,8 +225,7 @@ cornet/
 │   │   ├── utask.h        # io_uring 任务基类
 │   │   ├── awaiters.h     # 通用 awaiter (close/read/write/nop)
 │   │   ├── io_slot.h      # io_uring user_data 安全管理
-│   │   ├── cancel_io.h    # io_uring 取消操作
-│   │   └── context_cancellation.h  # context 级取消
+│   │   └── cancel_io.h    # io_uring 取消操作
 │   ├── scheduling/
 │   │   ├── context.h      # 事件循环核心
 │   │   ├── scheduler.h    # 调度器接口与实现 (ring_queue_t 高效就绪队列)

@@ -35,12 +35,6 @@ class uring_t {
 
    ~uring_t();
 
-   /**
-    * @brief enable the io_uring ring (must be called on the owner thread).
-    * Required when the ring is initialized with IORING_SETUP_R_DISABLED.
-    */
-   void enable();
-
    uring_t(const uring_t&) = delete;
 
    uring_t(uring_t&& r) = delete;
@@ -115,22 +109,6 @@ class uring_t {
    * @return raw io_uring pointer
    */
   inline io_uring* raw() { return uring.get(); }
-
-  /**
-   * @brief check if all user IO is done (only persistent watchers remain)
-   * @return true if no user work is inflight
-   */
-  inline bool user_idle() const {
-    return tracker_.user_idle();
-  }
-
-  /**
-   * @brief check if truly idle (no IO at all, including persistent)
-   * @return true if no tasks inflight
-   */
-  inline bool idle() const {
-    return !tracker_.idle();
-  }
 
   /**
    * @brief get number of currently inflight tasks

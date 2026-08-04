@@ -204,8 +204,10 @@ protected:
 
   // resume one task from the ready queue
   void resume_one_task();
-  // collect completed executor tasks into ready queue
-  void process_async_tasks(context_t& ctx);
+  // collect completed executor tasks into ready queue, returns how many moved
+  uint32_t process_async_tasks(context_t& ctx);
+  // drain the cross-thread queue into the ready queue, returns how many moved
+  uint32_t harvest_remote();
 
 private:
   // scheduling policy (injected, not inherited)

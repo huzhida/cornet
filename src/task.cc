@@ -6,6 +6,12 @@
 namespace cornet {
 
 utask_t::~utask_t() {
+  // op abandoned before its CQE resolved: release the count so it cannot pin
+  // user_idle() at false
+  if (user_io_counted && ctx) {
+    ctx->tracker_.user_io_remove();
+    user_io_counted = false;
+  }
 #if !CORNET_LINUX_VERSION_GE_5_19
   if (slot_data_ != 0 && ctx) {
     ctx->io_slots().free(slot_data_);
@@ -18,6 +24,9 @@ utask_t::~utask_t() {
 utask_t::utask_t(utask_t&& other) noexcept {
   this->prepare_fn = other.prepare_fn;
   this->completed = other.completed;
+  this->user_work = other.user_work;
+  this->user_io_counted = other.user_io_counted;
+  other.user_io_counted = false;
   this->value = other.value;
   this->handle = other.handle;
   this->ctx = other.ctx;
@@ -38,6 +47,12 @@ void utask_t::prepare_into(io_uring_sqe* sqe) {
   prepare_fn(this, sqe);
   io_uring_sqe_set_data(sqe, reinterpret_cast<void*>(slot_data_));
 #endif
+  // single choke point for "op armed": also reached by linked-submission
+  // awaiters, so the count always pairs with complete()
+  if (user_work && !user_io_counted) {
+    ctx->tracker_.user_io_add();
+    user_io_counted = true;
+  }
   CORNET_METRICS_ADD(ctx->metrics().slot_allocs);
 }
 
@@ -66,6 +81,10 @@ int utask_t::process_utask(context_t& ctx, cqe_t cqe) {
 }
 
 void utask_t::complete(context_t& ctx, cqe_t cqe) {
+  if (user_io_counted) {
+    ctx.tracker_.user_io_remove();
+    user_io_counted = false;
+  }
 #if !CORNET_LINUX_VERSION_GE_5_19
   ctx.io_slots().free(slot_data_);
   CORNET_METRICS_ADD(ctx.metrics().slot_frees);
