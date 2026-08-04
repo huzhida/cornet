@@ -57,10 +57,9 @@ add_executable(hello-cornet main.cc)
 target_link_libraries(hello-cornet PRIVATE cornet)
 
 # ─── Benchmark ───
-option(CORNET_ENABLE_BENCH "Build the benchmark target (requires asio and libuv)" OFF)
+option(CORNET_ENABLE_BENCH "Build the benchmark target (requires asio)" OFF)
 if(CORNET_ENABLE_BENCH)
     find_package(asio CONFIG REQUIRED)
-    find_package(libuv CONFIG REQUIRED)
 
     add_executable(bench EXCLUDE_FROM_ALL bench/benchmark.cc)
     target_include_directories(bench PRIVATE bench)
@@ -69,7 +68,6 @@ if(CORNET_ENABLE_BENCH)
         cornet
         asio::asio
         concurrentqueue::concurrentqueue
-        $<IF:$<TARGET_EXISTS:libuv::uv_a>,libuv::uv_a,libuv::uv>
     )
 endif()
 

@@ -10,7 +10,7 @@
 
 namespace bench {
 
-inline result_t run_cornet(const scenario_t& scenario, cornet::scheduler_type_t sched_type, cornet::config_t& config) {
+inline result_t run_cornet(const scenario_t& scenario, cornet::config_t& config) {
   using namespace cornet;
 
   // RSS profiler: capture memory from the very start of the test
@@ -19,7 +19,6 @@ inline result_t run_cornet(const scenario_t& scenario, cornet::scheduler_type_t 
 
   // Server context: created on a dedicated thread
   context_t server_ctx(&config);
-  server_ctx.scheduler().set_policy(sched_type);
 
   std::atomic<bool> server_running{true};
   std::atomic<bool> server_ready{false};
@@ -34,8 +33,7 @@ inline result_t run_cornet(const scenario_t& scenario, cornet::scheduler_type_t 
     while (true) {
       auto n = co_await sock.recv(ctx, buf.data(), buf.size());
       if (!n || *n <= 0) break;
-      auto s = co_await sock.send(ctx, buf.data(), *n);
-      if (!s || *s <= 0) break;
+      co_await sock.send(ctx, buf.data(), *n);
     }
   };
 
@@ -65,14 +63,12 @@ inline result_t run_cornet(const scenario_t& scenario, cornet::scheduler_type_t 
       if (cur <= 0) break;
 
       auto t0 = std::chrono::steady_clock::now();
-      auto s = co_await sock.send(ctx, send_buf.data(), send_buf.size());
-      if (!s || *s <= 0) break;
-      auto r = co_await sock.recv(ctx, recv_buf.data(), scenario.message_size);
-      if (!r || *r <= 0) break;
+      co_await sock.send(ctx, send_buf.data(), send_buf.size());
+      co_await sock.recv(ctx, recv_buf.data(), scenario.message_size);
 
       auto latency = std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now() - t0).count();
-      collector.record(latency, *s + *r);
+      collector.record(latency, send_buf.size() * 2);
     }
   };
 
@@ -87,7 +83,6 @@ inline result_t run_cornet(const scenario_t& scenario, cornet::scheduler_type_t 
 
   // Client context: created on the main thread
   context_t client_ctx(&config);
-  client_ctx.scheduler().set_policy(sched_type);
 
 
   size_t hwm_before = get_vmmhwm_kb();
@@ -104,8 +99,7 @@ inline result_t run_cornet(const scenario_t& scenario, cornet::scheduler_type_t 
 
   profiler.stop();
 
-  std::string name = "Cornet/";
-  name += scheduler_name(sched_type);
+  std::string name = "Cornet";
 
   #ifdef CORNET_METRICS
   std::cout << scenario.name << " " << name << " client metrics:" << std::endl;

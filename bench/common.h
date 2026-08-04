@@ -461,7 +461,7 @@ inline void print_rps_latency_chart(const std::vector<result_t>& results) {
     for (auto* r : items) {
       printf("│  %-12s |", r->framework.substr(0, 12).c_str());
 
-      bool is_cornet = r->framework.rfind("Cornet/", 0) == 0;
+      bool is_cornet = r->framework.rfind("Cornet", 0) == 0;
       const char* green = "\033[32m";
       const char* reset = "\033[0m";
 
@@ -520,7 +520,7 @@ inline void print_latency_profile_chart(const std::vector<result_t>& results) {
     for (auto* r : items) {
       printf("│  %-12s ", r->framework.substr(0, 12).c_str());
 
-      bool is_cornet = r->framework.rfind("Cornet/", 0) == 0;
+      bool is_cornet = r->framework.rfind("Cornet", 0) == 0;
       const char* green = "\033[32m";
       const char* reset = "\033[0m";
 
@@ -565,7 +565,7 @@ inline void print_throughput_chart(const std::vector<result_t>& results) {
       size_t bar_len = static_cast<size_t>((r->throughput_mbps / max_tp) * bar_max);
       if (bar_len > bar_max) bar_len = bar_max;
       printf("    %-18s |", r->framework.c_str());
-      bool is_cornet = r->framework.rfind("Cornet/", 0) == 0;
+      bool is_cornet = r->framework.rfind("Cornet", 0) == 0;
       if (is_cornet) printf("%s", green);
       for (size_t i = 0; i < bar_len; ++i) printf("█");
       if (is_cornet) printf("%s", reset);
@@ -599,7 +599,7 @@ inline void print_stability_chart(const std::vector<result_t>& results) {
       size_t len = static_cast<size_t>((cv / max_cv) * bar_max);
       if (len > bar_max) len = bar_max;
       printf("    %-18s |", r->framework.c_str());
-      bool is_cornet = r->framework.rfind("Cornet/", 0) == 0;
+      bool is_cornet = r->framework.rfind("Cornet", 0) == 0;
       if (is_cornet) printf("%s", green);
       for (size_t i = 0; i < len; ++i) printf("█");
       if (is_cornet) printf("%s", reset);
@@ -614,7 +614,7 @@ inline void print_stability_chart(const std::vector<result_t>& results) {
       size_t len = static_cast<size_t>((tail / max_tail) * bar_max);
       if (len > bar_max) len = bar_max;
       printf("    %-18s |", r->framework.c_str());
-      bool is_cornet = r->framework.rfind("Cornet/", 0) == 0;
+      bool is_cornet = r->framework.rfind("Cornet", 0) == 0;
       if (is_cornet) printf("%s", green);
       for (size_t i = 0; i < len; ++i) printf("█");
       if (is_cornet) printf("%s", reset);

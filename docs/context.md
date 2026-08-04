@@ -154,71 +154,55 @@ metrics.reset();       // 重置计数器
 
 ## 调度器
 
-Cornet 提供四种调度策略，可通过配置文件或运行时切换。
+Cornet 采用自适应调度策略，通过 CPU batch 和 IO wait 的动态调整来平衡吞吐与延迟。
+调度策略在构造时通过配置文件确定，不再支持运行时切换。
 
-### 调度器通用接口
+### 调度周期
 
-每个调度周期：
-1. **CPU 阶段**：从 ready_queue 取出协程并 resume
-2. **IO 阶段**：submit pending SQE，收割 CQE，唤醒对应协程
+每个调度周期依次执行以下步骤：
 
-### RoundRobin（轮询）
+1. **采集远程任务**：从跨线程投递队列 (`remote_tasks_`) 取出协程句柄并入队
+2. **采集线程池任务**：从 `executor_t` 收割已完成任务的协程句柄
+3. **CPU 阶段**：从 `ready_queue` 批量 resume 协程（最多 `cpu_batch` 个）
+4. **IO 阶段**：submit pending SQE → wait CQE → 唤醒对应协程
 
-```toml
-[cornet.context.scheduler]
-name = "RoundRobin"
-```
+调度器使用 EWMA（指数加权移动平均）对 IO 饱和度和 CPU 压力做平滑，
+再根据平滑后的信号动态调整 `cpu_batch` 和 `io_wait`。
 
-- 每周期将 ready_queue **全部** drain 完再做 IO
-- 最简单，适合 IO 密集型场景
-- 缺点：如果 CPU 任务很多，IO 收割会被延迟
-
-### Batch（批量）
+### 自适应调度（默认）
 
 ```toml
 [cornet.context.scheduler]
-name = "Batch"
-batch = 32
+cpu_batch = 64    # CPU 阶段每次批量处理的任务数（默认 64，范围 32–2048）
+io_wait = "1ms"   # IO 阶段等待超时（默认 1ms，范围 50us–1ms）
 ```
 
-- 每周期最多 resume `batch` 个协程，然后立即做 IO
-- 平衡了 CPU 和 IO 的响应性
-- 推荐作为通用默认选择
+调度器根据以下信号动态调整：
 
-### TimeSlice（时间片）
+**IO 饱和度** — `cqes_ready / (inflight + cqes_ready)`，反映 IO 完成的集中程度：
+- 高 IO 饱和度 (>0.65) → 减少 CPU batch，尽快释放 CPU 给 IO 收割
+- 低 IO 饱和度 → 允许更大的 batch，降低调度开销
 
-```toml
-[cornet.context.scheduler]
-name = "TimeSlice"
-cpu_budget = "10ms"
-io_budget = "100us"
-```
+**CPU 压力** — `task_runtime_ns / loop_runtime_ns`，防止协程执行时间过长霸占 event loop：
+- CPU 压力过高 (>0.80) → 大幅减少 batch（-15%），让 IO 及时响应
+- CPU 压力低 (<0.30) → 适度增加 batch（+10%），提高吞吐量
 
-- CPU 阶段有时间预算，超时即切换到 IO 阶段
-- IO 阶段的 wait 超时也有预算
-- 适合混合负载
+**空闲检测** — 当 `tasks_resumed == 0 && cqes_ready == 0` 时：
+- 使用指数退避增大 `io_wait`（10us → 15us → 22us → ...），减少无意义的系统调用
+- busy 时快速缩短 `io_wait`，降低延迟
 
-### Adaptive（自适应）
+**就绪队列校正**：
+- `ready_queue` 长度超过 `cpu_batch * 4` → 额外 +16 提升 batch
+- `ready_queue` 很短且 CPU 空闲 → 微调 -8 避免过度激进
 
-```toml
-[cornet.context.scheduler]
-name = "Adaptive"
-cpu_batch = 64    # CPU 阶段每次批量处理的任务数
-io_wait = "1ms"   # IO 阶段等待超时
-```
+### 配置项
 
-- 动态调整 CPU batch size 和 IO wait timeout
-- 根据 IO 饱和度（CQE ready / inflight）作为反馈信号
-- 高 IO 压力 → 减少 CPU batch，增加 IO 收割频率
-- 低 IO 压力 → 增加 CPU batch，减少系统调用
+| 配置项 | 类型 | 默认值 | 说明 |
+|--------|------|--------|------|
+| `cpu_batch` | int | 64 | CPU 阶段每周期最大 resume 任务数（范围 32–2048） |
+| `io_wait` | duration | "1ms" | IO 阶段 wait 超时（范围 50us–1ms） |
 
-### 运行时切换
-
-```cpp
-ctx.scheduler().set_policy(scheduler_type_t::Batch);
-```
-
-切换时自动将未完成任务转移到新调度器。
+> **提示**：目前调度器始终采用自适应策略，`name` 配置项已废弃。
 
 ### 内部接口
 
@@ -232,6 +216,6 @@ uring_t& uring = ctx.io_uring();
 // 访问 io slot 表
 io_slot_table_t& slots = ctx.io_slots();
 
-// 访问线程池
+// 访问线程池（通过调度器访问）
 executor_t& executor = ctx.executor();
 ```

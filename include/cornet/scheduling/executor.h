@@ -1,6 +1,7 @@
 #ifndef CORNET_EXECUTOR_H
 #define CORNET_EXECUTOR_H
 
+#include <moodycamel/concurrentqueue.h>
 #include <vector>
 
 #ifdef BLOCK_SIZE
@@ -21,7 +22,8 @@ struct atask_t;
  */
 class executor_t {
  public:
-  using queue_t = moodycamel::BlockingConcurrentQueue<atask_t*>;
+  using block_queue_t = moodycamel::BlockingConcurrentQueue<atask_t*>;
+  using queue_t = moodycamel::ConcurrentQueue<atask_t*>;
 
   /**
    * @brief construct executor (threads started lazily on first add()).
@@ -65,7 +67,7 @@ class executor_t {
   // maximum pending task capacity
   const size_t max_task_nr;
   // pending tasks waiting for worker threads
-  queue_t pending_tasks;
+  block_queue_t pending_tasks;
   // completed tasks waiting for owner thread to collect
   queue_t completed_tasks;
   // worker thread pool

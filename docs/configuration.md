@@ -27,22 +27,12 @@ capacity = 1024
 # 调度器配置
 # ─────────────────────────────────────────
 [cornet.context.scheduler]
-# 调度器类型: RoundRobin | Batch | TimeSlice | Adaptive
-# 默认: RoundRobin
-name = "Batch"
+# CPU 阶段每周期最大 resume 任务数（默认 64，范围 32–2048）
+cpu_batch = 64
 
-# Batch 调度器每周期最大 resume 任务数
-# 默认: 32
-batch = 32
-
-# TimeSlice 调度器 CPU 阶段时间预算
+# IO 阶段 wait 超时（默认 1ms，范围 50us–1ms）
 # 支持单位: ns, us, ms, s, m, h
-# 默认: 10ms
-cpu_budget = "10ms"
-
-# TimeSlice 调度器 IO 阶段 wait 超时
-# 默认: 1ms
-io_budget = "100us"
+io_wait = "1ms"
 
 # ─────────────────────────────────────────
 # 线程池配置
@@ -85,14 +75,21 @@ pattern = "%^%L%$ [%Y-%m-%d %T %t %@] %v"
 
 capacity 过小会导致 SQE 队列满时频繁触发 forced submit（额外 syscall）。通过 `metrics.get_sqe_submit_forced` 监控。
 
-### 调度器选择建议
+### 调度器配置
 
-| 调度器 | 适用场景 | 特点 |
-|--------|---------|------|
-| RoundRobin | IO 密集型、连接数少 | 简单高效，吞吐最大化 |
-| Batch | 通用推荐 | 平衡 CPU 和 IO 响应 |
-| TimeSlice | 混合负载 | 公平性好 |
-| Adaptive | 不确定负载 | 自适应，但有收敛开销 |
+Cornet 采用自适应调度策略，根据运行时 IO 饱和度和 CPU 压力动态调整 `cpu_batch` 和 `io_wait`。
+
+| 配置项 | 类型 | 默认值 | 范围 | 说明 |
+|--------|------|--------|------|------|
+| `cpu_batch` | int | 64 | 32–2048 | CPU 阶段每周期最大 resume 任务数 |
+| `io_wait` | duration | "1ms" | 50us–1ms | IO 阶段 wait 超时 |
+
+**调整建议：**
+
+- **高并发、低延迟要求**：减小 `cpu_batch`（32–64），缩短 `io_wait`
+- **高吞吐、连接数多**：增大 `cpu_batch`（256–1024），适当延长 `io_wait`
+- **IO 密集型**：减小 `cpu_batch`，让 IO 收割更及时
+- **CPU 密集型**：增大 `cpu_batch`，减少调度开销
 
 ### 时间格式
 
@@ -111,7 +108,7 @@ capacity 过小会导致 SQE 队列满时频繁触发 forced submit（额外 sys
 
 不加载任何配置文件时，框架使用以下默认值：
 - uring capacity: 32
-- scheduler: RoundRobin
+- scheduler: 自适应调度（cpu_batch=64, io_wait=1ms）
 - executor: 懒初始化，首次 `ctx.async()` 调用时创建
 - 日志: 不初始化（需手动调用 `logging::init()`）
 

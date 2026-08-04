@@ -5,7 +5,6 @@
     "liburing",
     "asio",
     "gtest",
-    "concurrentqueue",
-    "libuv"
+    "concurrentqueue"
   ]
 }

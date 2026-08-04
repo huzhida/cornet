@@ -2,7 +2,6 @@
 #include "cornet_bench.h"
 #include "asio_cb_bench.h"
 #include "asio_coro_bench.h"
-#include "libuv_bench.h"
 
 #include "cornet/utils/config.h"
 #include "cornet/utils/logging.h"
@@ -19,13 +18,13 @@ int main(int argc, char* argv[]) {
   auto scenarios = default_scenarios();
 
   printf("╔══════════════════════════════════════════════════════════════╗\n");
-  printf("║              Cornet 网络框架性能基准测试                    ║\n");
+  printf("║              Cornet 网络框架性能基准测试                       ║\n");
   printf("╠══════════════════════════════════════════════════════════════╣\n");
-  printf("║ 测试框架: Cornet(Adaptive/RoundRobin/Batch)                ║\n");
-  printf("║           Asio(回调式/协程式), Libuv                       ║\n");
-  printf("║ 测试模式: Echo (客户端发送→服务端回显→客户端接收)          ║\n");
-  printf("║ 指标: RPS, 吞吐量, 延迟分布, 稳定性, 内存占用             ║\n");
-  printf("║ 每场景每框架运行 %d 轮, 取中位数结果                       ║\n", BENCH_ROUNDS);
+  printf("║ 测试框架: Cornet                                              ║\n");
+  printf("║           Asio(回调式/协程式)                                 ║\n");
+  printf("║ 测试模式: Echo (客户端发送→服务端回显→客户端接收)               ║\n");
+  printf("║ 指标: RPS, 吞吐量, 延迟分布, 稳定性, 内存占用                   ║\n");
+  printf("║ 每场景每框架运行 %d 轮, 取中位数结果                            ║\n", BENCH_ROUNDS);
   printf("╚══════════════════════════════════════════════════════════════╝\n");
 
   std::vector<result_t> all_results;
@@ -38,15 +37,9 @@ int main(int argc, char* argv[]) {
   };
 
   std::vector<bench_entry> benches = {
-    {"Cornet/Adaptive",
-     [&config](const scenario_t& s) { return run_cornet(s, cornet::scheduler_type_t::Adaptive, config); }},
-    {"Cornet/RoundRobin",
-     [&config](const scenario_t& s) { return run_cornet(s, cornet::scheduler_type_t::RoundRobin, config); }},
-    {"Cornet/Batch", [&config](const scenario_t& s) { return run_cornet(s, cornet::scheduler_type_t::Batch, config); }},
-    {"Cornet/TimeSlice",[&config](const scenario_t& s) { return run_cornet(s, cornet::scheduler_type_t::TimeSlice, config); }},
+    {"Cornet",[&config](const scenario_t& s) { return run_cornet(s,config); }},
     {"Asio/Callback", [](const scenario_t& s) { return run_asio_callback(s); }},
     {"Asio/Coroutine", [](const scenario_t& s) { return run_asio_coro(s); }},
-    {"Libuv", [](const scenario_t& s) { return run_libuv(s); }},
   };
 
   for (size_t si = 0; si < scenarios.size(); ++si) {
@@ -55,8 +48,9 @@ int main(int argc, char* argv[]) {
 
     // Warmup
     printf("  预热中...\n");
-    run_cornet(scenario, cornet::scheduler_type_t::Adaptive, config);
+    run_cornet(scenario, config);
     run_asio_callback(scenario);
+    run_asio_coro(scenario);
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
     print_result_header();
