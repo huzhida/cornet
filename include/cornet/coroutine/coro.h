@@ -288,8 +288,8 @@ struct basic_coro_t : task_t {
   }
 
   /**
-   * @brief whether current coroutine done
-   * @return true for done / false ...
+   * @brief whether current coroutine is done
+   * @return true if coroutine is done (handle is non-null and handle.done() is true), false otherwise
    */
   bool done() { return handle && handle.done(); }
 

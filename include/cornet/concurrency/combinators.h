@@ -465,8 +465,8 @@ auto when_any(context_t& ctx, coro_t<Ts>... coros) {
 
 /**
  * @brief await any coroutine concurrently with cancellation support.
- * When the first coroutine completes, the provided canceler is triggered,
- * cancelling any inflight IO operations that use with_cancel(op, canceler).
+ * When the first coroutine completes, the provided canceler is triggered.
+ * To cancel inflight IO operations, pass the same canceler to with_cancel(op, canceler) as well.
  * Usage:
  *   canceler_t canceler;
  *   auto result = co_await when_any(canceler, task_with_cancel(canceler), task_with_cancel(canceler));

@@ -65,7 +65,7 @@ struct utask_t : task_t {
    * @brief io_uring task processor, dispatches CQE to the corresponding utask_t.
    * @param ctx context reference
    * @param cqe complete queue entry on io_uring.
-   * @return 0 for success / 1 for no user_data
+   * @return 0 if CQE was dispatched to a task, 1 if user_data was null (no task to dispatch)
    */
   static int process_utask(context_t& ctx, cqe_t cqe);
 
