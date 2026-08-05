@@ -242,21 +242,32 @@ public:
    * @param init_fn per-thread initialization function called with (thread_index, context_t&).
    *                The context for each thread is created by the runtime,
    *                so it is passed directly to the init_fn.
+   * @param keep_alive whether worker context keep alive
    */
-  void start(std::function<void(size_t, context_t&)> init_fn = nullptr);
+  void start(std::function<void(size_t, context_t&)> init_fn = nullptr, bool keep_alive=true);
 
   /**
-   * @brief initiate graceful shutdown on all contexts and wait for threads to finish.
-   * This is a blocking call — equivalent to shutdown(timeout) + join().
-   * Use stop() + join() if you need forceful shutdown or separate control.
+   * @brief initiate graceful shutdown on all contexts
    * @param timeout per-context shutdown timeout
    */
   void shutdown(std::chrono::nanoseconds timeout = std::chrono::seconds(5));
 
   /**
+   * @brief initiate graceful shutdown on all contexts and wait for threads to finish.
+   * This is a blocking call — equivalent to shutdown(timeout) + join().
+   * @param timeout per-context shutdown timeout
+   */
+  void shutdown_and_join(std::chrono::nanoseconds timeout = std::chrono::seconds(5));
+
+  /**
    * @brief forcefully stop all contexts.
    */
   void stop();
+
+  /**
+   * @brief forcefully stop all contexts and then join worker threads.
+   */
+  void stop_and_join();
 
   /**
    * @brief wait for all worker threads to finish (blocks caller).
@@ -328,18 +339,6 @@ public:
   void spawn(F&& f, Args&&... args) {
     auto& ctx = select_context();
     ctx.spawn_remote(std::forward<F>(f)(ctx, std::forward<Args>(args)...));
-  }
-
-  /**
-   * @brief spawn a coroutine on a specific context (bypasses select_context round-robin).
-   * Use this when the caller already knows the target context, to avoid the
-   * thread_local overhead in select_context() which significantly degrades
-   * performance in coroutine hot paths (~50% slower in benchmarks).
-   * @tparam F callable type that takes context_t& and returns a coroutine
-   */
-  template<typename F, typename... Args>
-  void spawn_to(context_t& target_ctx, F&& f, Args&&... args) {
-    target_ctx.spawn_remote(std::forward<F>(f)(target_ctx, std::forward<Args>(args)...));
   }
 
   /**

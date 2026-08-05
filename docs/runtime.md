@@ -232,7 +232,7 @@ ctx.set_keep_alive(false);  // 恢复正常：无任务时自动退出
 | 方法 | 说明 |
 |------|------|
 | `runtime_t rt(config, n_threads)` | 创建 runtime |
-| `rt.start(init_fn)` | 启动所有 worker 线程 |
+| `rt.start(init_fn, keepalive)` | 启动所有 worker 线程 |
 | `rt.shutdown(timeout)` | 优雅关闭 + join（阻塞） |
 | `rt.stop()` | 强制停止 |
 | `rt.join()` | 等待所有线程完成 |

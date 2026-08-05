@@ -19,13 +19,13 @@ runtime_t::~runtime_t() {
   join();
 }
 
-void runtime_t::start(std::function<void(size_t, context_t&)> init_fn) {
+void runtime_t::start(std::function<void(size_t, context_t&)> init_fn, bool keepalive) {
   std::latch init_done(thread_nr_);
 
   for (size_t i = 0; i < thread_nr_; ++i) { 
-    workers_.emplace_back([this, i, &init_done, init_fn]() {
+    workers_.emplace_back([this, i, &init_done, init_fn, keepalive]() {
       context_t& ctx = *contexts_[i];
-      ctx.set_keep_alive(true);
+      ctx.set_keep_alive(keepalive);
 
       // run user init before starting the run loop
       if (init_fn) {
@@ -48,11 +48,21 @@ void runtime_t::shutdown(std::chrono::nanoseconds timeout) {
   }
 }
 
+void runtime_t::shutdown_and_join(std::chrono::nanoseconds timeout) {
+  shutdown(timeout);
+  join();
+}
+
 void runtime_t::stop() {
   stopped_ = true;
   for (auto& ctx : contexts_) {
     if (ctx) ctx->stop();
   }
+}
+
+void runtime_t::stop_and_join() {
+  stop();
+  join();
 }
 
 void runtime_t::join() {
