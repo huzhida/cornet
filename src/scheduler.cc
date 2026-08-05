@@ -13,9 +13,11 @@ namespace cornet {
 scheduler_t::scheduler_t(task_tracker_t& tracker, config_t* config)
   : tracker_(tracker),
 config_(config), executor_(tracker_, config) {
-  auto conf = (*config)["cornet"]["context"]["scheduler"];
-  cpu_batch_ = conf["cpu_batch"].value_or(64);
-  io_wait_ = parse_time_str(conf["io_wait"].value_or("1ms"));
+  if(config) {
+    auto conf = (*config)["cornet"]["context"]["scheduler"];
+    cpu_batch_ = conf["cpu_batch"].value_or(64);
+    io_wait_ = parse_time_str(conf["io_wait"].value_or("1ms"));
+  }
 }
 
 scheduler_t::~scheduler_t() {

@@ -9,10 +9,13 @@ uring_t::uring_t(task_tracker_t& tracker, config_t* config)
   : tracker_(tracker),
     config_(config),
     uring(std::make_unique<io_uring>()) {
-  auto entries_nr = config
-    ? config->at_path("cornet.context.uring.capacity").value_or(128)
-    : 128u;
-  auto flags = config ? config->at_path("cornet.context.uring.flags").value_or(0u) : 0u;
+
+  int entries_nr = 128, flags = 0;
+
+  if (config) {
+    entries_nr = config->at_path("cornet.context.uring.capacity").value_or(128);
+    flags = config->at_path("cornet.context.uring.flags").value_or(0);
+  }
 
   if (io_uring_queue_init(entries_nr, uring.get(), flags) < 0) {
     SPDLOG_ERROR("failed to init io_uring queue with error: {}", strerror(errno));
