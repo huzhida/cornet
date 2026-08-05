@@ -154,13 +154,13 @@ private:
     try {
       co_await task;
     } catch (const std::exception& e) {
-      if (s.first_error_.has_value()) {
+      if (!s.first_error_.has_value()) {
         SPDLOG_ERROR("task_scope: child task threw exception: {}", e.what());
         s.first_error_ = unexpected(EFAULT, error_domain::exception);
         s.canceler_->cancel();
       }
     } catch (...) {
-      if (s.first_error_.has_value()) {
+      if (!s.first_error_.has_value()) {
         SPDLOG_ERROR("task_scope: child task threw unknown exception");
         s.first_error_ = unexpected(EFAULT, error_domain::exception);
         s.canceler_->cancel();
@@ -177,13 +177,13 @@ private:
     try {
       co_await task;
     } catch (const std::exception& e) {
-      if (s.first_error_.has_value()) {
+      if (!s.first_error_.has_value()) {
         SPDLOG_ERROR("task_scope: child task threw exception: {}", e.what());
         s.first_error_ = unexpected(EFAULT, error_domain::exception);
         s.canceler_->cancel();
       }
     } catch (...) {
-      if (s.first_error_.has_value()) {
+      if (!s.first_error_.has_value()) {
         SPDLOG_ERROR("task_scope: child task threw unknown exception");
         s.first_error_ = unexpected(EFAULT, error_domain::exception);
         s.canceler_->cancel();
@@ -200,13 +200,13 @@ private:
     try {
       out = co_await task;
     } catch (const std::exception& e) {
-      if (s.first_error_.has_value()) {
+      if (!s.first_error_.has_value()) {
         SPDLOG_ERROR("task_scope: child task threw exception: {}", e.what());
         s.first_error_ = unexpected(EFAULT, error_domain::exception);
         s.canceler_->cancel();
       }
     } catch (...) {
-      if (s.first_error_.has_value()) {
+      if (!s.first_error_.has_value()) {
         SPDLOG_ERROR("task_scope: child task threw unknown exception");
         s.first_error_ = unexpected(EFAULT, error_domain::exception);
         s.canceler_->cancel();
@@ -225,14 +225,14 @@ private:
     } catch (const std::exception& e) {
       SPDLOG_ERROR("task_scope: child task threw exception: {}", e.what());
       out = unexpected(EFAULT, error_domain::exception);
-      if (s.first_error_.has_value()) {
+      if (!s.first_error_.has_value()) {
         s.first_error_ = unexpected(EFAULT, error_domain::exception);
         s.canceler_->cancel();
       }
     } catch (...) {
       SPDLOG_ERROR("task_scope: child task threw unknown exception");
       out = unexpected(EFAULT, error_domain::exception);
-      if (s.first_error_.has_value()) {
+      if (!s.first_error_.has_value()) {
         s.first_error_ = unexpected(EFAULT, error_domain::exception);
         s.canceler_->cancel();
       }
@@ -251,13 +251,13 @@ private:
     try {
       co_await f();
     } catch (const std::exception& e) {
-      if (s.first_error_.has_value()) {
+      if (!s.first_error_.has_value()) {
         SPDLOG_ERROR("task_scope: child task threw exception: {}", e.what());
         s.first_error_ = unexpected(EFAULT, error_domain::exception);
         s.canceler_->cancel();
       }
     } catch (...) {
-      if (s.first_error_.has_value()) {
+      if (!s.first_error_.has_value()) {
         SPDLOG_ERROR("task_scope: child task threw unknown exception");
         s.first_error_ = unexpected(EFAULT, error_domain::exception);
         s.canceler_->cancel();

@@ -23,15 +23,13 @@ struct context_t;
 struct atask_t;
 
 /**
- * @brief scheduler with injectable scheduling policy.
+ * @brief IO-aware cooperative task scheduler.
  *
- * Infrastructure (ready queue, I/O flushing, async task collection)
- * is unified in this class. The scheduling strategy — when to stop
- * resuming tasks and when to flush I/O — is delegated to a
- * schedule_policy_t object.
+ * Manages the ready queue, I/O submission/waiting, async task harvesting,
+ * and adaptive batch sizing based on CPU/I/O pressure.
  *
- * Switching policy at runtime is a simple pointer replacement;
- * no task queue transfer is needed.
+ * Scheduling is driven by a fixed cpu_batch limit and adaptive io_wait;
+ * configuration is read from config_t at construction time.
  */
 struct scheduler_t {
   /**
@@ -77,8 +75,8 @@ struct scheduler_t {
 
   /**
    * @brief statistics collected during a single sched() cycle.
-   * Used by policy::need_stop_resume() and policy::on_sched_done() to
-   * make scheduling decisions without exposing infrastructure details.
+   * Used by adapt() to tune cpu_batch and io_wait based on
+   * I/O completion pressure and CPU saturation.
    */
   struct sched_stats {
     uint32_t inflight{0};
@@ -94,8 +92,9 @@ struct scheduler_t {
    ~scheduler_t();
 
   /**
-   * @brief schedule interface: resume ready tasks, then flush I/O.
-   * The concrete stopping condition is delegated to policy_->should_stop_cpu().
+   * @brief schedule interface: harvest remote/async tasks, resume ready tasks up to cpu_batch,
+   * submit I/O, wait for completions if queue is empty.
+   * Adaptive batch sizing via adapt() based on CPU/I/O pressure.
    * @param ctx owner context
    */
   void sched(context_t& ctx);
@@ -136,7 +135,7 @@ private:
   executor_t executor_;
   // async tasks buffer
   std::array<atask_t*, 32> async_tasks;
-  // saved config pointer for use in set_policy and policy factory
+  // config pointer for reading scheduler tuning parameters at construction
   config_t* config_ = nullptr;
   // --------- schedule policy --------
   // schedule cycles count

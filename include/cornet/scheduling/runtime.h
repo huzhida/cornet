@@ -143,6 +143,8 @@ struct task_state_t<void> {
 /**
  * @brief Wrapper coroutine factory for submit().
  * Calls the user's coroutine factory with the context, captures the result or exception.
+ * Note: exceptions thrown before the first co_await (e.g., in the factory's constructor)
+ * will not be caught by this wrapper.
  * @tparam F callable type (the user's coroutine factory)
  * @tparam V return value type of the user's coroutine
  */

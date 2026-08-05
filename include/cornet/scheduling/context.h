@@ -92,11 +92,11 @@ struct context_t {
   /**
    * @brief submit a task or coroutine handle directly to this context's scheduler.
    * Thread-safe: can be called from any thread.
-   * Accepts the same inputs as spawn() — task-like objects, coroutine handles,
-   * or task pointers. The handle is enqueued directly and resumed
-   * on this context's owner thread.
-   * @tparam T task-like type (coro_t, task_t*, coroutine_handle)
-   * @param task task-like object to schedule
+   * Accepts task-like objects, coroutine handles, or task pointers.
+   * Also accepts callables (lambdas) which are wrapped as coroutines.
+   * The handle is enqueued directly and resumed on this context's owner thread.
+   * @tparam T task-like type (coro_t, task_t*, coroutine_handle) or callable
+   * @param task task-like object or callable to schedule
    */
   template <typename T>
   CORNET_MAYBE_UNUSED inline void spawn_remote(T&& task)

@@ -112,8 +112,9 @@ void scheduler_t::adapt(const sched_stats& stats) {
    * inflight:
    *   当前挂起IO
    *
-   * 越接近1:
-   *   IO完成集中，需要尽快处理
+   * cqes_ready / (inflight + cqes_ready):
+   *   接近 1 时，说明挂起 IO 很少而完成事件集中，IO 吞吐高
+   *   接近 0 时，说明大量 IO 仍在挂起，完成事件少
    */
   double instant_io_sat = 0.0;
 
