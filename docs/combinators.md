@@ -511,7 +511,7 @@ auto result = co_await task_scope(ctx, [&](scope_t& scope) -> coro_t<void> {
     co_return;
 });
 if (!result) {
-    // result.error().domain == error_domain::exception
+    // result.error().domain == error_domain::Exception
     // 某个子任务抛出了异常
 }
 ```

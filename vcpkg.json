@@ -3,6 +3,7 @@
     "spdlog",
     "tomlplusplus",
     "liburing",
+    "llhttp",
     "asio",
     "gtest",
     "concurrentqueue"

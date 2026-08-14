@@ -385,7 +385,7 @@ TEST_F(combinators, task_scope_spawn_with_expected) {
     EXPECT_EQ(r1.value(), 100);
     // r2 should have an error (exception caught)
     EXPECT_FALSE(r2.has_value());
-    EXPECT_EQ(r2.error().domain, error_domain::exception);
+    EXPECT_EQ(r2.error().domain, error_domain::Exception);
     co_return;
   };
   ctx->spawn(test(*ctx));

@@ -82,6 +82,8 @@ struct context_metrics_t {
   // get_sqe metrics
   uint64_t get_sqe_calls{0};
   uint64_t get_sqe_submit_forced{0};
+  // SQ still full after a forced submit: the caller had to shed load
+  uint64_t get_sqe_exhausted{0};
 
   // scheduler metrics
   uint64_t sched_cycles{0};
@@ -118,7 +120,8 @@ struct context_metrics_t {
     fprintf(out, "[io_uring peek]\n");
     fprintf(out, "  calls: %lu, empty: %lu, cqes_processed: %lu\n", peek_calls, peek_empty, peek_cqes_processed);
     fprintf(out, "[get_sqe]\n");
-    fprintf(out, "  calls: %lu, forced_submits: %lu\n", get_sqe_calls, get_sqe_submit_forced);
+    fprintf(out, "  calls: %lu, forced_submits: %lu, exhausted: %lu\n",
+            get_sqe_calls, get_sqe_submit_forced, get_sqe_exhausted);
     fprintf(out, "[scheduler]\n");
     fprintf(out, "  cycles: %lu, tasks_resumed: %lu\n", sched_cycles, tasks_resumed);
     fprintf(out, "  latency(us): avg=%lu min=%lu max=%lu\n",

@@ -19,7 +19,7 @@ expected<socklen_t> to_address(std::string_view ip, uint16_t port, sockaddr_stor
 
   int n = getaddrinfo(ip_str.c_str(), port_str.c_str(), &hints, &res);
   if (n != 0) {
-    return unexpected(n, error_domain::resolve);
+    return unexpected(n, error_domain::Resolve);
   }
   if (res) {
     socklen_t ret = res->ai_addrlen;
@@ -55,10 +55,10 @@ coro_t<expected<resolved_address>> resolve(context_t& ctx, std::string_view host
 
     int n = getaddrinfo(host_str.c_str(), port_str.c_str(), &hints, &res);
     if (n != 0) {
-      return unexpected(n, error_domain::resolve);
+      return unexpected(n, error_domain::Resolve);
     }
     if (!res) {
-      return unexpected(EAI_NONAME, error_domain::resolve);
+      return unexpected(EAI_NONAME, error_domain::Resolve);
     }
     resolved_address r;
     r.socklen = res->ai_addrlen;
@@ -100,6 +100,11 @@ socket_t& socket_t::operator=(socket_t&& s) noexcept {
 }
 int socket_t::native_fd() const {
   return fd;
+}
+int socket_t::release() {
+  int released = fd;
+  fd = -1;
+  return released;
 }
 void socket_t::address_reuse(bool on) const {
   int reuse = on ? 1 : 0;
@@ -197,6 +202,19 @@ socket_t::recvmsg_awaiter::recvmsg_awaiter(context_t& ctx, int fd, struct msghdr
   };
 }
 
+socket_t::writev_awaiter::writev_awaiter(context_t& ctx, int fd, const struct iovec* iov, size_t iov_len, int flags)
+  : fd_(fd), flags_(flags) {
+  this->ctx = &ctx;
+  msg_ = {};
+  // msg_iov is non-const in the ABI, but sendmsg never writes through it
+  msg_.msg_iov = const_cast<struct iovec*>(iov);
+  msg_.msg_iovlen = iov_len;
+  this->prepare_fn = [](utask_t* self, io_uring_sqe* sqe) {
+    auto* t = static_cast<writev_awaiter*>(self);
+    io_uring_prep_sendmsg(sqe, t->fd_, &t->msg_, t->flags_);
+  };
+}
+
 socket_t::sendto_awaiter::sendto_awaiter(context_t& ctx, int fd, void* buf, size_t nbytes, sockaddr* addr, socklen_t socklen, int flag)
   : fd_(fd), flag_(flag) {
   this->ctx = &ctx;
@@ -282,6 +300,15 @@ socket_t::recv_awaiter socket_t::recv(context_t& ctx, void* buf, size_t nbytes, 
 socket_t::send_awaiter socket_t::send(context_t& ctx, const void* buf, size_t nbytes, int flag) const {
   return send_awaiter{ctx, fd, buf, nbytes, flag};
 }
+socket_t::writev_awaiter socket_t::writev(context_t& ctx, const struct iovec* iov, size_t iov_len, int flags) const {
+  return writev_awaiter{ctx, fd, iov, iov_len, flags};
+}
+socket_t::sendmsg_awaiter socket_t::sendmsg(context_t& ctx, struct msghdr* msg, int flags) const {
+  return sendmsg_awaiter{ctx, fd, msg, flags};
+}
+socket_t::recvmsg_awaiter socket_t::recvmsg(context_t& ctx, struct msghdr* msg, int flags) const {
+  return recvmsg_awaiter{ctx, fd, msg, flags};
+}
 expected<void> socket_t::bind(std::string_view address, uint16_t port) const {
   sockaddr_storage addr{};
   socklen_t socklen;
@@ -345,12 +372,6 @@ socket_t::sendto_awaiter socket_t::sendto(context_t& ctx, void *buf, size_t nbyt
 }
 socket_t::recvfrom_awaiter socket_t::recvfrom(context_t& ctx, void *buf, size_t nbytes, sockaddr *addr, socklen_t *socklen, int flag) const {
   return recvfrom_awaiter{ctx, fd, buf, nbytes, addr, socklen, flag};
-}
-socket_t::sendmsg_awaiter socket_t::sendmsg(context_t& ctx, struct msghdr *msg, int flags) const {
-  return sendmsg_awaiter{ctx, fd, msg, flags};
-}
-socket_t::recvmsg_awaiter socket_t::recvmsg(context_t& ctx, struct msghdr *msg, int flags) const {
-  return recvmsg_awaiter{ctx, fd, msg, flags};
 }
 } // cornet::udp
 } // cornet

@@ -66,6 +66,7 @@ struct timeout_awaiter {
   context_t* ctx_;
   __kernel_timespec ts_;
   bool timeout_armed_{false};
+  bool timed_out_{false};
 
   timeout_awaiter(context_t& ctx, Awaitable op, std::chrono::duration<Rep, Period> duration)
     : op_(std::move(op)), ctx_(&ctx), ts_(to_kernel_timespec(duration)) {
@@ -75,23 +76,47 @@ struct timeout_awaiter {
 
   bool await_ready() { return op_.await_ready(); }
 
-  void await_suspend(std::coroutine_handle<> h) {
-    timeout_armed_ = true;
+  bool await_suspend(std::coroutine_handle<> h) {
     op_.handle = h;
     auto& uring = ctx_->io_uring();
 
     io_uring_sqe* sqes[2];
-    uring.get_sqes(sqes, 2);
+    if (!uring.get_sqes(sqes, 2)) {
+      // The op and its link_timeout must land in the same batch, so a partial
+      // acquire is not usable: fail fast rather than suspend on a wakeup that
+      // will never arrive.
+      op_.fail(ENOBUFS);
+      return false;
+    }
+    timeout_armed_ = true;
 
     op_.prepare_into(sqes[0]);
     io_uring_sqe_set_flags(sqes[0], sqes[0]->flags | IOSQE_IO_LINK);
 
     io_uring_prep_link_timeout(sqes[1], &ts_, 0);
     io_uring_sqe_set_data(sqes[1], nullptr);
+    return true;
   }
+
+  /**
+   * @brief whether the linked timeout is what ended the operation.
+   * Only meaningful once await_resume() has run.
+   */
+  CORNET_NODISCARD bool timed_out() const { return timed_out_; }
 
   R await_resume() {
     if (timeout_armed_ && op_.io_result() == -ECANCELED) {
+      // ECANCELED on a linked op has two possible sources: our link_timeout
+      // fired, or the op was reaped from outside (context shutdown runs a
+      // CANCEL_ANY sweep). Reporting the latter as ETIMEDOUT would hide the
+      // real reason from callers, logs and metrics: a graceful shutdown would
+      // look like a burst of client timeouts, and callers could not tell "idle
+      // peer" from "we are going down" — which is exactly the distinction a
+      // server needs to decide whether to answer with Connection: close.
+      if (ctx_ && !ctx_->is_running()) {
+        return unexpected(ECANCELED);
+      }
+      timed_out_ = true;
       return unexpected(ETIMEDOUT);
     }
     return op_.await_resume();
@@ -310,10 +335,10 @@ coro_t<void> when_all_task(context_t& ctx, std::shared_ptr<State> state, coro_t<
     }
   } catch (const std::exception& e) {
     SPDLOG_ERROR("when_all: task {} threw exception: {}", I, e.what());
-    std::get<I>(state->results) = unexpected(EFAULT, error_domain::exception);
+    std::get<I>(state->results) = unexpected(EFAULT, error_domain::Exception);
   } catch (...) {
     SPDLOG_ERROR("when_all: task {} threw unknown exception", I);
-    std::get<I>(state->results) = unexpected(EFAULT, error_domain::exception);
+    std::get<I>(state->results) = unexpected(EFAULT, error_domain::Exception);
   }
   if (--state->remaining == 0) {
     if (state->continuation) {
@@ -338,11 +363,11 @@ coro_t<void> when_any_task(context_t& ctx, std::shared_ptr<State> state, coro_t<
   } catch (const std::exception& e) {
     if (state->done) co_return;
     SPDLOG_ERROR("when_any: task {} threw exception: {}", I, e.what());
-    std::get<I>(state->results) = unexpected(EFAULT, error_domain::exception);
+    std::get<I>(state->results) = unexpected(EFAULT, error_domain::Exception);
   } catch (...) {
     if (state->done) co_return;
     SPDLOG_ERROR("when_any: task {} threw unknown exception", I);
-    std::get<I>(state->results) = unexpected(EFAULT, error_domain::exception);
+    std::get<I>(state->results) = unexpected(EFAULT, error_domain::Exception);
   }
   state->done = true;
   state->completed_index = I;

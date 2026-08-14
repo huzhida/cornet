@@ -12,6 +12,7 @@
 
 #include "cornet/base/task.h"
 #include "cornet/utils/config.h"
+#include "cornet/utils/clock.h"
 #include "cornet/io_uring/utask.h"
 #include "cornet/io_uring/uring.h"
 #include "cornet/io_uring/io_slot.h"
@@ -302,12 +303,16 @@ struct context_t {
    * Submits an SQE with user_data=nullptr, CQE result is silently discarded.
    * Usage: ctx.io_detach([](io_uring_sqe* sqe) { io_uring_prep_close(sqe, fd); });
    * @param f callable that fills the io_uring_sqe
+   * @return empty on success; ENOBUFS if the submission queue is saturated, in
+   *         which case nothing was submitted and the caller still owns the work
    */
   template<typename F>
-  void io_detach(F&& f) {
-    auto* sqe = uring_.get_sqe();
-    f(sqe);
-    io_uring_sqe_set_data(sqe, nullptr);
+  CORNET_MAYBE_UNUSED expected<void> io_detach(F&& f) {
+    auto sqe = uring_.get_sqe();
+    if (!sqe) return unexpected(sqe.error());
+    f(*sqe);
+    io_uring_sqe_set_data(*sqe, nullptr);
+    return {};
   }
 
   /**
@@ -340,6 +345,38 @@ struct context_t {
   CORNET_NODISCARD inline io_slot_table_t& io_slots() {
     return slots_;
   }
+
+  /**
+   * @brief coarse monotonic time, refreshed once per run-loop iteration.
+   * Free to call per request: it is a memory read, not a clock_gettime.
+   * Accurate to one loop iteration — use it for deadlines with second-level
+   * tolerance, not for latency measurement.
+   */
+  CORNET_NODISCARD inline uint64_t coarse_now_ns() const { return clock_.now_ns(); }
+
+  /**
+   * @brief coarse monotonic time as a chrono duration.
+   */
+  CORNET_NODISCARD inline std::chrono::steady_clock::duration coarse_now() const {
+    return clock_.now();
+  }
+
+  /**
+   * @brief current time pre-rendered as an IMF-fixdate string, for HTTP Date.
+   * Re-rendered only when the wall-clock second changes.
+   * @return NUL-terminated 29-character string, valid until the next loop turn
+   */
+  CORNET_NODISCARD inline const char* http_date() const { return clock_.http_date(); }
+
+  /**
+   * @brief length of http_date() (29 for a valid date).
+   */
+  CORNET_NODISCARD inline uint32_t http_date_len() const { return clock_.http_date_len(); }
+
+  /**
+   * @brief the context's coarse clock cache.
+   */
+  CORNET_NODISCARD inline clock_cache_t& clock() { return clock_; }
 
   #ifdef CORNET_METRICS
   /**
@@ -457,6 +494,8 @@ private:
   uring_t uring_;
   // context owned io slot table for safe user_data management
   io_slot_table_t slots_;
+  // coarse clock, refreshed once per run-loop iteration (see clock.h)
+  clock_cache_t clock_;
 
   // --- cross-thread wakeup mechanism, kept on its own cacheline ---
   // parked_ is RMW'd by producer threads on every wakeup(); wakeup_fd_ is

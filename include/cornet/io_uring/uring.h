@@ -6,6 +6,7 @@
 #include <memory>
 
 #include "cornet/base/defines.h"
+#include "cornet/base/expected.h"
 #include "cornet/base/metrics.h"
 #include "cornet/scheduling/task_tracker.h"
 #include "cornet/utils/config.h"
@@ -45,9 +46,12 @@ class uring_t {
 
    /**
     * @brief get an SQE from the ring. If the ring is full, submits pending SQEs first.
-    * @return pointer to an available io_uring_sqe
+    * Returns an error rather than throwing when the ring stays full: SQ
+    * exhaustion is a back-pressure signal the caller can act on (stop
+    * accepting, defer a flush), not a fatal condition.
+    * @return an available SQE, or ENOBUFS if the submission queue is saturated
     */
-   io_uring_sqe* get_sqe();
+   CORNET_NODISCARD expected<io_uring_sqe*> get_sqe();
 
    /**
     * @brief atomically get multiple SQEs from the ring.
@@ -55,8 +59,9 @@ class uring_t {
     * Guarantees all returned SQEs are in the same submission batch (safe for IOSQE_IO_LINK).
     * @param out pointer to array that receives the SQE pointers
     * @param n number of SQEs to acquire
+    * @return empty on success, ENOBUFS if n SQEs could not be acquired
     */
-   void get_sqes(io_uring_sqe** out, size_t n);
+   CORNET_NODISCARD expected<void> get_sqes(io_uring_sqe** out, size_t n);
 
    /**
     * @brief submit all prepared SQEs to kernel

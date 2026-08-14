@@ -33,15 +33,26 @@ void canceler_t::cancel_active_tasks() {
 #if CORNET_LINUX_VERSION_GE_5_19
     // 5.19+ targets the op by its raw utask_t pointer, which is its user_data
     if (node->task) {
-      auto* sqe = ctx_->io_uring().get_sqe();
-      io_uring_prep_cancel(sqe, reinterpret_cast<void*>(node->task), 0);
-      io_uring_sqe_set_data(sqe, nullptr);
+      auto sqe = ctx_->io_uring().get_sqe();
+      if (!sqe) {
+        // The cancel could not be queued. The op stays inflight and still
+        // resolves through its own completion path, so this degrades to
+        // "cancellation is late" rather than losing the task.
+        SPDLOG_WARN("cancel sqe unavailable, op left inflight: {}", sqe.error().message());
+        continue;
+      }
+      io_uring_prep_cancel(*sqe, reinterpret_cast<void*>(node->task), 0);
+      io_uring_sqe_set_data(*sqe, nullptr);
     }
 #else
     if (node->task && node->task->io_token() != 0) {
-      auto* sqe = ctx_->io_uring().get_sqe();
-      io_uring_prep_cancel(sqe, reinterpret_cast<void*>(node->task->io_token()), 0);
-      io_uring_sqe_set_data(sqe, nullptr);
+      auto sqe = ctx_->io_uring().get_sqe();
+      if (!sqe) {
+        SPDLOG_WARN("cancel sqe unavailable, op left inflight: {}", sqe.error().message());
+        continue;
+      }
+      io_uring_prep_cancel(*sqe, reinterpret_cast<void*>(node->task->io_token()), 0);
+      io_uring_sqe_set_data(*sqe, nullptr);
     }
 #endif
   }

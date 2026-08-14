@@ -162,6 +162,7 @@ struct cancellable_awaiter {
   canceler_t* canceler_;
   cancel_node node_;
   bool submitted_{false};
+  bool submit_failed_{false};
 
   cancellable_awaiter(Awaitable op, canceler_t* canceler)
     : op_(std::move(op)), canceler_(canceler) {}
@@ -182,15 +183,24 @@ struct cancellable_awaiter {
       node_.task = &op_;
       canceler_->link_node(&node_);
     }
-    op_.await_suspend(h);
+    if (!op_.await_suspend(h)) {
+      // Submission failed, so no CQE is coming. Unlink and resume immediately;
+      // staying suspended here would wait on a wakeup that cannot arrive.
+      if (canceler_) canceler_->unlink_node(&node_);
+      submit_failed_ = true;
+      return false;
+    }
     submitted_ = true;
     return true;
   }
 
   auto await_resume() -> decltype(op_.await_resume()) {
     if (canceler_) [[likely]] {
-      if (!submitted_) return unexpected(ECANCELED);
-      canceler_->unlink_node(&node_);
+      // Distinguish "cancelled before submission" from "could not submit": the
+      // first is a deliberate cancellation, the second is back pressure, and a
+      // caller that retries wants to tell them apart.
+      if (!submitted_ && !submit_failed_) return unexpected(ECANCELED);
+      if (submitted_) canceler_->unlink_node(&node_);
     }
     return op_.await_resume();
   }

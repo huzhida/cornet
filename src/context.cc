@@ -47,6 +47,9 @@ void context_t::run() {
   switch_to(state_t::Running);
   // exit only when nothing is inflight, framework io included
   while (!idle()) {
+    // one clock read per turn serves every request handled in that turn
+    clock_.refresh();
+
     if (state_.load(std::memory_order_acquire) == state_t::Canceling
         && !cancel_inflight_) {
       // latched: one sweep at a time, re-armable
