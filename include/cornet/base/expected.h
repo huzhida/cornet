@@ -11,31 +11,56 @@ namespace cornet {
  * @brief error domain, distinguishes different error code namespaces
  */
 enum class error_domain : uint8_t {
-  none,       // no error
-  system,     // errno (POSIX system call errors)
-  resolve,    // EAI_* (getaddrinfo errors)
-  internal,   // framework internal errors
-  exception,  // unexpected exception thrown from coroutine
+  None,       // no error
+  System,     // errno (POSIX system call errors)
+  Resolve,    // EAI_* (getaddrinfo errors)
+  Internal,   // framework internal errors
+  Exception,  // unexpected exception thrown from coroutine
+  Http,       // HTTP protocol errors (llhttp errno), rendered via the resolver below
 };
+
+/**
+ * @brief renderer for a domain whose code table lives outside the core.
+ *
+ * The core links only against liburing, so it cannot call llhttp_errno_name()
+ * itself. A module that owns such a domain registers a renderer at static-init
+ * time; until then message() falls back to a generic string — no UB, only a
+ * less specific message for errors raised very early in startup.
+ */
+using domain_message_fn = const char* (*)(int);
+
+/**
+ * @brief renderer slot for error_domain::Http.
+ * Function-local static, so any translation unit can reach the slot without an
+ * ordering dependency on some global object's construction.
+ */
+inline domain_message_fn& http_message_resolver() {
+  static domain_message_fn fn = nullptr;
+  return fn;
+}
 
 /**
  * @brief unified error type supporting multiple error domains
  */
 struct error_t {
   int code{0};
-  error_domain domain{error_domain::none};
+  error_domain domain{error_domain::None};
 
-  explicit operator bool() const { return domain != error_domain::none; }
+  explicit operator bool() const { return domain != error_domain::None; }
 
   /**
    * @brief get human-readable error message based on domain
    */
   const char* message() const {
     switch (domain) {
-      case error_domain::system: return strerror(code);
-      case error_domain::resolve: return gai_strerror(code);
-      case error_domain::internal: return "internal error";
-      case error_domain::exception: return "unexpected exception in coroutine";
+      case error_domain::System: return strerror(code);
+      case error_domain::Resolve: return gai_strerror(code);
+      case error_domain::Internal: return "internal error";
+      case error_domain::Exception: return "unexpected exception in coroutine";
+      case error_domain::Http: {
+        auto fn = http_message_resolver();
+        return fn ? fn(code) : "http protocol error";
+      }
       default: return "no error";
     }
   }
@@ -48,7 +73,7 @@ struct error_t {
 struct unexpected {
   error_t err;
 
-  unexpected(int code, error_domain domain = error_domain::system)
+  unexpected(int code, error_domain domain = error_domain::System)
     : err{code, domain} {}
 
   explicit unexpected(error_t e) : err(e) {}

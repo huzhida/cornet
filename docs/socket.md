@@ -212,7 +212,7 @@ if (!n) {
     auto& err = n.error();
     int code = err.code;              // errno 值
     const char* msg = err.message();  // strerror(code)
-    error_domain domain = err.domain; // system / resolve / internal
+    error_domain domain = err.domain; // System / Resolve / Internal
 }
 ```
 

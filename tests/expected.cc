@@ -16,7 +16,7 @@ TEST(expected, int_error) {
   expected<int> e(unexpected(EINVAL));
   EXPECT_FALSE(e.has_value());
   EXPECT_EQ(e.error().code, EINVAL);
-  EXPECT_EQ(e.error().domain, error_domain::system);
+  EXPECT_EQ(e.error().domain, error_domain::System);
 }
 
 TEST(expected, void_success) {
@@ -64,12 +64,12 @@ TEST(expected, assign_value_over_error) {
 TEST(expected, error_domains) {
   auto sys = unexpected(ECONNREFUSED);
   expected<int> e1(sys);
-  EXPECT_EQ(e1.error().domain, error_domain::system);
+  EXPECT_EQ(e1.error().domain, error_domain::System);
   EXPECT_STREQ(e1.error().message(), strerror(ECONNREFUSED));
 
-  auto resolve = unexpected(EAI_NONAME, error_domain::resolve);
+  auto resolve = unexpected(EAI_NONAME, error_domain::Resolve);
   expected<int> e2(resolve);
-  EXPECT_EQ(e2.error().domain, error_domain::resolve);
+  EXPECT_EQ(e2.error().domain, error_domain::Resolve);
   EXPECT_STREQ(e2.error().message(), gai_strerror(EAI_NONAME));
 }
 

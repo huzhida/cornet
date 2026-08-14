@@ -5,20 +5,87 @@
 
 namespace cornet {
 
+namespace {
+
+/**
+ * @brief map a configuration flag name to its IORING_SETUP_* bit.
+ *
+ * Config used to take a raw integer, which meant anyone wanting COOP_TASKRUN
+ * had to look up the bit value and hard-code it in TOML. Names are also the
+ * only way to keep a config file portable across liburing versions.
+ * @return the flag bit, or 0 for an unknown name
+ */
+uint32_t setup_flag_from_name(std::string_view name) {
+  struct entry_t { std::string_view name; uint32_t flag; };
+  static constexpr entry_t kFlags[] = {
+    {"IOPOLL",         IORING_SETUP_IOPOLL},
+    {"SQPOLL",         IORING_SETUP_SQPOLL},
+    {"SQ_AFF",         IORING_SETUP_SQ_AFF},
+    {"CQSIZE",         IORING_SETUP_CQSIZE},
+    {"CLAMP",          IORING_SETUP_CLAMP},
+    {"ATTACH_WQ",      IORING_SETUP_ATTACH_WQ},
+    {"R_DISABLED",     IORING_SETUP_R_DISABLED},
+#ifdef IORING_SETUP_SUBMIT_ALL
+    {"SUBMIT_ALL",     IORING_SETUP_SUBMIT_ALL},
+#endif
+#ifdef IORING_SETUP_COOP_TASKRUN
+    {"COOP_TASKRUN",   IORING_SETUP_COOP_TASKRUN},
+#endif
+#ifdef IORING_SETUP_TASKRUN_FLAG
+    {"TASKRUN_FLAG",   IORING_SETUP_TASKRUN_FLAG},
+#endif
+#ifdef IORING_SETUP_SINGLE_ISSUER
+    {"SINGLE_ISSUER",  IORING_SETUP_SINGLE_ISSUER},
+#endif
+#ifdef IORING_SETUP_DEFER_TASKRUN
+    {"DEFER_TASKRUN",  IORING_SETUP_DEFER_TASKRUN},
+#endif
+  };
+  for (const auto& e : kFlags) {
+    if (e.name == name) return e.flag;
+  }
+  SPDLOG_WARN("unknown io_uring setup flag '{}', ignored", name);
+  return 0;
+}
+
+} // namespace
+
 uring_t::uring_t(task_tracker_t& tracker, config_t* config)
   : tracker_(tracker),
     config_(config),
     uring(std::make_unique<io_uring>()) {
 
-  int entries_nr = 128, flags = 0;
+  uint32_t entries_nr = 128, flags = 0, cq_entries = 0;
 
   if (config) {
-    entries_nr = config->at_path("cornet.context.uring.capacity").value_or(128);
-    flags = config->at_path("cornet.context.uring.flags").value_or(0);
+    entries_nr = config->at_path("cornet.context.uring.capacity").value_or(128u);
+    // integer form kept for compatibility; the named array is the documented way
+    flags = config->at_path("cornet.context.uring.flags").value_or(0u);
+    if (auto* arr = config->at_path("cornet.context.uring.flags").as_array()) {
+      flags = 0;
+      for (const auto& node : *arr) {
+        if (auto name = node.value<std::string_view>()) {
+          flags |= setup_flag_from_name(*name);
+        }
+      }
+    }
+    cq_entries = config->at_path("cornet.context.uring.cq_size").value_or(0u);
   }
 
-  if (io_uring_queue_init(entries_nr, uring.get(), flags) < 0) {
-    SPDLOG_ERROR("failed to init io_uring queue with error: {}", strerror(errno));
+  io_uring_params params{};
+  params.flags = flags;
+  if (cq_entries > 0) {
+    // A CQ smaller than the peak number of concurrent completions pushes CQEs
+    // into the kernel's overflow list, where they cost far more to reap. Sizing
+    // it independently of the SQ matters for connection counts well above the
+    // SQ depth: each connection holds one recv, but completions arrive in
+    // bursts. Kernel requires a power of two and >= SQ entries.
+    params.flags |= IORING_SETUP_CQSIZE;
+    params.cq_entries = cq_entries;
+  }
+
+  if (int ret = io_uring_queue_init_params(entries_nr, uring.get(), &params); ret < 0) {
+    SPDLOG_ERROR("failed to init io_uring queue with error: {}", strerror(-ret));
     throw std::runtime_error("failed to init io_uring queue");
   }
 }
@@ -28,7 +95,7 @@ uring_t::~uring_t() {
 }
 
 
-io_uring_sqe* uring_t::get_sqe() {
+expected<io_uring_sqe*> uring_t::get_sqe() {
   CORNET_METRICS_ADD(metrics_->get_sqe_calls);
   auto sqe = io_uring_get_sqe(uring.get());
   if (!sqe) {
@@ -37,14 +104,18 @@ io_uring_sqe* uring_t::get_sqe() {
     if (ret > 0) tracker_.io_submit(static_cast<uint32_t>(ret));
     sqe = io_uring_get_sqe(uring.get());
     if (!sqe) {
-      SPDLOG_ERROR("failed to get sqe even after submit");
-      throw std::runtime_error("failed to get sqe even after submit");
+      // Submitting freed nothing, so the kernel side is saturated. Throwing
+      // here would violate the no-exceptions contract and, worse, leave the SQ
+      // just as full afterwards — the caller is the only one who can shed load.
+      CORNET_METRICS_ADD(metrics_->get_sqe_exhausted);
+      SPDLOG_WARN("submission queue exhausted after forced submit");
+      return unexpected(ENOBUFS);
     }
   }
   return sqe;
 }
 
-void uring_t::get_sqes(io_uring_sqe** out, size_t n) {
+expected<void> uring_t::get_sqes(io_uring_sqe** out, size_t n) {
   CORNET_METRICS_ADD_N(metrics_->get_sqe_calls, n);
   // try to acquire all n SQEs without intermediate submit
   for (size_t i = 0; i < n; ++i) {
@@ -57,13 +128,15 @@ void uring_t::get_sqes(io_uring_sqe** out, size_t n) {
       for (size_t j = 0; j < n; ++j) {
         out[j] = io_uring_get_sqe(uring.get());
         if (!out[j]) {
-          SPDLOG_ERROR("failed to get {} sqes even after submit", n);
-          throw std::runtime_error("failed to get sqes even after submit");
+          CORNET_METRICS_ADD(metrics_->get_sqe_exhausted);
+          SPDLOG_WARN("submission queue exhausted, could not acquire {} linked sqes", n);
+          return unexpected(ENOBUFS);
         }
       }
-      return;
+      return {};
     }
   }
+  return {};
 }
 
 int uring_t::submit() {

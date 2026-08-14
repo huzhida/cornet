@@ -118,6 +118,23 @@ class socket_t {
   };
 
   /**
+   * @brief writev awaiter with embedded msghdr.
+   * Gather-writes several buffers in one syscall. The msghdr is owned by the
+   * awaiter, so callers never keep one alive across the CQE themselves; only
+   * the iovec array must outlive the operation (typically a member of the
+   * object driving the write loop, not a local).
+   *
+   * Usage: auto n = co_await sock.writev(ctx, iov, iov_len);
+   */
+  struct writev_awaiter : utask_t {
+    writev_awaiter(context_t& ctx, int fd, const struct iovec* iov, size_t iov_len, int flags = 0);
+   private:
+    int fd_;
+    int flags_;
+    struct msghdr msg_;
+  };
+
+  /**
    * @brief sendto awaiter with embedded iovec/msghdr
    */
   struct sendto_awaiter : utask_t {
@@ -158,6 +175,16 @@ class socket_t {
    * @brief get native file descriptor
    */
   int native_fd() const;
+  /**
+   * @brief give up ownership of the descriptor.
+   *
+   * Needed whenever the fd is handed to something else that will close it — a
+   * fire-and-forget io_uring close, for example. Without this the socket's own
+   * destructor closes it a second time, and by then the number may already have
+   * been reassigned to a different connection.
+   * @return the descriptor, now unowned; -1 if there was none
+   */
+  int release();
   /**
    * @brief set socket option reuse address
    */
@@ -209,6 +236,20 @@ class socket_t {
    * @brief async send to peer
    */
   send_awaiter send(context_t& ctx, const void* buf, size_t nbytes, int flag = 0) const;
+  /**
+   * @brief async gather-write to peer (single syscall for several buffers).
+   * The iovec array must stay valid until the operation completes.
+   */
+  writev_awaiter writev(context_t& ctx, const struct iovec* iov, size_t iov_len, int flags = 0) const;
+  /**
+   * @brief async sendmsg to peer. The msghdr must stay valid until completion;
+   * prefer writev() unless ancillary data is needed.
+   */
+  sendmsg_awaiter sendmsg(context_t& ctx, struct msghdr* msg, int flags = 0) const;
+  /**
+   * @brief async recvmsg from peer. The msghdr must stay valid until completion.
+   */
+  recvmsg_awaiter recvmsg(context_t& ctx, struct msghdr* msg, int flags = 0) const;
   /**
    * @brief sync bind address:port to socket
    */
@@ -268,8 +309,6 @@ class socket_t : public cornet::socket_t {
  public:
   sendto_awaiter sendto(context_t& ctx, void* buf, size_t nbytes, sockaddr* addr, socklen_t socklen, int flag = 0) const;
   recvfrom_awaiter recvfrom(context_t& ctx, void* buf, size_t nbytes, sockaddr* addr, socklen_t* socklen, int flag = 0) const;
-  sendmsg_awaiter sendmsg(context_t& ctx, struct msghdr* msg, int flags) const;
-  recvmsg_awaiter recvmsg(context_t& ctx, struct msghdr* msg, int flags) const;
 };
 } // cornet::udp
 

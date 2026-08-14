@@ -1,5 +1,6 @@
 #include "cornet/net/socket.h"
 #include "cornet/concurrency/combinators.h"
+#include "cornet/http.h"
 
 using namespace cornet;
 
@@ -79,15 +80,40 @@ coro_t<expected<void>> connect_baidu(context_t& ctx)
   co_return {};
 }
 
+coro_t<void> run_server(context_t& ctx) {
+  using namespace http;
+  http::server_t server(ctx);
+  server.get("/abc", [](request_t& req, response_t& resp) {
+    resp.text("hello ~");
+  });
+  // listen() reports through expected; ignoring it turns a busy port into a server
+  // that silently never answers
+  if (auto ok = server.listen("0.0.0.0", 12345); !ok) {
+    SPDLOG_ERROR("http listen failed: {}", ok.error().message());
+    co_return;
+  }
+  SPDLOG_INFO("http listening on 0.0.0.0:12345 — try: curl -v http://127.0.0.1:12345/abc");
+  ctx.on_signal({SIGINT, SIGTERM}, [&server](int sig) {
+    SPDLOG_INFO("signal {}, draining", sig);
+    server.drain();
+  });
+  co_await server.serve();
+  SPDLOG_INFO("http server stopped");
+}
+
 int main(int argc, char* argv[]) {
   context_t ctx;
 
-  ctx.spawn(server(ctx));
-  ctx.spawn(client(ctx));
+  // ctx.spawn(server(ctx));
+  // ctx.spawn(client(ctx));
 
+  // ctx.run();
+
+  // ctx.spawn(connect_baidu(ctx));
+  // ctx.run();
+
+  ctx.spawn(run_server(ctx));
   ctx.run();
 
-  ctx.spawn(connect_baidu(ctx));
-  ctx.run();
   return 0;
 }

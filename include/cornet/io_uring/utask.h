@@ -39,9 +39,24 @@ struct utask_t : task_t {
   /**
    * @brief called by the compiler when the coroutine suspends.
    * Allocates an SQE, calls prepare_fn to fill it, and sets user_data.
+   * If the submission queue is saturated, the op fails fast with ENOBUFS and the
+   * coroutine resumes without suspending — a full ring surfaces as an ordinary
+   * expected error rather than a lost wakeup or an exception.
    * @param h the handle of the suspended coroutine, to be resumed when CQE arrives.
+   * @return true to stay suspended, false to resume immediately with the error
    */
-  CORNET_MAYBE_UNUSED void await_suspend(std::coroutine_handle<> h);
+  CORNET_MAYBE_UNUSED bool await_suspend(std::coroutine_handle<> h);
+
+  /**
+   * @brief mark this op as failed without ever reaching the kernel.
+   * Used when submission itself fails (saturated SQ), so await_resume() reports
+   * an ordinary error and no CQE is ever expected for it.
+   * @param err positive errno describing the submission failure
+   */
+  void fail(int err) {
+    value = -err;
+    completed = true;
+  }
 
   /**
    * @brief called by the compiler when the coroutine resumes.

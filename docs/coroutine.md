@@ -224,10 +224,11 @@ struct error_t {
 };
 
 enum class error_domain {
-    none,       // 无错误
-    system,     // errno (strerror)
-    resolve,    // EAI_* (gai_strerror)
-    internal,   // 框架内部错误
+    None,       // 无错误
+    System,     // errno (strerror)
+    Resolve,    // EAI_* (gai_strerror)
+    Internal,   // 框架内部错误
+    Exception,  // 协程中抛出的未预期异常
 };
 ```
 
@@ -235,8 +236,8 @@ enum class error_domain {
 
 ```cpp
 return unexpected(ETIMEDOUT);                     // system domain (默认)
-return unexpected(EAI_NONAME, error_domain::resolve);  // DNS 域
-return unexpected(ECANCELED, error_domain::internal);  // 内部错误
+return unexpected(EAI_NONAME, error_domain::Resolve);  // DNS 域
+return unexpected(ECANCELED, error_domain::Internal);  // 内部错误
 ```
 
 ---

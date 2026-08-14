@@ -44,10 +44,15 @@ nop_awaiter::nop_awaiter(context_t& ctx) {
 void async_close(context_t& ctx, int fd) {
   if (!ctx.is_running()) {
     ::close(fd);
-  } else {
-    ctx.io_detach([fd](io_uring_sqe* sqe) {
-      io_uring_prep_close(sqe, fd);
-    });
+    return;
+  }
+  auto queued = ctx.io_detach([fd](io_uring_sqe* sqe) {
+    io_uring_prep_close(sqe, fd);
+  });
+  if (!queued) {
+    // SQ saturated. Leaking the fd would be far worse than a synchronous close,
+    // and close() on a socket does not block in practice (SO_LINGER aside).
+    ::close(fd);
   }
 }
 

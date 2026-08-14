@@ -177,11 +177,11 @@ Cornet 采用 **`expected<T>` 为唯一正常错误通道，异常为 bug 安全
 
 ```cpp
 enum class error_domain : uint8_t {
-  none,       // 无错误
-  system,     // errno (POSIX 系统调用错误)
-  resolve,    // EAI_* (DNS 解析错误)
-  internal,   // 框架内部错误
-  exception,  // 协程中抛出的未预期异常
+  None,       // 无错误
+  System,     // errno (POSIX 系统调用错误)
+  Resolve,    // EAI_* (DNS 解析错误)
+  Internal,   // 框架内部错误
+  Exception,  // 协程中抛出的未预期异常
 };
 ```
 
@@ -216,7 +216,7 @@ coro_t<void> handle(tcp::socket_t& sock) {
 异常**不是**正常的错误通道。它仅作为"编程 bug 的安全网"存在：
 - `coro_t` 的 `unhandled_exception()` 会捕获异常并存储
 - `co_await` 父协程时会 rethrow
-- `when_all` / `when_any` / `task_scope` 中的异常被记录日志并转为 `error_domain::exception`
+- `when_all` / `when_any` / `task_scope` 中的异常被记录日志并转为 `error_domain::Exception`
 
 框架保证：**所有公开 API 的 IO 操作不抛异常，错误一律通过 expected 返回。**
 
@@ -226,13 +226,13 @@ coro_t<void> handle(tcp::socket_t& sock) {
 auto result = co_await some_operation();
 if (!result) {
     switch (result.error().domain) {
-        case error_domain::system:
+        case error_domain::System:
             // POSIX errno，如 ECONNREFUSED, EPIPE
             break;
-        case error_domain::resolve:
+        case error_domain::Resolve:
             // DNS 解析错误，如 EAI_NONAME
             break;
-        case error_domain::exception:
+        case error_domain::Exception:
             // 子协程内部 bug（不应出现在正常逻辑中）
             break;
         default: break;

@@ -12,12 +12,34 @@
 #ifndef KERNEL_VERSION
 #define KERNEL_VERSION(a,b,c) (((a) << 16) + ((b) << 8) + ((c) > 255 ? 255 : (c)))
 #endif
-#define CORNET_LINUX_VERSION_GE_5_19 (LINUX_VERSION_CODE >= KERNEL_VERSION(5,19,0))
+#define CORNET_LINUX_VERSION_GE_5_19 0
 
 // suppress unused warnings
 #define CORNET_MAYBE_UNUSED [[maybe_unused]]
 // enforce callers to check return value
 #define CORNET_NODISCARD [[nodiscard]]
+
+/**
+ * @brief debug-only invariant check.
+ *
+ * For contracts that are cheap to state but would cost real work to verify on
+ * every call in a release build — the kind that quietly rot as code grows around
+ * them. Compiles to nothing when NDEBUG is set.
+ */
+#ifndef NDEBUG
+#include <cstdio>
+#include <cstdlib>
+#define CORNET_ASSERT(cond, msg)                                              \
+  do {                                                                        \
+    if (!(cond)) {                                                            \
+      std::fprintf(stderr, "cornet: assertion failed at %s:%d: %s (%s)\n",    \
+                   __FILE__, __LINE__, #cond, (msg));                         \
+      std::abort();                                                           \
+    }                                                                         \
+  } while (0)
+#else
+#define CORNET_ASSERT(cond, msg) ((void)0)
+#endif
 
 /**
  * @brief convert std::chrono duration to __kernel_timespec for io_uring.

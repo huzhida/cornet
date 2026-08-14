@@ -56,10 +56,18 @@ void utask_t::prepare_into(io_uring_sqe* sqe) {
   CORNET_METRICS_ADD(ctx->metrics().slot_allocs);
 }
 
-void utask_t::await_suspend(std::coroutine_handle<> h) {
+bool utask_t::await_suspend(std::coroutine_handle<> h) {
   this->handle = h;
   auto sqe = ctx->io_uring().get_sqe();
-  prepare_into(sqe);
+  if (!sqe) {
+    // Nothing reached the kernel, so no CQE will ever arrive for this op:
+    // resume immediately with the error instead of suspending on a wakeup that
+    // cannot come.
+    fail(sqe.error().code);
+    return false;
+  }
+  prepare_into(*sqe);
+  return true;
 }
 
 int utask_t::process_utask(context_t& ctx, cqe_t cqe) {
