@@ -121,6 +121,8 @@ class connection_t {
 
  private:
   friend class body_reader_t;
+  friend class body_writer_t;
+  friend class response_t;
 
   // one response waiting to be written
   struct pending_t {
@@ -139,7 +141,25 @@ class connection_t {
   CORNET_NODISCARD expected<void> attach_buffers();
   void release_buffers();
 
+  // ── streaming write support ──
+  /**
+   * @brief stage status line + headers for deferred async send.
+   *
+   * Called by response_t::chunked() so that the first body_writer_t::write()
+   * sends head + hdr + the first chunk in a single writev.
+   */
+  void stage_headers();
+  /**
+   * @brief send body chunk(s) from stream_out_ to socket.
+   *
+   * On the first call (after stage_headers()), sends head + hdr + chunk-data
+   * in one writev. Subsequent calls send only chunk-data.
+   * Coroutine that handles short writes and cancellation.
+   */
+  CORNET_NODISCARD coro_t<expected<void>> flush_stream();
+
   // ── the loop's phases ──
+  void frame_head(bool close_after);
   CORNET_NODISCARD coro_t<expected<uint32_t>> fill();
   CORNET_NODISCARD expected<void> prepare_body(const route_t* route);
   CORNET_NODISCARD coro_t<void> invoke(const route_t& route);
@@ -182,6 +202,7 @@ class connection_t {
   out_buffer_t head_out_;
   out_buffer_t hdr_out_;
   out_buffer_t body_out_;
+  out_buffer_t stream_out_;   // chunk-size lines + data for streaming writes
 
   request_t     req_;
   response_t    resp_;
@@ -207,6 +228,8 @@ class connection_t {
   bool timed_out_{false};
   bool streaming_{false};
   bool body_complete_{false};
+  bool streaming_write_{false};  // body_writer_t is currently streaming
+  bool headers_staged_{false};   // head+hdr staged, waiting for first flush_stream
 };
 
 } // namespace cornet::http

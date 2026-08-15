@@ -125,6 +125,53 @@ class body_reader_t {
 };
 
 /**
+ * @brief streaming body writer for chunked transfer encoding.
+ *
+ * Returned by response_t::chunked(). Each write() emits one chunk
+ * (encoded as chunk-size line + data + CRLF) and flushes it to the socket.
+ * finish() sends the terminating zero-length chunk.
+ *
+ * Usage in an async handler:
+ *   auto w = resp.chunked();
+ *   for (int i = 0; i < N; ++i) {
+ *     co_await w.write(make_chunk(i));
+ *   }
+ *   co_await w.finish();
+ */
+class body_writer_t {
+ public:
+  /**
+   * @brief write one chunk of data.
+   * @return success, or an error if the socket write fails.
+   */
+  CORNET_NODISCARD coro_t<expected<void>> write(std::string_view data);
+
+  /**
+   * @brief finish the body by sending the terminating zero-length chunk.
+   * @return success, or an error if the socket write fails.
+   */
+  CORNET_NODISCARD coro_t<expected<void>> finish();
+
+  CORNET_NODISCARD bool failed() const;
+  CORNET_NODISCARD error_t error() const;
+
+ private:
+  friend class response_t;
+  friend class connection_t;
+  body_writer_t() : conn_(nullptr) {}
+  body_writer_t(connection_t* conn) : conn_(conn) {}
+  connection_t* conn_{nullptr};
+
+ public:
+  /**
+   * @brief create a body_writer_t in error state (for tests).
+   * The connection pointer is null, so write() returns InvalidState.
+   */
+  static body_writer_t null_writer() { return body_writer_t{}; }
+};
+
+
+/**
  * @brief one inbound request. Every view points into connection-owned buffers and
  * remains valid until the handler returns.
  */
@@ -207,6 +254,7 @@ enum class body_source_t : uint8_t {
   None,      // no body
   Inline,    // copied into the connection's body output buffer
   External,  // referenced in place (static storage, or a block we own)
+  Streaming, // chunked transfer encoding; body_writer_t sends chunks incrementally
 };
 
 /**
@@ -251,6 +299,20 @@ class response_t {
     hdr_ = &hdr;
     body_out_ = &body;
   }
+
+  /**
+   * @brief bind the connection for streaming write support.
+   */
+  void bind(connection_t& conn) { conn_ = &conn; }
+
+  /**
+   * @brief enter streaming (chunked transfer encoding) mode.
+   *
+   * Must be called before any body method. Returns a writer that lets the
+   * handler send body chunks incrementally, each flushed to the socket.
+   * The terminating zero-length chunk is sent by w.finish().
+   */
+  CORNET_NODISCARD body_writer_t chunked();
 
   /**
    * @brief start a fresh response, recording where its staging regions begin.
@@ -381,6 +443,7 @@ class response_t {
 
   out_buffer_t* hdr_{nullptr};
   out_buffer_t* body_out_{nullptr};
+  connection_t* conn_{nullptr};
 
   status_t      status_{status_t::Ok};
   body_source_t source_{body_source_t::None};

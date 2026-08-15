@@ -98,6 +98,7 @@ connection_t::connection_t(context_t& ctx, tcp::socket_t sock, const server_opti
   });
   req_.bind(parser_, headers_, params_);
   resp_.bind(hdr_out_, body_out_);
+  resp_.bind(*this);
 
   timer_.owner = this;
   timer_.on_expire = [](void* owner) {
@@ -132,6 +133,10 @@ expected<void> connection_t::attach_buffers() {
   if (!bo) return unexpected(ENOMEM);
   body_out_.reset(std::move(bo));
 
+  auto so = pool_.acquire(opt_.body_buffer_bytes);  // reuse same size for streaming
+  if (!so) return unexpected(ENOMEM);
+  stream_out_.reset(std::move(so));
+
   return {};
 }
 
@@ -140,6 +145,7 @@ void connection_t::release_buffers() {
   head_out_.release();
   hdr_out_.release();
   body_out_.release();
+  stream_out_.release();
   body_.release();
 }
 
@@ -331,23 +337,16 @@ coro_t<bool> connection_t::run_filters(const router_t& router) {
   co_return true;
 }
 
-// ──────────────────────────── framing ────────────────────────────
+// ──────────────────────── streaming write ────────────────────────
 
-void connection_t::frame_response(bool close_after) {
+void connection_t::frame_head(bool close_after) {
   resp_.seal_headers();
 
   auto status = resp_.status();
-  bool head_request = req_.method() == method_t::Head;
-  bool no_body_allowed = status_forbids_body(status);
-
-  pending_t p{};
-  p.head_off = head_out_.size();
 
   serializer_t::status_line(head_out_, status);
 
   if (opt_.serve_date_header && !resp_.saw_date()) {
-    // The date string is rendered once per event-loop turn by the context's coarse
-    // clock, so every response here is a memcpy rather than a gmtime plus format.
     serializer_t::date_header(head_out_, ctx_.http_date(), ctx_.http_date_len());
   }
   if (opt_.serve_server_header) {
@@ -357,11 +356,105 @@ void connection_t::frame_response(bool close_after) {
     serializer_t::header(head_out_, field_t::Connection,
                          close_after ? kConnClose : kConnKeepAlive);
   }
-  if (!no_body_allowed && !resp_.saw_content_length() && !resp_.saw_transfer_encoding()) {
-    // Emitted even for HEAD: the response must describe the body it would have
-    // sent, while sending none.
+  if (!resp_.saw_content_length() && !resp_.saw_transfer_encoding() &&
+      resp_.body_source() != body_source_t::Streaming) {
     serializer_t::header_u64(head_out_, field_t::ContentLength, resp_.body_length());
   }
+  if (resp_.body_source() == body_source_t::Streaming &&
+      !resp_.saw_transfer_encoding()) {
+    serializer_t::header(head_out_, field_t::TransferEncoding, "chunked");
+  }
+}
+
+void connection_t::stage_headers() {
+  // Frame status + headers.  The actual socket write is deferred to the first
+  // flush_stream() call, which sends head + hdr + the first body chunk in a
+  // single writev.  This keeps chunked() non-coroutine while ensuring headers
+  // and the first chunk leave the kernel in one syscall.
+  frame_head(false);  // streaming responses use keep-alive by default
+  headers_staged_ = true;
+}
+
+CORNET_NODISCARD coro_t<expected<void>> connection_t::flush_stream() {
+  if (stream_out_.failed()) {
+    co_return unexpected(stream_out_.error());
+  }
+  if (stream_out_.size() == 0) co_return expected<void>{};
+
+  // On the first flush after stage_headers(), send head + hdr + chunk-data
+  // in a single writev so headers and the first body chunk leave the kernel
+  // in one syscall.  Subsequent flushes only send the chunk-data.
+  bool first_flush = headers_staged_;
+  if (first_flush) headers_staged_ = false;
+
+  uint32_t total_len = stream_out_.size();
+  if (first_flush) {
+    total_len += head_out_.size() + resp_.hdr_length();
+  }
+
+  // 3 iovec segments max: head + hdr + chunk-data
+  struct iovec iov[3];
+  uint32_t iov_n = 0;
+  if (first_flush && head_out_.size()) {
+    iov[iov_n++] = {head_out_.data(), head_out_.size()};
+  }
+  if (first_flush && resp_.hdr_length()) {
+    iov[iov_n++] = {hdr_out_.data(), resp_.hdr_length()};
+  }
+  if (stream_out_.size()) {
+    iov[iov_n++] = {stream_out_.data(), stream_out_.size()};
+  }
+
+  uint32_t written_total = 0;
+  while (written_total < total_len) {
+    ++metrics_.writev_calls;
+    auto n = co_await with_cancel(
+        ctx_, sock_.writev(ctx_, iov, iov_n), canceler_);
+    if (!n) {
+      CORNET_HTTP_TRACE_LOG("fd={}: writev failed ({})", sock_.native_fd(), n.error().message());
+      co_return unexpected(n.error());
+    }
+    CORNET_HTTP_TRACE_LOG("fd={}: writev wrote {} bytes", sock_.native_fd(), *n);
+    if (*n == 0) co_return unexpected(ECONNRESET);
+
+    // Advance through iovecs until we've accounted for *n bytes
+    uint32_t remaining = uint32_t(*n);
+    for (uint32_t i = 0; i < iov_n && remaining > 0; ++i) {
+      auto& v = iov[i];
+      uint32_t take = remaining < v.iov_len ? remaining : v.iov_len;
+      v.iov_base = static_cast<char*>(v.iov_base) + take;
+      v.iov_len -= take;
+      remaining -= take;
+    }
+    written_total += uint32_t(*n);
+  }
+
+  stream_out_.clear();
+  co_return expected<void>{};
+}
+
+// ──────────────────────────── framing ────────────────────────────
+
+void connection_t::frame_response(bool close_after) {
+  // Streaming: headers were already framed by stage_headers() during
+  // response_t::chunk(), so the body_writer_t flushes them incrementally
+  // on its own.  No pending entry, no head_out_ append, no batch flush.
+  if (resp_.body_source() == body_source_t::Streaming) {
+    streaming_write_ = true;
+    CORNET_HTTP_TRACE_LOG("fd={}: framed streaming response (chunked)",
+                          sock_.native_fd());
+    ++metrics_.responses;
+    return;
+  }
+
+  auto status = resp_.status();
+  bool head_request = req_.method() == method_t::Head;
+  bool no_body_allowed = status_forbids_body(status);
+
+  pending_t p{};
+  p.head_off = head_out_.size();
+
+  frame_head(close_after);
 
   p.head_len = head_out_.size() - p.head_off;
   p.hdr_off = resp_.hdr_offset();
@@ -435,7 +528,9 @@ uint32_t connection_t::build_iovecs() {
     if (p.body_len) {
       if (p.source == body_source_t::Inline) {
         iov_[iov_n_++] = {body_out_.data() + p.body_off, p.body_len};
-      } else {
+      } else if (p.source != body_source_t::Streaming) {
+        // Streaming bodies are written incrementally by body_writer_t;
+        // the pending entry only carries head+hdr.
         iov_[iov_n_++] = {const_cast<char*>(p.external.data()), p.body_len};
       }
     }
@@ -498,6 +593,8 @@ void connection_t::reset_round() {
   head_out_.clear();
   hdr_out_.clear();
   body_out_.clear();
+  stream_out_.clear();
+  streaming_write_ = false;
   iov_n_ = 0;
   iov_head_ = 0;
 }

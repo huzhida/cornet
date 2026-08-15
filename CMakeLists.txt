@@ -142,6 +142,8 @@ if(CORNET_ENABLE_TESTS)
             tests/http_parser.cc
             tests/http_router.cc
             tests/http_serializer.cc
+            tests/http_connection.cc
+            tests/http_e2e.cc
         )
         target_link_libraries(unit PRIVATE cornet_http)
     endif()
