@@ -1,4 +1,5 @@
 #include "cornet/http/message.h"
+#include "cornet/http/connection.h"
 
 namespace cornet::http {
 
@@ -57,6 +58,64 @@ query_t request_t::query() const {
     rest = rest.substr(0, hash);
   }
   return query_t{rest};
+}
+
+// ─────────────────────── body_writer_t ───────────────────────
+
+coro_t<expected<void>> body_writer_t::write(std::string_view data) {
+  if (!conn_ || conn_->head_out_.failed() || conn_->hdr_out_.failed())
+    co_return unexpected(http_error(http_error_t::InvalidState));
+
+  uint32_t len = uint32_t(data.size());
+  if (len == 0) co_return expected<void>{};
+
+  // Encode chunk-size line: write_chunk_size() produces "<hex>\r\n" (at most 16 bytes)
+  char tmp[18];
+  uint32_t n = http::write_chunk_size(tmp, len);
+  conn_->stream_out_.put(tmp, n);
+  conn_->stream_out_.put(data);
+  conn_->stream_out_.put_crlf();
+
+  co_await conn_->flush_stream();
+  co_return expected<void>{};
+}
+
+coro_t<expected<void>> body_writer_t::finish() {
+  if (!conn_) co_return expected<void>{};
+  // Send terminating zero-length chunk: "0\r\n\r\n"
+  static const char kTerm[] = "0\r\n\r\n";
+  conn_->stream_out_.put(kTerm, sizeof(kTerm) - 1);
+  co_await conn_->flush_stream();
+  co_return expected<void>{};
+}
+
+bool body_writer_t::failed() const {
+  if (!conn_) return true;
+  return conn_->head_out_.failed() || conn_->hdr_out_.failed() || conn_->stream_out_.failed();
+}
+
+error_t body_writer_t::error() const {
+  if (!conn_) return {};
+  if (conn_->head_out_.failed()) return conn_->head_out_.error();
+  if (conn_->hdr_out_.failed()) return conn_->hdr_out_.error();
+  return conn_->stream_out_.error();
+}
+
+// ─────────────────────── response_t::chunked() ───────────────────────
+
+body_writer_t response_t::chunked() {
+  if (source_ != body_source_t::None) {
+    fail(http_error(http_error_t::InvalidState));
+  }
+  if (!conn_) {
+    fail(http_error(http_error_t::InvalidState));
+  }
+  source_ = body_source_t::Streaming;
+  // Stage status + headers into stream_out_ so the first w.write() co_awaits
+  // them together with the first body chunk.  This avoids making chunked()
+  // a coroutine while ensuring headers are flushed asynchronously.
+  conn_->stage_headers();
+  return body_writer_t{conn_};
 }
 
 // ─────────────────────────── response_t ───────────────────────────
