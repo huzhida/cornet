@@ -2,7 +2,7 @@
 
 #include <string>
 
-#include "cornet/http/router.h"
+#include "cornet/http/server/router.h"
 
 using namespace cornet;
 using namespace cornet::http;

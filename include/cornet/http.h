@@ -3,12 +3,17 @@
 
 /**
  * @file http.h
- * @brief aggregate header for the HTTP/1.1 module.
+ * @brief aggregate header for the HTTP/1.1 module — common layer, server and client.
  *
  * Kept out of cornet.h on purpose: the core promises to depend on nothing but
  * liburing, and llhttp is linked privately into this module. Including this header
  * does not pull llhttp into a translation unit either — the parser keeps it behind
  * an opaque state array.
+ *
+ * The module is laid out in three directories. common/ holds what both directions
+ * need (protocol constants, buffers, header table, parser, serializer, timer
+ * wheel); server/ and client/ hold what only one side does. Include
+ * cornet/http_server.h or cornet/http_client.h to get just one of them.
  *
  * Minimal server:
  * @code
@@ -21,16 +26,23 @@
  * @endcode
  */
 
-#include "cornet/http/buffer.h"
-#include "cornet/http/common.h"
-#include "cornet/http/connection.h"
-#include "cornet/http/headers.h"
-#include "cornet/http/message.h"
-#include "cornet/http/parser.h"
-#include "cornet/http/router.h"
-#include "cornet/http/serializer.h"
-#include "cornet/http/server.h"
-#include "cornet/http/timer_wheel.h"
-#include "cornet/http/trace.h"
+#include "cornet/http/common/buffer.h"
+#include "cornet/http/common/headers.h"
+#include "cornet/http/common/parser.h"
+#include "cornet/http/common/protocol.h"
+#include "cornet/http/common/serializer.h"
+#include "cornet/http/common/timer_wheel.h"
+#include "cornet/http/common/trace.h"
+#include "cornet/http/common/url.h"
+
+#include "cornet/http/server/connection.h"
+#include "cornet/http/server/message.h"
+#include "cornet/http/server/router.h"
+#include "cornet/http/server/server.h"
+
+#include "cornet/http/client/client.h"
+#include "cornet/http/client/connection.h"
+#include "cornet/http/client/message.h"
+#include "cornet/http/client/pool.h"
 
 #endif // CORNET_HTTP_H

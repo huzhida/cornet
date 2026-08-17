@@ -2,6 +2,9 @@
 #include "cornet_bench.h"
 #include "asio_cb_bench.h"
 #include "asio_coro_bench.h"
+#ifdef CORNET_BENCH_HTTP
+#include "http_bench.h"
+#endif
 
 #include "cornet/utils/config.h"
 #include "cornet/utils/logging.h"
@@ -22,6 +25,9 @@ int main(int argc, char* argv[]) {
   printf("╠══════════════════════════════════════════════════════════════╣\n");
   printf("║ 测试框架: Cornet                                              ║\n");
   printf("║           Asio(回调式/协程式)                                 ║\n");
+#ifdef CORNET_BENCH_HTTP
+  printf("║           Cornet HTTP/1.1 (仅服务端 / 完整栈)                 ║\n");
+#endif
   printf("║ 测试模式: Echo (客户端发送→服务端回显→客户端接收)               ║\n");
   printf("║ 指标: RPS, 吞吐量, 延迟分布, 稳定性, 内存占用                   ║\n");
   printf("║ 每场景每框架运行 %d 轮, 取中位数结果                            ║\n", BENCH_ROUNDS);
@@ -40,6 +46,10 @@ int main(int argc, char* argv[]) {
     {"Cornet",[&config](const scenario_t& s) { return run_cornet(s,config); }},
     {"Asio/Callback", [](const scenario_t& s) { return run_asio_callback(s); }},
     {"Asio/Coroutine", [](const scenario_t& s) { return run_asio_coro(s); }},
+#ifdef CORNET_BENCH_HTTP
+    {"Cornet/HTTPsrv", [&config](const scenario_t& s) { return run_cornet_http_server(s, config); }},
+    {"Cornet/HTTP", [&config](const scenario_t& s) { return run_cornet_http(s, config); }},
+#endif
   };
 
   for (size_t si = 0; si < scenarios.size(); ++si) {
@@ -48,9 +58,7 @@ int main(int argc, char* argv[]) {
 
     // Warmup
     printf("  预热中...\n");
-    run_cornet(scenario, config);
-    run_asio_callback(scenario);
-    run_asio_coro(scenario);
+    for (auto& b : benches) b.fn(scenario);
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
     print_result_header();
@@ -86,6 +94,11 @@ int main(int argc, char* argv[]) {
 
   // 综合评估
   print_comprehensive_summary(all_results, all_rounds, scenarios);
+
+#ifdef CORNET_BENCH_HTTP
+  // HTTP 相对裸 send/recv 的开销
+  print_http_overhead_summary(all_results);
+#endif
 
   return 0;
 }

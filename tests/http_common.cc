@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include "cornet/http/common.h"
+#include "cornet/http/common/protocol.h"
 
 using namespace cornet;
 using namespace cornet::http;

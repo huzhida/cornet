@@ -3,7 +3,7 @@
 #include <string>
 #include <vector>
 
-#include "cornet/http/parser.h"
+#include "cornet/http/common/parser.h"
 
 using namespace cornet;
 using namespace cornet::http;
@@ -364,4 +364,311 @@ TEST(http_parser, reset_clears_message_state) {
   EXPECT_EQ(f.parser.target(), "");
   EXPECT_FALSE(f.parser.has_content_length());
   EXPECT_FALSE(f.parser.error());
+}
+
+// ─────────────────────────── chunked trailers ───────────────────────────
+//
+// llhttp reports trailers through the same callbacks as the real header section, but
+// their bytes live in the body region of the receive buffer — the region that is
+// rewound and refilled while the body streams past. Recording them there is unsound,
+// so they are dropped. These tests pin that down; the last one is the regression test
+// for what happens when a trailer straddles a rewind.
+
+TEST(http_parser, trailers_are_ignored) {
+  fixture_t f;
+  auto r = f.feed(
+      "POST /u HTTP/1.1\r\n"
+      "Host: h\r\n"
+      "Transfer-Encoding: chunked\r\n"
+      "\r\n");
+  ASSERT_EQ(r, parser_t::result_t::HeadersReady);
+  f.aggregate();
+
+  ASSERT_EQ(f.feed("3\r\nabc\r\n0\r\nX-Checksum: deadbeef\r\n\r\n"),
+            parser_t::result_t::MessageReady);
+  EXPECT_EQ(f.body.view(), "abc");
+  // the two real headers, and nothing else
+  EXPECT_EQ(f.headers.size(), 2u);
+  EXPECT_TRUE(f.headers.get("x-checksum").empty());
+}
+
+// A trailer sharing a name with a real header must not become a second entry: code
+// that iterates the header table would otherwise see a value the peer smuggled in
+// after the framing decisions were already made.
+TEST(http_parser, a_trailer_cannot_shadow_a_header) {
+  fixture_t f;
+  ASSERT_EQ(f.feed(
+                "POST /u HTTP/1.1\r\n"
+                "Host: real.example\r\n"
+                "Transfer-Encoding: chunked\r\n"
+                "\r\n"),
+            parser_t::result_t::HeadersReady);
+  f.aggregate();
+
+  ASSERT_EQ(f.feed("0\r\nHost: spoofed.example\r\n\r\n"), parser_t::result_t::MessageReady);
+  EXPECT_EQ(f.headers.size(), 2u);
+  EXPECT_EQ(f.headers.get(field_t::Host), "real.example");
+}
+
+// Trailers cost no header slots either, so a trailer flood cannot turn a legitimate
+// request into a 431.
+TEST(http_parser, trailers_do_not_count_against_max_headers) {
+  fixture_t f;
+  f.parser.set_limits(parser_limits_t{.max_headers = 2});
+  ASSERT_EQ(f.feed(
+                "POST /u HTTP/1.1\r\n"
+                "Host: h\r\n"
+                "Transfer-Encoding: chunked\r\n"
+                "\r\n"),
+            parser_t::result_t::HeadersReady);
+  f.aggregate();
+
+  ASSERT_EQ(f.feed("0\r\nA: 1\r\nB: 2\r\nC: 3\r\nD: 4\r\n\r\n"),
+            parser_t::result_t::MessageReady);
+  EXPECT_EQ(f.headers.size(), 2u);
+  EXPECT_FALSE(f.parser.error());
+}
+
+// The regression test for the whole exercise. A body longer than the receive buffer is
+// read by rewinding the region behind the header section, so a trailer split across two
+// reads used to have its first run overwritten by the second — producing a header whose
+// name *and* value were made of body bytes. Whoever writes the body would then be
+// choosing header names the handler sees.
+TEST(http_parser, trailer_split_across_a_rewound_window_is_ignored) {
+  fixture_t f(512);
+  ASSERT_EQ(f.feed(
+                "POST /u HTTP/1.1\r\n"
+                "Host: h\r\n"
+                "Transfer-Encoding: chunked\r\n"
+                "\r\n"),
+            parser_t::result_t::HeadersReady);
+  // where the body starts: the mark the connection loops rewind to
+  uint32_t window = f.parser.consumed_offset();
+  f.aggregate();
+  EXPECT_EQ(f.parser.resume(), parser_t::result_t::NeedMore);
+
+  // first read: the body plus the beginning of a trailer
+  f.head.rewind_to(window);
+  EXPECT_EQ(f.feed("3\r\nabc\r\n0\r\nX-Sum: SECRETVALUE"), parser_t::result_t::NeedMore);
+  EXPECT_FALSE(f.parser.mid_header()) << "a recorded trailer run would break the rewind";
+
+  // second read: lands on top of the first, and is long enough to bury it
+  f.head.rewind_to(window);
+  ASSERT_EQ(f.feed("TAIL\r\n\r\n"), parser_t::result_t::MessageReady);
+
+  EXPECT_FALSE(f.parser.error());
+  EXPECT_EQ(f.body.view(), "abc");
+  // no fabricated entry: only Host and Transfer-Encoding
+  EXPECT_EQ(f.headers.size(), 2u);
+  EXPECT_EQ(f.headers.get(field_t::Host), "h");
+}
+
+// ─────────────────── trailers, when the caller opts in ───────────────────
+//
+// max_trailers is 0 by default, so everything above describes the default. Setting it
+// records trailers into the same table under their own budget, reachable through
+// trailer() rather than get(): a value the peer appended after the body must never
+// answer a header lookup, because every framing and routing decision was made long
+// before it arrived.
+
+TEST(http_parser, trailers_are_recorded_when_enabled) {
+  fixture_t f;
+  f.parser.set_limits(parser_limits_t{.max_headers = 64, .max_trailers = 8});
+  ASSERT_EQ(f.feed(
+                "POST /u HTTP/1.1\r\n"
+                "Host: h\r\n"
+                "Transfer-Encoding: chunked\r\n"
+                "\r\n"),
+            parser_t::result_t::HeadersReady);
+  f.aggregate();
+
+  ASSERT_EQ(f.feed("3\r\nabc\r\n0\r\nX-Checksum: deadbeef\r\n\r\n"),
+            parser_t::result_t::MessageReady);
+  EXPECT_EQ(f.body.view(), "abc");
+  EXPECT_EQ(f.headers.trailer_count(), 1u);
+  EXPECT_EQ(f.headers.trailer("x-checksum"), "deadbeef");
+  // and it is not a header
+  EXPECT_TRUE(f.headers.get("x-checksum").empty());
+  EXPECT_EQ(f.headers.size(), 3u);
+}
+
+TEST(http_parser, an_enabled_trailer_still_cannot_answer_a_header_lookup) {
+  fixture_t f;
+  f.parser.set_limits(parser_limits_t{.max_headers = 64, .max_trailers = 8});
+  ASSERT_EQ(f.feed(
+                "POST /u HTTP/1.1\r\n"
+                "Host: real.example\r\n"
+                "Transfer-Encoding: chunked\r\n"
+                "\r\n"),
+            parser_t::result_t::HeadersReady);
+  f.aggregate();
+
+  ASSERT_EQ(f.feed("0\r\nX-Note: hi\r\n\r\n"), parser_t::result_t::MessageReady);
+  EXPECT_EQ(f.headers.get(field_t::Host), "real.example");
+  EXPECT_EQ(f.headers.trailer("x-note"), "hi");
+  EXPECT_TRUE(f.headers.trailer(field_t::Host).empty());
+}
+
+// The fields RFC 9110 §6.5.1 forbids in a trailer are dropped even with recording on:
+// they were all interpreted when the header section ended, so honouring one here is
+// how smuggling and after-the-fact spoofing start.
+TEST(http_parser, forbidden_trailers_are_dropped) {
+  fixture_t f;
+  f.parser.set_limits(parser_limits_t{.max_headers = 64, .max_trailers = 8});
+  ASSERT_EQ(f.feed(
+                "POST /u HTTP/1.1\r\n"
+                "Host: real.example\r\n"
+                "Transfer-Encoding: chunked\r\n"
+                "\r\n"),
+            parser_t::result_t::HeadersReady);
+  f.aggregate();
+
+  ASSERT_EQ(f.feed(
+                "0\r\n"
+                "Host: spoofed.example\r\n"
+                "Authorization: Bearer x\r\n"
+                "Cookie: session=stolen\r\n"
+                "Connection: close\r\n"
+                "Date: yesterday\r\n"
+                "Location: /elsewhere\r\n"
+                "Expect: 100-continue\r\n"
+                "Content-Type: text/evil\r\n"
+                "X-Kept: yes\r\n"
+                "\r\n"),
+            parser_t::result_t::MessageReady);
+
+  EXPECT_FALSE(f.parser.error());
+  EXPECT_EQ(f.headers.trailer_count(), 1u);
+  EXPECT_EQ(f.headers.trailer("x-kept"), "yes");
+  EXPECT_TRUE(f.headers.trailer(field_t::Host).empty());
+  EXPECT_TRUE(f.headers.trailer(field_t::Authorization).empty());
+  EXPECT_TRUE(f.headers.trailer(field_t::Cookie).empty());
+  EXPECT_TRUE(f.headers.trailer(field_t::Connection).empty());
+  EXPECT_TRUE(f.headers.trailer(field_t::Date).empty());
+  EXPECT_TRUE(f.headers.trailer(field_t::Location).empty());
+  EXPECT_TRUE(f.headers.trailer(field_t::Expect).empty());
+  EXPECT_TRUE(f.headers.trailer(field_t::ContentType).empty());
+  EXPECT_EQ(f.headers.get(field_t::Host), "real.example");
+}
+
+// The two framing headers do not even reach the deny-list: llhttp rejects them in a
+// trailer outright, which is the right answer — a message whose framing is contradicted
+// after the fact cannot be trusted, and the connection must not be reused.
+TEST(http_parser, framing_headers_in_a_trailer_are_fatal) {
+  for (std::string_view offender : {"Content-Length: 99", "Transfer-Encoding: identity"}) {
+    fixture_t f;
+    f.parser.set_limits(parser_limits_t{.max_headers = 64, .max_trailers = 8});
+    ASSERT_EQ(f.feed(
+                  "POST /u HTTP/1.1\r\n"
+                  "Host: h\r\n"
+                  "Transfer-Encoding: chunked\r\n"
+                  "\r\n"),
+              parser_t::result_t::HeadersReady);
+    f.aggregate();
+
+    EXPECT_EQ(f.feed("0\r\n" + std::string(offender) + "\r\n\r\n"),
+              parser_t::result_t::Error)
+        << offender;
+    EXPECT_TRUE(f.parser.error()) << offender;
+  }
+}
+
+// Trailers have their own budget, and going over it costs the extras, not the message.
+TEST(http_parser, trailers_have_their_own_budget) {
+  fixture_t f;
+  f.parser.set_limits(parser_limits_t{.max_headers = 2, .max_trailers = 2});
+  ASSERT_EQ(f.feed(
+                "POST /u HTTP/1.1\r\n"
+                "Host: h\r\n"
+                "Transfer-Encoding: chunked\r\n"
+                "\r\n"),
+            parser_t::result_t::HeadersReady);
+  f.aggregate();
+
+  // two real headers already, and four trailers offered
+  ASSERT_EQ(f.feed("0\r\nA: 1\r\nB: 2\r\nC: 3\r\nD: 4\r\n\r\n"),
+            parser_t::result_t::MessageReady);
+  EXPECT_FALSE(f.parser.error());
+  EXPECT_EQ(f.headers.trailer_count(), 2u);
+  EXPECT_EQ(f.headers.trailer("a"), "1");
+  EXPECT_EQ(f.headers.trailer("b"), "2");
+  EXPECT_TRUE(f.headers.trailer("c").empty());
+}
+
+// The payoff. A trailer straddling a rewind used to produce a header made of body
+// bytes; recorded trailers are copied out of the body region from their first run, so
+// the same split now yields the value the peer actually sent.
+TEST(http_parser, recorded_trailer_survives_a_rewound_window) {
+  fixture_t f(512);
+  f.parser.set_limits(parser_limits_t{.max_headers = 64, .max_trailers = 8});
+  ASSERT_EQ(f.feed(
+                "POST /u HTTP/1.1\r\n"
+                "Host: h\r\n"
+                "Transfer-Encoding: chunked\r\n"
+                "\r\n"),
+            parser_t::result_t::HeadersReady);
+  uint32_t window = f.parser.consumed_offset();
+  f.aggregate();
+  EXPECT_EQ(f.parser.resume(), parser_t::result_t::NeedMore);
+
+  f.head.rewind_to(window);
+  EXPECT_EQ(f.feed("3\r\nabc\r\n0\r\nX-Sum: SECRETVALUE"), parser_t::result_t::NeedMore);
+  // half a trailer is outstanding, but its bytes are already copied, so rewinding
+  // underneath it is safe — which is exactly what mid_header() reports
+  EXPECT_FALSE(f.parser.mid_header());
+
+  f.head.rewind_to(window);
+  ASSERT_EQ(f.feed("TAIL\r\n\r\n"), parser_t::result_t::MessageReady);
+
+  EXPECT_FALSE(f.parser.error());
+  EXPECT_EQ(f.body.view(), "abc");
+  EXPECT_EQ(f.headers.trailer("x-sum"), "SECRETVALUETAIL");
+  EXPECT_EQ(f.headers.get(field_t::Host), "h");
+}
+
+// A trailer name split across a rewind, too: names are copied from the first run when
+// they arrive in the trailer section, so the adjacency assumption never applies.
+TEST(http_parser, recorded_trailer_name_survives_a_rewound_window) {
+  fixture_t f(512);
+  f.parser.set_limits(parser_limits_t{.max_headers = 64, .max_trailers = 8});
+  ASSERT_EQ(f.feed(
+                "POST /u HTTP/1.1\r\n"
+                "Host: h\r\n"
+                "Transfer-Encoding: chunked\r\n"
+                "\r\n"),
+            parser_t::result_t::HeadersReady);
+  uint32_t window = f.parser.consumed_offset();
+  f.aggregate();
+  EXPECT_EQ(f.parser.resume(), parser_t::result_t::NeedMore);
+
+  f.head.rewind_to(window);
+  EXPECT_EQ(f.feed("3\r\nabc\r\n0\r\nX-Check"), parser_t::result_t::NeedMore);
+  f.head.rewind_to(window);
+  ASSERT_EQ(f.feed("sum: ok\r\n\r\n"), parser_t::result_t::MessageReady);
+
+  EXPECT_FALSE(f.parser.error());
+  EXPECT_EQ(f.headers.trailer("x-checksum"), "ok");
+}
+
+// A trailer too large for the spill buffer is dropped, not fatal: the message itself
+// is complete and correct.
+TEST(http_parser, an_oversized_trailer_is_dropped_not_fatal) {
+  fixture_t f;
+  f.parser.set_limits(parser_limits_t{.max_headers = 64, .max_trailers = 8});
+  ASSERT_EQ(f.feed(
+                "POST /u HTTP/1.1\r\n"
+                "Host: h\r\n"
+                "Transfer-Encoding: chunked\r\n"
+                "\r\n"),
+            parser_t::result_t::HeadersReady);
+  f.aggregate();
+
+  std::string huge(1024, 'v');   // spill holds 512
+  ASSERT_EQ(f.feed("3\r\nabc\r\n0\r\nX-Big: " + huge + "\r\nX-Small: ok\r\n\r\n"),
+            parser_t::result_t::MessageReady);
+  EXPECT_FALSE(f.parser.error());
+  EXPECT_EQ(f.body.view(), "abc");
+  EXPECT_TRUE(f.headers.trailer("x-big").empty());
+  // the next trailer starts clean
+  EXPECT_EQ(f.headers.trailer("x-small"), "ok");
 }

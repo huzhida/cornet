@@ -120,3 +120,7 @@ int main() {
     ctx.run();
 }
 ```
+
+## HTTP 模块配置
+
+`[cornet.http.server]` 与 `[cornet.http.client]` 两节由 HTTP 模块自己解析（`server_t` / `client_t` 构造时 `load(ctx.config())`），键列表分别见 [HTTP Server](http_server.md#配置) 与 [HTTP Client](http_client.md#配置)。两节的时间类键与这里的时间格式一致，同时也接受整数毫秒。

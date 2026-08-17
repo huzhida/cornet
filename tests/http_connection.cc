@@ -2,8 +2,8 @@
 
 #include <string>
 
-#include "cornet/http/message.h"
-#include "cornet/http/serializer.h"
+#include "cornet/http/server/message.h"
+#include "cornet/http/common/serializer.h"
 
 using namespace cornet;
 using namespace cornet::http;

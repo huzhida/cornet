@@ -446,6 +446,58 @@ struct context_t {
   };
 
   /**
+   * @brief RAII token that counts as user work for as long as it lives.
+   *
+   * A coroutine parked on something that is not io at all — a connection pool slot, a
+   * queue, another coroutine's completion — is invisible to the tracker: there is no
+   * SQE and no ready handle to count. Without a token the run loop can decide the
+   * application has finished and return while that coroutine is still parked, and a
+   * graceful drain can start early for the same reason.
+   *
+   * Owner thread only, like everything else that touches the tracker. Nested so it can
+   * reach tracker_ without widening the public API.
+   */
+  class work_token_t {
+   public:
+    work_token_t() = default;
+
+    explicit work_token_t(context_t& ctx) : tracker_(&ctx.tracker_) {
+      tracker_->user_io_add();
+    }
+
+    ~work_token_t() { release(); }
+
+    work_token_t(const work_token_t&) = delete;
+    work_token_t& operator=(const work_token_t&) = delete;
+
+    work_token_t(work_token_t&& o) noexcept : tracker_(o.tracker_) { o.tracker_ = nullptr; }
+
+    work_token_t& operator=(work_token_t&& o) noexcept {
+      if (this != &o) {
+        release();
+        tracker_ = o.tracker_;
+        o.tracker_ = nullptr;
+      }
+      return *this;
+    }
+
+    /**
+     * @brief stop counting. Idempotent.
+     */
+    void release() {
+      if (tracker_) {
+        tracker_->user_io_remove();
+        tracker_ = nullptr;
+      }
+    }
+
+    CORNET_NODISCARD bool held() const { return tracker_ != nullptr; }
+
+   private:
+    task_tracker_t* tracker_{nullptr};
+  };
+
+  /**
    * @brief cancel awaiter, used for cancel io_uring async tasks.
    * Pure mechanism: work ownership belongs to whoever awaits it, so framework
    * callers must spell as_system(). Defaults to user work like any other op.

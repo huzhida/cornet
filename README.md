@@ -19,7 +19,9 @@ Cornet 是一个基于 C++20 协程和 Linux io_uring 的高性能异步网络�
 - **线程池 Executor** — `ctx.async()` 将阻塞操作卸载到工作线程
 - **信号处理** — 基于 signalfd + io_uring 的异步信号分发
 - **优雅关闭** — drain → timeout → cancel 三阶段关闭流程
-- **零额外依赖** — 核心仅依赖 liburing，日志/配置可选
+- **HTTP/1.1 Server** — 路由（精确/参数/通配）、同步与异步 handler、filter、keep-alive 与 pipelining、body 聚合或流式、chunked 响应、时间轮超时、优雅 drain
+- **HTTP/1.1 Client** — 连接池、DNS 缓存、超时分层、幂等重试、重定向、流式上传下载
+- **零额外依赖** — 核心仅依赖 liburing，日志/配置可选（HTTP 模块私有链接 llhttp）
 
 ## 快速开始
 
@@ -87,6 +89,32 @@ int main() {
     ctx.run();
 }
 ```
+
+### HTTP Server
+
+```cpp
+#include <cornet/http_server.h>
+
+using namespace cornet;
+
+int main() {
+    context_t ctx;
+    http::server_t server(ctx);
+
+    // 不需要挂起的 handler 就是普通函数：无协程帧、不经过调度器
+    server.get("/hello", [](auto&, auto& resp) { resp.text("hello cornet"); });
+    server.get("/users/:id", [](http::request_t& req, http::response_t& resp) {
+        resp.json(std::string(R"({"id":")") + std::string(req.param("id")) + R"("})");
+    });
+
+    if (auto ok = server.listen("0.0.0.0", 8080); !ok) return 1;
+    ctx.on_signal({SIGINT, SIGTERM}, [&server](int) { server.drain(); });
+    ctx.spawn(server.serve());
+    ctx.run();
+}
+```
+
+详见 [HTTP Server](docs/http_server.md)、[HTTP Client](docs/http_client.md)。
 
 ### 异步 DNS + 超时连接
 
@@ -232,12 +260,20 @@ cornet/
 │   │   └── scope.h        # 结构化并发 scope
 │   ├── net/
 │   │   └── socket.h       # TCP/UDP Socket 抽象
+│   ├── http/
+│   │   ├── common/        # 协议常量、缓冲池、头表、解析器、序列化、时间轮、URL
+│   │   ├── server/        # message.h router.h connection.h server.h
+│   │   └── client/        # message.h connection.h pool.h client.h
+│   ├── http.h             # HTTP 全部（server + client）
+│   ├── http_server.h      # 只要 server
+│   ├── http_client.h      # 只要 client
 │   └── utils/
 │       ├── config.h       # TOML 配置
 │       └── logging.h      # 日志初始化
 ├── src/                   # 实现文件
 ├── tests/                 # 单元测试
 ├── bench/                 # 性能基准测试
+├── examples/              # 可运行示例（http_hello / http_client）
 ├── conf/                  # 配置文件
 └── docs/                  # 详细文档
 ```
@@ -253,6 +289,8 @@ cornet/
 - [线程池 Executor](docs/executor.md)
 - [配置参考](docs/configuration.md)
 - [多线程 Runtime](docs/runtime.md)
+- [HTTP Server](docs/http_server.md)
+- [HTTP Client](docs/http_client.md)
 
 ## 性能
 
@@ -264,6 +302,14 @@ cornet/
 | 中等消息 (128conn, 1KB) | 122K RPS | 107K RPS |
 | 大消息 (32conn, 64KB) | 35K RPS | 35K RPS |
 | 极限并发 (2048conn, 128B) | 120K RPS | 109K RPS |
+
+同一套 echo 负载也有 HTTP/1.1 版本，用来量化协议本身的开销：`Cornet`（裸 send/recv）、`Cornet/HTTPsrv`（`http::server_t` + 裸客户端，只含服务端开销）、`Cornet/HTTP`（server + `client_t` 完整栈）三行同口径对比，跑完会打印 RPS 保留率与每次交换的协议字节数。
+
+```bash
+cmake --preset release -DCORNET_ENABLE_BENCH=ON
+cmake --build --preset release --target bench
+./cmake-build-release/bench
+```
 
 ## License
 
