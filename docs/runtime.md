@@ -89,13 +89,20 @@ rt.spawn_async([] {
 ### 关闭方式
 
 ```cpp
-// 优雅关闭：等待现有任务完成，超时后取消 + join（阻塞）
+// 只发起优雅关闭，立即返回（调用方自己决定何时 join）
 rt.shutdown(std::chrono::seconds(5));
 
-// 强制停止 + join（阻塞）
+// 优雅关闭 + join，等价于 shutdown(timeout) + join()
+rt.shutdown_and_join(std::chrono::seconds(5));
+
+// 强制停止（不等）
 rt.stop();
-rt.join();
+
+// 强制停止 + join
+rt.stop_and_join();
 ```
+
+`shutdown()` / `stop()` 都是**非阻塞**的，只把关闭意图发给每个 context；要等线程真正退出就用 `_and_join` 版本，或自己在后面接 `rt.join()`。信号处理回调里应该用非阻塞的那两个。
 
 析构函数自动执行 `stop()` + `join()`，确保无资源泄漏。
 
@@ -233,8 +240,10 @@ ctx.set_keep_alive(false);  // 恢复正常：无任务时自动退出
 |------|------|
 | `runtime_t rt(config, n_threads)` | 创建 runtime |
 | `rt.start(init_fn, keepalive)` | 启动所有 worker 线程 |
-| `rt.shutdown(timeout)` | 优雅关闭 + join（阻塞） |
-| `rt.stop()` | 强制停止 |
+| `rt.shutdown(timeout)` | 发起优雅关闭（非阻塞） |
+| `rt.shutdown_and_join(timeout)` | 优雅关闭 + join（阻塞） |
+| `rt.stop()` | 强制停止（非阻塞） |
+| `rt.stop_and_join()` | 强制停止 + join（阻塞） |
 | `rt.join()` | 等待所有线程完成 |
 | `rt.size()` | 线程数 |
 | `rt.context_at(i)` | 获取第 i 个线程的 context |

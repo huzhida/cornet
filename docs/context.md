@@ -139,6 +139,21 @@ ctx.is_running();      // true 如果仍在 Running 状态
 ctx.is_terminated();   // true 如果 run loop 已退出
 ```
 
+### 粗粒度时钟
+
+run loop 每轮迭代刷新一次内部的 `clock_cache_t`，所以「大概现在几点」是一次内存读，不是 `clock_gettime`：
+
+```cpp
+ctx.coarse_now_ns();     // 粗粒度单调纳秒，适合算 deadline
+ctx.coarse_now();        // 同上，chrono duration
+ctx.http_date();         // 预渲染的 IMF-fixdate，如 "Sun, 06 Nov 1994 08:49:37 GMT"
+ctx.http_date_len();     // 恒为 29
+```
+
+适用的是每请求都要问一次时间、又容忍一轮迭代误差的场合：秒级超时判断、HTTP `Date` 头。`clock_gettime` 走 vDSO 不是系统调用，但百万 QPS 下它依然是纯浪费。
+
+**不要**用它做延迟测量——精度只到一轮事件循环；那种场合用 `std::chrono::steady_clock`。日期串只在墙钟秒数变化时重新渲染，格式手写（`strftime` 要查 locale，对这个固定格式贵一个数量级）。
+
 ### 指标监控
 
 ```cpp

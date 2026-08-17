@@ -1,11 +1,13 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <string>
 #include <thread>
 
-#include "cornet/http/server.h"
+#include "cornet/concurrency/combinators.h"
+#include "cornet/http/server/server.h"
 #include "cornet/net/socket.h"
 #include "cornet/scheduling/context.h"
 
@@ -723,4 +725,201 @@ TEST(http_e2e, method_not_allowed) {
 
   EXPECT_TRUE(response_contains_status(raw_response, "405"))
       << "expected 405 in response, got: " << raw_response;
+}
+
+// =========================================================================
+//  TEST: Aggregated body far larger than the receive buffer
+//
+//  The receive buffer holds the header section *and* is the window body bytes
+//  land in. Its size is max_header_bytes, so a body has to be read by rewinding
+//  the region behind the headers and refilling it; without that, anything bigger
+//  than the buffer fails as 431.
+// =========================================================================
+
+TEST(http_e2e, aggregated_body_larger_than_receive_buffer) {
+  std::string response_body;
+  uint16_t port = 19013;
+  const size_t kBody = 300u << 10;   // 300K into a 16K receive buffer
+
+  run_e2e_test(port,
+    [](server_t& server) {
+      auto& route = server.post("/upload", [](request_t& req, response_t& resp) {
+        // The headers must still be readable after the body has streamed past:
+        // their offsets live below the rewind mark.
+        auto trace = req.headers().get("x-trace");
+        auto& text = resp.pin(std::string(trace) + ":" + std::to_string(req.body().size()));
+        resp.body_static(text);
+      });
+      // Pinned rather than left to Auto: Auto streams anything above
+      // aggregate_threshold (256K by default), and this test is about the aggregate
+      // path — a body that has to be read by rewinding the window, not one the
+      // handler pulls itself.
+      route.body = body_policy_t::Aggregate;
+    },
+    [&response_body, kBody](context_t& ctx, uint16_t port) {
+      auto client = [&]() -> coro_t<void> {
+        tcp::v4::socket_t sock;
+        co_await sock.connect(ctx, "127.0.0.1", port);
+
+        std::string request =
+            "POST /upload HTTP/1.1\r\n"
+            "Host: 127.0.0.1\r\n"
+            "X-Trace: abc123\r\n"
+            "Content-Length: " + std::to_string(kBody) + "\r\n"
+            "Connection: close\r\n"
+            "\r\n";
+        co_await sock.send(ctx, request.data(), request.size());
+
+        // Deliberately in pieces, so the body spans many reads.
+        std::string chunk(32u << 10, 'x');
+        size_t sent = 0;
+        while (sent < kBody) {
+          size_t n = std::min(chunk.size(), kBody - sent);
+          auto ok = co_await sock.send(ctx, chunk.data(), n);
+          if (!ok) break;
+          sent += size_t(*ok);
+        }
+
+        char buf[4096];
+        std::string raw;
+        while (true) {
+          auto n = co_await sock.recv(ctx, buf, sizeof(buf));
+          if (!n || *n == 0) break;
+          raw.append(buf, *n);
+        }
+        response_body = extract_body(raw);
+      };
+      ctx.spawn(client());
+      ctx.run();
+    });
+
+  EXPECT_EQ(response_body, "abc123:" + std::to_string(kBody));
+}
+
+// =========================================================================
+//  TEST: Body arriving after the headers, in separate reads
+//
+//  A round can end mid-body — the body simply has not all arrived yet. Reclaiming
+//  the receive buffer at that point would move the bytes every header view of the
+//  request in flight points at.
+// =========================================================================
+
+TEST(http_e2e, body_split_across_reads_keeps_headers_intact) {
+  std::string response_body;
+  uint16_t port = 19014;
+
+  run_e2e_test(port,
+    [](server_t& server) {
+      server.post("/echo", [](request_t& req, response_t& resp) {
+        auto trace = req.headers().get("x-trace");
+        auto host = req.headers().get(field_t::Host);
+        auto& text = resp.pin(std::string(host) + "|" + std::string(trace) + "|" +
+                              std::string(req.body()) + "|" + std::string(req.path()));
+        resp.body_static(text);
+      });
+    },
+    [&response_body](context_t& ctx, uint16_t port) {
+      auto client = [&]() -> coro_t<void> {
+        tcp::v4::socket_t sock;
+        co_await sock.connect(ctx, "127.0.0.1", port);
+
+        std::string head =
+            "POST /echo HTTP/1.1\r\n"
+            "Host: 127.0.0.1\r\n"
+            "X-Trace: keep-me\r\n"
+            "Content-Length: 11\r\n"
+            "Connection: close\r\n"
+            "\r\n";
+        co_await sock.send(ctx, head.data(), head.size());
+
+        // The server sees the headers with no body at all, then two more reads.
+        co_await sleep(ctx, std::chrono::milliseconds(30));
+        co_await sock.send(ctx, "hello", 5);
+        co_await sleep(ctx, std::chrono::milliseconds(30));
+        co_await sock.send(ctx, " world", 6);
+
+        char buf[4096];
+        std::string raw;
+        while (true) {
+          auto n = co_await sock.recv(ctx, buf, sizeof(buf));
+          if (!n || *n == 0) break;
+          raw.append(buf, *n);
+        }
+        response_body = extract_body(raw);
+      };
+      ctx.spawn(client());
+      ctx.run();
+    });
+
+  EXPECT_EQ(response_body, "127.0.0.1|keep-me|hello world|/echo");
+}
+
+// =========================================================================
+//  TEST: Streamed body far larger than the receive buffer
+// =========================================================================
+
+TEST(http_e2e, streamed_body_larger_than_receive_buffer) {
+  std::string response_body;
+  uint16_t port = 19015;
+  const size_t kBody = 300u << 10;
+
+  run_e2e_test(port,
+    [](server_t& server) {
+      auto& route = server.route(method_t::Post, "/stream-big",
+        [](request_t& req, response_t& resp) -> coro_t<void> {
+          auto* reader = req.stream();
+          uint64_t total = 0;
+          while (!reader->complete()) {
+            auto chunk = co_await reader->read();
+            if (!chunk) {
+              resp.status(status_t::BadRequest);
+              co_return;
+            }
+            if (chunk->empty()) break;
+            total += chunk->size();
+          }
+          // still readable once the whole body has gone past
+          auto trace = req.headers().get("x-trace");
+          auto& text = resp.pin(std::string(trace) + ":" + std::to_string(total));
+          resp.body_static(text);
+        });
+      route.body = body_policy_t::Stream;
+    },
+    [&response_body, kBody](context_t& ctx, uint16_t port) {
+      auto client = [&]() -> coro_t<void> {
+        tcp::v4::socket_t sock;
+        co_await sock.connect(ctx, "127.0.0.1", port);
+
+        std::string request =
+            "POST /stream-big HTTP/1.1\r\n"
+            "Host: 127.0.0.1\r\n"
+            "X-Trace: streamed\r\n"
+            "Content-Length: " + std::to_string(kBody) + "\r\n"
+            "Connection: close\r\n"
+            "\r\n";
+        co_await sock.send(ctx, request.data(), request.size());
+
+        std::string chunk(16u << 10, 'y');
+        size_t sent = 0;
+        while (sent < kBody) {
+          size_t n = std::min(chunk.size(), kBody - sent);
+          auto ok = co_await sock.send(ctx, chunk.data(), n);
+          if (!ok) break;
+          sent += size_t(*ok);
+        }
+
+        char buf[4096];
+        std::string raw;
+        while (true) {
+          auto n = co_await sock.recv(ctx, buf, sizeof(buf));
+          if (!n || *n == 0) break;
+          raw.append(buf, *n);
+        }
+        response_body = extract_body(raw);
+      };
+      ctx.spawn(client());
+      ctx.run();
+    });
+
+  EXPECT_EQ(response_body, "streamed:" + std::to_string(kBody));
 }

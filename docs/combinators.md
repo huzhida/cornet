@@ -516,6 +516,26 @@ if (!result) {
 }
 ```
 
+### 直接持有 scope_t
+
+`task_scope()` 是「body 跑完就 join」这一种排布的封装。当 scope 的存活期不等于某个函数体时——比如一个 accept 循环边接边 spawn，直到关闭时才等所有连接结束——就直接建 `scope_t`，再用 `scope_join_awaiter` 显式 join：
+
+```cpp
+auto scope = std::make_unique<scope_t>(ctx);        // 或 scope_t{ctx, parent_canceler}
+
+while (running) {
+    auto client = co_await listener.accept(ctx);
+    if (client) scope->spawn(handle_client(std::move(*client), ctx));
+}
+
+auto joined = co_await scope_join_awaiter{*scope};  // 等所有子任务结束
+if (!joined) { /* 某个子任务抛过异常 */ }
+```
+
+`scope->cancel()` 取消所有子任务，`scope->error()` 取第一个错误，`scope->canceler()` 交给 `with_cancel()` 用。`http::server_t` 的优雅关闭就是这个形状：正是「等每条连接真正写完」这一保证让 drain 不会截断响应。
+
+join 之后不要再 spawn。
+
 ### 注意事项
 
 - **避免临时 lambda 陷阱**：使用 `scope.spawn(lambda)` 而非 `scope.spawn(lambda())`

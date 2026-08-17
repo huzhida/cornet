@@ -57,23 +57,38 @@ target_link_options(
 # 且 llhttp.h 不出现在任何公开头文件中（parser_t 用不透明状态数组隔离依赖）
 option(CORNET_WITH_HTTP "Build the cornet http module (requires llhttp)" ON)
 # Phase tracing for the request path. Logs at INFO so it is visible without
-# rebuilding spdlog's compile-time level; see include/cornet/http/trace.h.
+# rebuilding spdlog's compile-time level; see include/cornet/http/common/trace.h.
 option(CORNET_HTTP_TRACE "Log every http phase transition (accept/recv/parse/route/flush)" OFF)
+# The client shares the module's common layer and brings no dependency of its own,
+# so it lives in the same target; the switch only exists to leave it out of a
+# server-only build.
+option(CORNET_HTTP_CLIENT "Build the http client submodule" ON)
 if(CORNET_WITH_HTTP)
     find_package(llhttp CONFIG REQUIRED)
 
+    # Sources mirror include/cornet/http: common/ is shared by both directions,
+    # server/ and client/ hold what only one of them needs.
     add_library(cornet_http STATIC
-        src/http/common.cc
-        src/http/buffer.cc
-        src/http/headers.cc
-        src/http/parser.cc
-        src/http/serializer.cc
-        src/http/message.cc
-        src/http/router.cc
-        src/http/timer_wheel.cc
-        src/http/connection.cc
-        src/http/server.cc
+        src/http/common/protocol.cc
+        src/http/common/buffer.cc
+        src/http/common/headers.cc
+        src/http/common/parser.cc
+        src/http/common/serializer.cc
+        src/http/common/timer_wheel.cc
+        src/http/common/url.cc
+        src/http/server/message.cc
+        src/http/server/router.cc
+        src/http/server/connection.cc
+        src/http/server/server.cc
     )
+    if(CORNET_HTTP_CLIENT)
+        target_sources(cornet_http PRIVATE
+            src/http/client/message.cc
+            src/http/client/connection.cc
+            src/http/client/pool.cc
+            src/http/client/client.cc
+        )
+    endif()
     add_library(cornet::http ALIAS cornet_http)
     target_link_libraries(cornet_http PUBLIC cornet PRIVATE llhttp::llhttp_static)
     if(CORNET_HTTP_TRACE)
@@ -91,6 +106,13 @@ if(CORNET_WITH_HTTP)
     # server" claim, so a regression in the public API breaks the build.
     add_executable(http-hello examples/http_hello.cc)
     target_link_libraries(http-hello PRIVATE cornet_http)
+
+    if(CORNET_HTTP_CLIENT)
+        # Built by default for the same reason as http-hello: it is the executable form
+        # of the client's public API, so a regression there breaks the build.
+        add_executable(http-client examples/http_client.cc)
+        target_link_libraries(http-client PRIVATE cornet_http)
+    endif()
 endif()
 
 # ─── 主程序 ───
@@ -110,6 +132,13 @@ if(CORNET_ENABLE_BENCH)
         asio::asio
         concurrentqueue::concurrentqueue
     )
+
+    # The HTTP echo rows only exist when the http module is built; without them the
+    # bench still runs, it just has nothing to price the protocol against.
+    if(CORNET_WITH_HTTP)
+        target_link_libraries(bench PRIVATE cornet_http)
+        target_compile_definitions(bench PRIVATE CORNET_BENCH_HTTP)
+    endif()
 endif()
 
 # ─── 测试 ───
@@ -144,7 +173,17 @@ if(CORNET_ENABLE_TESTS)
             tests/http_serializer.cc
             tests/http_connection.cc
             tests/http_e2e.cc
+            tests/http_url.cc
         )
+        if(CORNET_HTTP_CLIENT)
+            target_sources(unit PRIVATE
+                tests/http_client_parser.cc
+                tests/http_client_message.cc
+                tests/http_client_conn.cc
+                tests/http_client_pool.cc
+                tests/http_client_e2e.cc
+            )
+        endif()
         target_link_libraries(unit PRIVATE cornet_http)
     endif()
     gtest_discover_tests(unit)
