@@ -26,12 +26,15 @@ namespace cornet {
 
 namespace detail {
 /**
- * @brief helper to create a wrapper coroutine from a callable on the calling thread.
- * The callable (and its captures) are moved into the coroutine frame, preventing
- * lifetime issues with dangling references to local state (e.g. dangling this).
+ * @brief helper to create a wrapper coroutine from a coroutine factory.
+ * The factory (and its captures) is a by-value parameter, so it lives in this
+ * coroutine's frame and stays alive for the whole run of the coroutine it produces.
+ * That is what makes a temporary lambda safe to pass: a lambda coroutine's frame
+ * stores only the closure pointer, so invoking the factory at the call site instead
+ * would leave the closure dangling at the first suspension point.
  */
 template<typename F>
-coro_t<void> make_remote_coro(F f) {
+coro_t<void> make_wrapper_coro(F f) {
   co_await f();
 }
 } // namespace detail
@@ -72,7 +75,11 @@ struct context_t {
    * @param task task-like object
    */
   template <typename T>
-  CORNET_MAYBE_UNUSED inline void spawn(T&& task) {
+  CORNET_MAYBE_UNUSED inline void spawn(T&& task)
+    requires std::is_same_v<std::decay_t<T>, std::coroutine_handle<>>
+          || std::is_base_of_v<task_t, std::decay_t<T>>
+          || std::is_pointer_v<std::decay_t<T>>
+  {
     using R = std::decay_t<T>;
     if constexpr (std::is_pointer_v<R>) {
       static_assert(std::is_base_of_v<task_t, std::remove_pointer_t<R> >,
@@ -88,6 +95,29 @@ struct context_t {
       }
       scheduler_.schedule(task.handle);
     }
+  }
+
+  /**
+   * @brief spawn a coroutine factory into the scheduler's ready queue.
+   * Must be called from this context's owner thread — use spawn_remote() otherwise.
+   * The factory is moved into a wrapper coroutine and only invoked there, which keeps
+   * a temporary lambda alive for the whole run of the coroutine it produces. Prefer
+   * this over spawn(factory()): the latter lets the closure die at the end of the
+   * full expression, and a lambda coroutine's frame holds only the closure pointer.
+   * @tparam F callable type that returns a task-like object
+   * @param fn coroutine factory to invoke
+   */
+  template <typename F>
+  CORNET_MAYBE_UNUSED inline void spawn(F&& fn)
+    requires (!(std::is_same_v<std::decay_t<F>, std::coroutine_handle<>>
+              || std::is_base_of_v<task_t, std::decay_t<F>>
+              || std::is_pointer_v<std::decay_t<F>>))
+  {
+    auto wrapper = detail::make_wrapper_coro([f = std::decay_t<F>(std::forward<F>(fn))]() mutable {
+      return f();
+    });
+    wrapper.detach();
+    scheduler_.schedule(wrapper.handle);
   }
 
   /**
@@ -141,7 +171,7 @@ struct context_t {
               || std::is_base_of_v<task_t, std::decay_t<F>>
               || std::is_pointer_v<std::decay_t<F>>))
   {
-    auto wrapper = detail::make_remote_coro([f = std::decay_t<F>(std::forward<F>(fn))]() mutable {
+    auto wrapper = detail::make_wrapper_coro([f = std::decay_t<F>(std::forward<F>(fn))]() mutable {
       return f();
     });
     wrapper.detach();
@@ -164,7 +194,7 @@ struct context_t {
   CORNET_MAYBE_UNUSED inline void spawn_remote(F&& fn, Args&&... args)
     requires (sizeof...(Args) > 0)
   {
-    auto wrapper = detail::make_remote_coro([f = std::decay_t<F>(std::forward<F>(fn)),
+    auto wrapper = detail::make_wrapper_coro([f = std::decay_t<F>(std::forward<F>(fn)),
                                                ...as = std::decay_t<Args>(std::forward<Args>(args))]() mutable {
       return f(std::move(as)...);
     });

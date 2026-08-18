@@ -3,6 +3,7 @@
 #include "cornet/http/common/trace.h"
 
 #include <csignal>
+#include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -53,6 +54,12 @@ expected<void> server_t::listen(std::string_view address, uint16_t port) {
   if (opt_.reuse_port) sock->port_reuse(true);
   if (auto ok = sock->listen(address, port); !ok) {
     return ok;
+  }
+  // port 0 lets the kernel pick, so read back what it picked
+  sockaddr_in bound{};
+  socklen_t   len = sizeof(bound);
+  if (sock->getsockname(reinterpret_cast<sockaddr*>(&bound), &len) == 0) {
+    opt_.port = ntohs(bound.sin_port);
   }
   listener_ = std::move(sock);
   CORNET_HTTP_TRACE_LOG("listen: {}:{} fd={}", opt_.address, opt_.port, listener_->native_fd());

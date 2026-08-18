@@ -540,9 +540,9 @@ TEST(http_client_conn, bytes_after_a_complete_response_poison_the_connection) {
 }
 
 TEST(http_client_conn, deadline_stops_a_silent_peer) {
-  origin_t origin([](int fd, int) {
+  origin_t origin([](int fd, int, hold_gate_t& gate) {
     read_until(fd, "\r\n\r\n");
-    std::this_thread::sleep_for(400ms);   // never answers in time
+    gate.wait();   // never answers, so the client's deadline is what ends this
   });
 
   conn_env_t env;

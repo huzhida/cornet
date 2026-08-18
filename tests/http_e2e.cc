@@ -110,25 +110,34 @@ struct e2e_fixture_t {
  * The client_fn is a coroutine factory that stores its results in captured
  * variables. After the client finishes, the server is drained so the
  * context can wind down, then the thread is joined.
+ *
+ * The listener takes whatever port the kernel offers and client_fn is told which one.
+ * A fixed port would be flaky: ip_local_port_range covers the range these tests used
+ * to hardcode, so any outbound connection in the same run can be holding it.
  */
-void run_e2e_test(uint16_t port,
-                  std::function<void(server_t&)> setup,
+void run_e2e_test(std::function<void(server_t&)> setup,
                   std::function<void(context_t&, uint16_t)> client_fn) {
   // Server context on a background thread
   context_t server_ctx;
+  std::atomic<uint16_t> server_port{0};
   std::atomic<bool> server_ready{false};
+  std::atomic<bool> server_failed{false};
+  std::string listen_error;
 
   std::thread server_thread([&]() {
     server_t server(server_ctx, server_options_t{
-      .port = port,
+      .port = 0,
       .address = "127.0.0.1",
     });
     setup(server);
 
     if (auto ok = server.listen(); !ok) {
-      SPDLOG_ERROR("http test: listen failed: {}", ok.error().message());
+      // published before the flag, so the waiter below sees a complete message
+      listen_error = ok.error().message();
+      server_failed.store(true, std::memory_order_release);
       return;
     }
+    server_port.store(server.options().port, std::memory_order_relaxed);
 
     // serve() must be spawned before run() so the accept loop is registered
     // with the context; then run() will keep the context alive.
@@ -137,20 +146,25 @@ void run_e2e_test(uint16_t port,
     server_ctx.run();
   });
 
-  // Wait until the server is actually accepting (serve() has started)
-  while (!server_ready.load(std::memory_order_acquire)) {
+  // Wait until the server is accepting — or gave up, which must also end this loop
+  while (!server_ready.load(std::memory_order_acquire)
+         && !server_failed.load(std::memory_order_acquire)) {
     std::this_thread::yield();
   }
 
-  // Client context on the calling thread
-  context_t client_ctx;
-  client_fn(client_ctx, port);
-  client_ctx.run();
+  if (!server_failed.load(std::memory_order_acquire)) {
+    // Client context on the calling thread
+    context_t client_ctx;
+    client_fn(client_ctx, server_port.load(std::memory_order_relaxed));
+    client_ctx.run();
 
-  // Stop server: drain closes the listener, which ends accept_loop, which
-  // lets user_idle() become true and ctx.run() returns.
-  server_ctx.stop();
+    // Stop server: drain closes the listener, which ends accept_loop, which
+    // lets user_idle() become true and ctx.run() returns.
+    server_ctx.stop();
+  }
   server_thread.join();
+  ASSERT_FALSE(server_failed.load(std::memory_order_relaxed))
+      << "listen failed: " << listen_error;
 }
 
 } // namespace
@@ -162,9 +176,8 @@ void run_e2e_test(uint16_t port,
 
 TEST(http_e2e, basic_get) {
   std::string response_body;
-  uint16_t port = 19001;
 
-  run_e2e_test(port,
+  run_e2e_test(
     [&response_body](server_t& server) {
       server.get("/hello", [](auto&, response_t& resp) {
         resp.text("hello cornet");
@@ -206,9 +219,8 @@ TEST(http_e2e, basic_get) {
 
 TEST(http_e2e, post_with_body) {
   std::string response_body;
-  uint16_t port = 19002;
 
-  run_e2e_test(port,
+  run_e2e_test(
     [&response_body](server_t& server) {
       server.post("/echo", [](request_t& req, response_t& resp) {
         resp.text(std::string(req.body()));
@@ -252,9 +264,8 @@ TEST(http_e2e, post_with_body) {
 
 TEST(http_e2e, streaming_body_read) {
   std::string response_body;
-  uint16_t port = 19003;
 
-  run_e2e_test(port,
+  run_e2e_test(
     [&response_body](server_t& server) {
       auto& stream_route = server.route(method_t::Post, "/stream",
         [](request_t& req, response_t& resp) -> coro_t<void> {
@@ -314,9 +325,8 @@ TEST(http_e2e, streaming_body_read) {
 
 TEST(http_e2e, streaming_body_write) {
   std::string response_body;
-  uint16_t port = 19004;
 
-  run_e2e_test(port,
+  run_e2e_test(
     [&response_body](server_t& server) {
       server.get("/stream-out", [](request_t&, response_t& resp) -> coro_t<void> {
         auto w = resp.chunked();
@@ -362,9 +372,8 @@ TEST(http_e2e, streaming_body_write) {
 
 TEST(http_e2e, not_found) {
   std::string raw_response;
-  uint16_t port = 19005;
 
-  run_e2e_test(port,
+  run_e2e_test(
     [](server_t& server) {
       server.get("/exists", [](auto&, response_t& resp) {
         resp.text("found");
@@ -405,9 +414,8 @@ TEST(http_e2e, not_found) {
 
 TEST(http_e2e, keep_alive_pipelined) {
   std::string raw_response;
-  uint16_t port = 19006;
 
-  run_e2e_test(port,
+  run_e2e_test(
     [](server_t& server) {
       server.get("/ping", [](auto&, response_t& resp) {
         resp.text("pong");
@@ -456,9 +464,8 @@ TEST(http_e2e, keep_alive_pipelined) {
 
 TEST(http_e2e, path_parameters) {
   std::string response_body;
-  uint16_t port = 19007;
 
-  run_e2e_test(port,
+  run_e2e_test(
     [&response_body](server_t& server) {
       server.get("/users/:id", [](request_t& req, response_t& resp) {
         resp.text("user " + std::string(req.param("id")));
@@ -500,9 +507,8 @@ TEST(http_e2e, path_parameters) {
 
 TEST(http_e2e, query_string) {
   std::string response_body;
-  uint16_t port = 19008;
 
-  run_e2e_test(port,
+  run_e2e_test(
     [&response_body](server_t& server) {
       server.get("/search", [](request_t& req, response_t& resp) {
         auto q = req.query().get("q");
@@ -545,9 +551,8 @@ TEST(http_e2e, query_string) {
 
 TEST(http_e2e, content_length_matches) {
   std::string raw_response;
-  uint16_t port = 19009;
 
-  run_e2e_test(port,
+  run_e2e_test(
     [&raw_response](server_t& server) {
       server.get("/large", [](auto&, response_t& resp) {
         std::string body(1024, 'A');
@@ -591,9 +596,8 @@ TEST(http_e2e, content_length_matches) {
 
 TEST(http_e2e, head_request_no_body) {
   std::string raw_response;
-  uint16_t port = 19010;
 
-  run_e2e_test(port,
+  run_e2e_test(
     [&raw_response](server_t& server) {
       server.head("/data", [](auto&, response_t& resp) {
         resp.body_static("this is the body that should not appear");
@@ -634,9 +638,8 @@ TEST(http_e2e, head_request_no_body) {
 
 TEST(http_e2e, streaming_write_many_chunks) {
   std::string response_body;
-  uint16_t port = 19011;
 
-  run_e2e_test(port,
+  run_e2e_test(
     [&response_body](server_t& server) {
       server.get("/stream-many", [](request_t&, response_t& resp) -> coro_t<void> {
         auto w = resp.chunked();
@@ -684,9 +687,8 @@ TEST(http_e2e, streaming_write_many_chunks) {
 
 TEST(http_e2e, method_not_allowed) {
   std::string raw_response;
-  uint16_t port = 19012;
 
-  run_e2e_test(port,
+  run_e2e_test(
     [&raw_response](server_t& server) {
       // Register both GET and PUT so the trie has a node with multiple
       // methods. POST to the PUT-only parameterised route triggers 405.
@@ -738,10 +740,9 @@ TEST(http_e2e, method_not_allowed) {
 
 TEST(http_e2e, aggregated_body_larger_than_receive_buffer) {
   std::string response_body;
-  uint16_t port = 19013;
   const size_t kBody = 300u << 10;   // 300K into a 16K receive buffer
 
-  run_e2e_test(port,
+  run_e2e_test(
     [](server_t& server) {
       auto& route = server.post("/upload", [](request_t& req, response_t& resp) {
         // The headers must still be readable after the body has streamed past:
@@ -806,9 +807,8 @@ TEST(http_e2e, aggregated_body_larger_than_receive_buffer) {
 
 TEST(http_e2e, body_split_across_reads_keeps_headers_intact) {
   std::string response_body;
-  uint16_t port = 19014;
 
-  run_e2e_test(port,
+  run_e2e_test(
     [](server_t& server) {
       server.post("/echo", [](request_t& req, response_t& resp) {
         auto trace = req.headers().get("x-trace");
@@ -860,10 +860,9 @@ TEST(http_e2e, body_split_across_reads_keeps_headers_intact) {
 
 TEST(http_e2e, streamed_body_larger_than_receive_buffer) {
   std::string response_body;
-  uint16_t port = 19015;
   const size_t kBody = 300u << 10;
 
-  run_e2e_test(port,
+  run_e2e_test(
     [](server_t& server) {
       auto& route = server.route(method_t::Post, "/stream-big",
         [](request_t& req, response_t& resp) -> coro_t<void> {

@@ -9,7 +9,9 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <condition_variable>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -82,17 +84,52 @@ inline std::string read_with_body(int fd, size_t len) {
 }
 
 /**
+ * @brief lets a script hold a connection open for exactly as long as the test needs.
+ *
+ * The alternative is sleeping in the script, which costs the full duration every time:
+ * the origin's destructor joins the script thread, so a script still sleeping keeps the
+ * test alive long after the client side has finished. A script that waits here is
+ * released by ~origin_t() instead, just before the join.
+ */
+class hold_gate_t {
+ public:
+  void wait() {
+    std::unique_lock<std::mutex> lk(mtx_);
+    cv_.wait(lk, [this] { return released_; });
+  }
+
+  void release() {
+    {
+      std::lock_guard<std::mutex> lk(mtx_);
+      released_ = true;
+    }
+    cv_.notify_all();
+  }
+
+ private:
+  std::mutex              mtx_;
+  std::condition_variable cv_;
+  bool                    released_{false};
+};
+
+/**
  * @brief a listening socket on a thread, running a script per accepted connection.
  *
  * The script receives the connection's descriptor and its index, so a test can answer
  * the first connection one way and the second another — which is how the retry and
- * stale-reuse paths are exercised.
+ * stale-reuse paths are exercised. A script that also takes a hold_gate_t& can park on
+ * it to keep its connection open until the test is over.
  */
 class origin_t {
  public:
   using script_t = std::function<void(int fd, int index)>;
+  using held_script_t = std::function<void(int fd, int index, hold_gate_t&)>;
 
-  explicit origin_t(script_t script, int connections = 1, bool serial = true) {
+  explicit origin_t(script_t script, int connections = 1, bool serial = true)
+    : origin_t(held_script_t([s = std::move(script)](int fd, int i, hold_gate_t&) { s(fd, i); }),
+               connections, serial) {}
+
+  explicit origin_t(held_script_t script, int connections = 1, bool serial = true) {
     listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
     EXPECT_GE(listen_fd_, 0);
     int on = 1;
@@ -117,13 +154,13 @@ class origin_t {
         if (fd < 0) break;
         set_timeout(fd, 5s);
         if (serial) {
-          script(fd, i);
+          script(fd, i, gate_);
           ::close(fd);
         } else {
           // Concurrent connections need concurrent scripts, or the second client
           // would wait for the first script to finish before being served at all.
-          workers.emplace_back([script, fd, i] {
-            script(fd, i);
+          workers.emplace_back([this, script, fd, i] {
+            script(fd, i, gate_);
             ::close(fd);
           });
         }
@@ -133,6 +170,8 @@ class origin_t {
   }
 
   ~origin_t() {
+    // release before stop(): a script parked on the gate must be able to return
+    gate_.release();
     stop();
     if (thread_.joinable()) thread_.join();
     if (listen_fd_ >= 0) ::close(listen_fd_);
@@ -161,6 +200,7 @@ class origin_t {
  private:
   int         listen_fd_{-1};
   uint16_t    port_{0};
+  hold_gate_t gate_;
   std::thread thread_;
 };
 
