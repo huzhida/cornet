@@ -77,6 +77,9 @@ class server_t {
 
   /**
    * @brief open the listening socket.
+   *
+   * A port of 0 lets the kernel choose a free one; options().port then reports what
+   * it chose, so a caller that does not care which port it gets can still find out.
    */
   CORNET_NODISCARD expected<void> listen();
   CORNET_NODISCARD expected<void> listen(std::string_view address, uint16_t port);

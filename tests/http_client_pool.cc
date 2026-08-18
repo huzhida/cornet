@@ -299,10 +299,10 @@ TEST(http_client_pool, requests_queue_when_the_host_limit_is_reached) {
 // Waiting is bounded: a caller that cannot get a connection in time is told so rather
 // than blocking forever behind a slow peer.
 TEST(http_client_pool, waiting_for_a_connection_times_out) {
-  origin_t origin([](int fd, int) {
+  origin_t origin([](int fd, int, hold_gate_t& gate) {
     read_until(fd, "\r\n\r\n");
     write_all(fd, "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nslow");
-    std::this_thread::sleep_for(500ms);
+    gate.wait();   // keep the only connection busy for the whole test
   });
 
   pool_env_t env;
@@ -329,11 +329,11 @@ TEST(http_client_pool, waiting_for_a_connection_times_out) {
 // ──────────────────────── idle expiry ────────────────────────
 
 TEST(http_client_pool, idle_connections_are_reaped) {
-  origin_t origin([](int fd, int) {
+  origin_t origin([](int fd, int, hold_gate_t& gate) {
     read_until(fd, "\r\n\r\n");
     write_all(fd, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi");
     // stay open, so only the idle timer can close this
-    std::this_thread::sleep_for(400ms);
+    gate.wait();
   });
 
   pool_env_t env;

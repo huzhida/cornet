@@ -163,6 +163,49 @@ coro_t<void> make_submit_wrapper(F f, context_t* ctx, std::shared_ptr<task_state
     state->set_done();
 }
 
+/**
+ * @brief Wrapper coroutine for submit_async().
+ * Offloads the callable to the context's executor via co_await ctx.async(),
+ * then publishes the result or exception into the shared state.
+ *
+ * The async_task_t lives inside the async_awaiter on this coroutine's frame,
+ * so it is released together with the frame. Never heap-allocate an atask_t:
+ * the executor and the scheduler only pass such pointers around and rely on
+ * the awaiter that owns them to free them.
+ *
+ * @tparam F callable type (takes no arguments, returns R)
+ * @tparam R return value type of the callable
+ */
+template<typename F, typename R>
+coro_t<void> make_async_wrapper(context_t* ctx, std::shared_ptr<task_state_t<R>> state, F f) {
+    try {
+        // f is a named frame parameter, not a temporary inside the co_await
+        // expression — see context_t::async for why that distinction matters
+        auto result = co_await ctx->async(std::move(f));
+        state->set_value(std::move(result));
+    } catch (...) {
+        state->set_error(std::current_exception());
+    }
+    state->set_done();
+}
+
+/**
+ * @brief Wrapper coroutine for spawn_async().
+ * Same offload path as make_async_wrapper, but fire-and-forget: there is no
+ * shared state and no caller to propagate to, so an escaping exception is logged
+ * and swallowed.
+ *
+ * @tparam F callable type (takes no arguments, return value is discarded)
+ */
+template<typename F>
+coro_t<void> make_spawn_async_wrapper(context_t* ctx, F f) {
+    try {
+        co_await ctx->async(std::move(f));
+    } catch (...) {
+        spdlog::warn("spawn_async task threw unhandled exception");
+    }
+}
+
 } // namespace detail
 
 // ---------------------------------------------------------------------------
@@ -328,8 +371,15 @@ public:
    * The callable takes a context_t& and returns a coro_t<V>.
    * No result is returned — the coroutine runs independently.
    *
+   * The callable is moved into a wrapper coroutine and only invoked there, so a
+   * temporary lambda stays alive for the whole run of the coroutine it produces.
+   * Invoking the factory here instead and passing the resulting coro_t would leave
+   * the closure — and everything its captures reference — dangling at the first
+   * suspension point, since a lambda coroutine's frame only stores the closure
+   * pointer, not the closure.
+   *
    * Usage:
-   *   rt.spawn([](context_t& ctx) {
+   *   rt.spawn([](context_t& ctx) -> coro_t<void> {
    *       co_await some_io_operation(ctx);
    *   });
    *
@@ -338,13 +388,20 @@ public:
   template<typename F, typename... Args>
   void spawn(F&& f, Args&&... args) {
     auto& ctx = select_context();
-    ctx.spawn_remote(std::forward<F>(f)(ctx, std::forward<Args>(args)...));
+    ctx.spawn_remote([&ctx, f = std::decay_t<F>(std::forward<F>(f)),
+                      ...as = std::decay_t<Args>(std::forward<Args>(args))]() mutable {
+      return f(ctx, std::move(as)...);
+    });
   }
 
   /**
    * @brief submit a CPU/blocking task to a worker context's executor.
    * The callable takes no arguments and returns R.
    * Returns a task_future_t<R> that can be used to retrieve the result.
+   *
+   * The callable is offloaded by a wrapper coroutine running on the selected
+   * context, so the context must be started and running for the task to make
+   * progress — same as submit().
    *
    * Usage:
    *   auto f = rt.submit_async([] { return heavy_computation(); });
@@ -361,19 +418,10 @@ public:
     auto state = std::make_shared<detail::task_state_t<R>>();
     auto future = task_future_t<R>{state};
 
-    auto wrapper = [state = std::move(state), f = std::decay_t<F>(std::forward<F>(f))]() mutable -> R {
-        try {
-            R result = f();
-            state->set_value(std::move(result));
-            return result;
-        } catch (...) {
-            state->set_error(std::current_exception());
-            throw;
-        }
-    };
-
-    auto* task = new async_task_t<decltype(wrapper), R>(std::move(wrapper));
-    ctx.executor().add(task);
+    auto coro = detail::make_async_wrapper<std::decay_t<F>, R>(
+        &ctx, std::move(state), std::forward<F>(f));
+    coro.detach();
+    ctx.spawn_remote(coro.handle);
     return future;
   }
 
@@ -395,31 +443,17 @@ public:
     -> task_future_t<std::invoke_result_t<std::decay_t<F>, std::decay_t<Args>...>> {
     using R = std::invoke_result_t<std::decay_t<F>, std::decay_t<Args>...>;
 
-    auto& ctx = select_context();
-    auto state = std::make_shared<detail::task_state_t<R>>();
-    auto future = task_future_t<R>{state};
-
-    auto wrapper = [state = std::move(state), f = std::decay_t<F>(std::forward<F>(f)),
-                    ...as = std::decay_t<Args>(std::forward<Args>(args))] () mutable -> R {
-        try {
-            R result = f(std::move(as)...);
-            state->set_value(std::move(result));
-            return result;
-        } catch (...) {
-            state->set_error(std::current_exception());
-            throw;
-        }
-    };
-
-    auto* task = new async_task_t<decltype(wrapper), R>(std::move(wrapper));
-    ctx.executor().add(task);
-    return future;
+    // bind the arguments into a nullary callable and reuse the no-arg overload
+    return submit_async([f = std::decay_t<F>(std::forward<F>(f)),
+                         ...as = std::decay_t<Args>(std::forward<Args>(args))]() mutable -> R {
+      return f(std::move(as)...);
+    });
   }
 
   /**
    * @brief spawn a CPU/blocking task fire-and-forget on a worker context's executor.
-   * The callable takes no arguments and returns R.
-   * No result is returned — the task runs independently.
+   * The callable takes no arguments; its return value is discarded.
+   * Exceptions are caught and logged, never propagated.
    *
    * Usage:
    *   rt.spawn_async([] { background_cleanup(); });
@@ -430,19 +464,9 @@ public:
   void spawn_async(F&& f) {
     auto& ctx = select_context();
 
-    // Use a coro_t<void> wrapper to avoid heap-allocated async_task_t leaks.
-    // The existing scheduler leaks async_task_t pointers collected from the executor;
-    // using a coroutine wrapper avoids this since the task lives in the coroutine frame.
-    auto wrapper = [f = std::decay_t<F>(std::forward<F>(f))] () -> coro_t<void> {
-        try {
-            f();
-        } catch (...) {
-            spdlog::warn("spawn_async task threw unhandled exception");
-        }
-        co_return;
-    };
-
-    ctx.spawn_remote(std::move(wrapper));
+    auto coro = detail::make_spawn_async_wrapper<std::decay_t<F>>(&ctx, std::forward<F>(f));
+    coro.detach();
+    ctx.spawn_remote(coro.handle);
   }
 
 private:

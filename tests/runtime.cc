@@ -3,6 +3,7 @@
 
 #include <gtest/gtest.h>
 #include <atomic>
+#include <latch>
 #include <thread>
 #include <chrono>
 #include <string>
@@ -30,6 +31,7 @@ TEST_F(runtime_test, spawn_remote_basic) {
   runtime_t rt(nullptr, 2);
   std::atomic<int> executed{0};
   std::atomic<std::thread::id> exec_thread{};
+  std::latch ran(1);
 
   rt.start([&](size_t idx, context_t&) {
     if (idx == 0) {
@@ -41,14 +43,15 @@ TEST_F(runtime_test, spawn_remote_basic) {
       auto task = [&]() -> coro_t<void> {
         exec_thread.store(std::this_thread::get_id());
         executed.fetch_add(1);
+        ran.count_down();
         co_return;
       };
       ctx1.spawn_remote(task);
     }
   });
 
-  // Give the spawned coroutine time to execute
-  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  // wait for the coroutine itself rather than for a duration
+  ran.wait();
 
   rt.shutdown(std::chrono::milliseconds(100));
   rt.join();
@@ -90,6 +93,7 @@ TEST_F(runtime_test, spawn_remote_io_operation) {
   // Test that spawn_remote coroutines can perform IO on the target thread
   runtime_t rt(nullptr, 2);
   std::atomic<bool> io_succeeded{false};
+  std::latch ran(1);
 
   rt.start([&](size_t idx, context_t&) {
     if (idx == 0) {
@@ -102,14 +106,15 @@ TEST_F(runtime_test, spawn_remote_io_operation) {
         if (ret) {
           io_succeeded.store(true);
         }
+        ran.count_down();
         co_return;
       };
       ctx1.spawn_remote(task);
     }
   });
 
-  // Give time for the IO operation to complete
-  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  // wait for the IO operation itself rather than for a duration
+  ran.wait();
 
   rt.shutdown(std::chrono::milliseconds(100));
   rt.join();
@@ -249,17 +254,19 @@ TEST_F(runtime_test, spawn_fire_and_forget) {
   // Test that spawn() runs fire-and-forget coroutine
   runtime_t rt(nullptr, 2);
   std::atomic<int> counter{0};
+  std::latch ran(1);
 
   rt.start([](size_t, context_t&) {});
 
-  rt.spawn([&counter](context_t& ctx) -> coro_t<void> {
+  rt.spawn([&counter, &ran](context_t& ctx) -> coro_t<void> {
     co_await nop_awaiter(ctx);
     counter.fetch_add(1);
+    ran.count_down();
     co_return;
   });
 
-  // Give time for the coroutine to complete
-  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  // wait for the coroutine itself rather than for a duration
+  ran.wait();
   EXPECT_EQ(counter.load(), 1);
 
   rt.shutdown(std::chrono::milliseconds(100));
@@ -270,15 +277,17 @@ TEST_F(runtime_test, spawn_async_fire_and_forget) {
   // Test that spawn_async() runs fire-and-forget CPU task
   runtime_t rt(nullptr, 2);
   std::atomic<int> counter{0};
+  std::latch ran(1);
 
   rt.start([](size_t, context_t&) {});
 
-  rt.spawn_async([&counter]() {
+  rt.spawn_async([&counter, &ran]() {
     counter.fetch_add(1);
+    ran.count_down();
   });
 
-  // Give time for the task to complete
-  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  // wait for the task itself rather than for a duration
+  ran.wait();
   EXPECT_EQ(counter.load(), 1);
 
   rt.shutdown(std::chrono::milliseconds(100));
@@ -311,7 +320,7 @@ TEST_F(runtime_test, shutdown_auto_join) {
 
   rt.start([&](size_t idx, context_t&) {
     if (idx == 0) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
       completed.store(true);
     }
   });
@@ -325,21 +334,22 @@ TEST_F(runtime_test, shutdown_auto_join) {
 TEST_F(runtime_test, spawn_async_exception_handled) {
   // Test that spawn_async() catches exceptions (fire-and-forget, no crash)
   runtime_t rt(nullptr, 2);
-  std::atomic<bool> completed{false};
+  std::latch ran(1);
 
   rt.start([&](size_t idx, context_t&) {
     if (idx == 0) {
-      rt.spawn_async([]() {
+      rt.spawn_async([&ran]() {
+        // signalled before throwing, so the wait below returns as soon as the
+        // task has actually reached the executor
+        ran.count_down();
         throw std::runtime_error("spawn_async exception");
       });
     }
-    // Wait a bit for the async task to complete, then set flag
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    completed.store(true);
   });
 
-  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  ran.wait();
+  // join drains the wrapper coroutine, which is where the throw is swallowed
   rt.shutdown(std::chrono::milliseconds(100));
   rt.join();
-  EXPECT_TRUE(completed.load());
+  EXPECT_TRUE(ran.try_wait());
 }

@@ -19,20 +19,25 @@ namespace {
  * One context on purpose: it is the configuration a real process uses when it both
  * serves and calls out, and it exercises the two loops sharing a ring. The client
  * coroutine drains the server when it is done, which is what lets run() return.
+ *
+ * The listener takes whatever port the kernel offers, and `body` is told which one.
+ * A fixed port would be flaky: ip_local_port_range covers the range these tests used
+ * to hardcode, so any outbound connection in the same run can be holding it.
  */
-void run_e2e(uint16_t port, const std::function<void(server_t&)>& setup,
+void run_e2e(const std::function<void(server_t&)>& setup,
              const std::function<coro_t<void>(context_t&, client_t&, uint16_t)>& body) {
   context_t ctx;
 
   server_options_t sopt;
   sopt.address = "127.0.0.1";
-  sopt.port = port;
+  sopt.port = 0;
   sopt.timer_tick = 20ms;
   server_t server(ctx, sopt);
   setup(server);
 
   auto listening = server.listen();
   ASSERT_TRUE(listening) << listening.error().message();
+  const uint16_t port = server.options().port;
 
   client_options_t copt;
   copt.timer_tick = 20ms;
@@ -62,8 +67,7 @@ TEST(http_client_e2e, get) {
   std::string body;
   uint16_t status = 0;
 
-  run_e2e(19201,
-          [](server_t& server) {
+  run_e2e([](server_t& server) {
             server.get("/hello", [](auto&, response_t& resp) { resp.text("hello cornet"); });
           },
           [&](context_t&, client_t& cli, uint16_t port) -> coro_t<void> {
@@ -86,7 +90,7 @@ TEST(http_client_e2e, not_found_is_a_response_not_an_error) {
   bool ok_flag = true;
   bool valid = false;
 
-  run_e2e(19202, [](server_t&) {},
+  run_e2e([](server_t&) {},
           [&](context_t&, client_t& cli, uint16_t port) -> coro_t<void> {
             auto resp = co_await cli.get(url_for(port, "/nothing-here"));
             valid = bool(resp);
@@ -104,8 +108,7 @@ TEST(http_client_e2e, post_round_trip) {
   std::string echoed;
   std::string seen_content_type;
 
-  run_e2e(19203,
-          [&seen_content_type](server_t& server) {
+  run_e2e([&seen_content_type](server_t& server) {
             server.post("/echo", [&seen_content_type](request_t& req, response_t& resp) {
               seen_content_type = std::string(req.headers().get(field_t::ContentType));
               auto& copy = resp.pin(std::string(req.body()));
@@ -126,8 +129,7 @@ TEST(http_client_e2e, head_request_has_no_body) {
   uint64_t announced = 0;
   size_t body_size = 99;
 
-  run_e2e(19204,
-          [](server_t& server) {
+  run_e2e([](server_t& server) {
             server.head("/thing", [](auto&, response_t& resp) { resp.text("12345"); });
           },
           [&](context_t&, client_t& cli, uint16_t port) -> coro_t<void> {
@@ -149,8 +151,7 @@ TEST(http_client_e2e, sequential_requests_share_one_connection) {
   uint64_t reused = 0;
   uint32_t answered = 0;
 
-  run_e2e(19205,
-          [](server_t& server) {
+  run_e2e([](server_t& server) {
             server.get("/n", [](auto&, response_t& resp) { resp.text("n"); });
           },
           [&](context_t&, client_t& cli, uint16_t port) -> coro_t<void> {
@@ -172,8 +173,7 @@ TEST(http_client_e2e, concurrent_requests_open_several_connections) {
   uint32_t answered = 0;
   uint64_t created = 0;
 
-  run_e2e(19206,
-          [](server_t& server) {
+  run_e2e([](server_t& server) {
             server.get("/slow", [](auto&, response_t& resp) { resp.text("done"); });
           },
           [&](context_t& ctx, client_t& cli, uint16_t port) -> coro_t<void> {
@@ -198,8 +198,7 @@ TEST(http_client_e2e, concurrent_requests_open_several_connections) {
 TEST(http_client_e2e, chunked_response_is_aggregated) {
   std::string body;
 
-  run_e2e(19207,
-          [](server_t& server) {
+  run_e2e([](server_t& server) {
             server.get("/stream", [](auto&, response_t& resp) -> coro_t<void> {
               auto writer = resp.chunked();
               EXPECT_TRUE(co_await writer.write("abc"));
@@ -223,8 +222,7 @@ TEST(http_client_e2e, streaming_download) {
   std::string collected;
   uint16_t status = 0;
 
-  run_e2e(19208,
-          [](server_t& server) {
+  run_e2e([](server_t& server) {
             server.get("/stream", [](auto&, response_t& resp) -> coro_t<void> {
               auto writer = resp.chunked();
               for (int i = 0; i < 4; ++i) {
@@ -257,8 +255,7 @@ TEST(http_client_e2e, streaming_download) {
 TEST(http_client_e2e, chunked_upload) {
   std::string reported;
 
-  run_e2e(19209,
-          [](server_t& server) {
+  run_e2e([](server_t& server) {
             auto& route = server.post("/upload", [](request_t& req, response_t& resp)
                                                      -> coro_t<void> {
               size_t total = 0;
@@ -296,8 +293,7 @@ TEST(http_client_e2e, body_larger_than_the_receive_buffer) {
   size_t got = 0;
   bool intact = false;
 
-  run_e2e(19210,
-          [](server_t& server) {
+  run_e2e([](server_t& server) {
             server.get("/big", [](auto&, response_t& resp) { resp.body_static(kPayload); });
           },
           [&](context_t&, client_t& cli, uint16_t port) -> coro_t<void> {
@@ -318,8 +314,7 @@ TEST(http_client_e2e, redirects_are_followed_when_asked) {
   std::string body;
   uint64_t redirects = 0;
 
-  run_e2e(19211,
-          [](server_t& server) {
+  run_e2e([](server_t& server) {
             server.get("/from", [](auto&, response_t& resp) { resp.redirect("/to"); });
             server.get("/to", [](auto&, response_t& resp) { resp.text("arrived"); });
           },
@@ -342,8 +337,7 @@ TEST(http_client_e2e, redirects_are_not_followed_by_default) {
   uint16_t status = 0;
   std::string location;
 
-  run_e2e(19212,
-          [](server_t& server) {
+  run_e2e([](server_t& server) {
             server.get("/from", [](auto&, response_t& resp) { resp.redirect("/to"); });
             server.get("/to", [](auto&, response_t& resp) { resp.text("arrived"); });
           },
@@ -365,8 +359,7 @@ TEST(http_client_e2e, see_other_becomes_a_get) {
   std::string method_seen;
   std::string body;
 
-  run_e2e(19213,
-          [&method_seen](server_t& server) {
+  run_e2e([&method_seen](server_t& server) {
             server.post("/submit", [](request_t&, response_t& resp) {
               resp.status(status_t::SeeOther).header(field_t::Location, "/result");
             });
