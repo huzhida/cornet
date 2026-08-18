@@ -253,13 +253,13 @@ TEST(http_client_conn, headers_and_body_arriving_in_pieces) {
   origin_t origin([](int fd, int) {
     read_until(fd, "\r\n\r\n");
     write_all(fd, "HTTP/1.1 200 ");
-    std::this_thread::sleep_for(10ms);
+    std::this_thread::sleep_for(1ms);
     write_all(fd, "OK\r\nContent-Len");
-    std::this_thread::sleep_for(10ms);
+    std::this_thread::sleep_for(1ms);
     write_all(fd, "gth: 6\r\n\r\nab");
-    std::this_thread::sleep_for(10ms);
+    std::this_thread::sleep_for(1ms);
     write_all(fd, "cd");
-    std::this_thread::sleep_for(10ms);
+    std::this_thread::sleep_for(1ms);
     write_all(fd, "ef");
   });
 
@@ -552,7 +552,7 @@ TEST(http_client_conn, deadline_stops_a_silent_peer) {
   env.run([&]() -> coro_t<void> {
     auto conn = co_await dial(env, origin.port());
     if (!conn) co_return;
-    (*conn)->set_deadline(80ms);
+    (*conn)->set_deadline(10ms);
     auto req = get(env, origin);
     if (!req) co_return;
 
@@ -576,9 +576,9 @@ TEST(http_client_conn, streaming_download_yields_runs) {
     read_until(fd, "\r\n\r\n");
     write_all(fd, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
     write_all(fd, "3\r\nabc\r\n");
-    std::this_thread::sleep_for(5ms);
+    std::this_thread::sleep_for(1ms);
     write_all(fd, "3\r\ndef\r\n");
-    std::this_thread::sleep_for(5ms);
+    std::this_thread::sleep_for(1ms);
     write_all(fd, "0\r\n\r\n");
   });
 

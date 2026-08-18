@@ -39,6 +39,38 @@ struct resolved_address {
 coro_t<expected<resolved_address>> resolve(context_t& ctx, std::string_view host, uint16_t port,
                                          int family = AF_UNSPEC, int type = SOCK_STREAM);
 
+/**
+ * @brief try to parse host as a numeric IPv4 or IPv6 address.
+ *
+ * Returns a resolved_address with the port already set if host is a numeric literal.
+ * Returns an empty expected<resolved_address> if host is not a numeric IP
+ * (caller should proceed to DNS resolution).
+ */
+CORNET_NODISCARD inline expected<resolved_address> try_resolve_numeric(
+    std::string_view host, uint16_t port) {
+  resolved_address addr{};
+  auto host_string = std::string(host);
+  struct sockaddr_in sin{};
+  sin.sin_family = AF_INET;
+  sin.sin_port = htons(port);
+  if (inet_pton(AF_INET, host_string.c_str(), &sin.sin_addr) == 1) {
+    std::memcpy(&addr.addr, &sin, sizeof(sin));
+    addr.socklen = sizeof(sin);
+    return addr;
+  }
+
+  struct sockaddr_in6 sin6{};
+  sin6.sin6_family = AF_INET6;
+  sin6.sin6_port = htons(port);
+  if (inet_pton(AF_INET6, host_string.c_str(), &sin6.sin6_addr) == 1) {
+    std::memcpy(&addr.addr, &sin6, sizeof(sin6));
+    addr.socklen = sizeof(sin6);
+    return addr;
+  }
+
+  return {};
+}
+
 class socket_t {
  public:
   /**
@@ -57,7 +89,6 @@ class socket_t {
    * @brief connect awaiter for io_uring_prep_connect
    */
   struct connect_awaiter : utask_t {
-    connect_awaiter(context_t& ctx, int fd, std::string_view ip, uint16_t port, int domain, int type);
     connect_awaiter(context_t& ctx, int fd, std::string_view path);
     connect_awaiter(context_t& ctx, int fd, const resolved_address& resolved);
 

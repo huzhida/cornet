@@ -2,6 +2,7 @@
 
 #include <algorithm>
 
+#include <arpa/inet.h>
 #include <netinet/in.h>
 
 #include <spdlog/spdlog.h>
@@ -33,6 +34,7 @@ void set_port(resolved_address& addr, uint16_t port) {
 coro_t<expected<resolved_address>> dns_cache_t::resolve(std::string_view host, uint16_t port) {
   auto now = ctx_.coarse_now_ns();
 
+  // ── cache lookup ──
   if (auto it = entries_.find(host); it != entries_.end()) {
     if (it->second.expires_ns > now) {
       ++metrics_.dns_cache_hits;
@@ -43,6 +45,7 @@ coro_t<expected<resolved_address>> dns_cache_t::resolve(std::string_view host, u
     entries_.erase(it);
   }
 
+  // ── DNS resolution ──
   ++metrics_.dns_lookups;
   auto r = co_await cornet::resolve(ctx_, host, port);
   if (!r) co_return unexpected(r.error());
@@ -233,13 +236,30 @@ coro_t<expected<client_connection_t*>> client_pool_t::acquire(std::string_view h
     if (bucket.busy.size() + bucket.opening < opt_.max_conns_per_host &&
         total_ < opt_.max_total_conns) {
       ++bucket.opening;
+
+      // Fast path: numeric IP — skip the DNS cache coroutine entirely.
+      auto addr_or = try_resolve_numeric(host, port);
+      if (addr_or) {
+        auto opened = co_await client_connection_t::open(ctx_, opt_, bufs_, wheel_, metrics_, host,
+                                                         port, &*addr_or);
+        --bucket.opening;
+        if (!opened) co_return unexpected(opened.error());
+
+        (*opened)->set_pool(this);
+        auto* raw = opened->get();
+        bucket.busy.push_back(std::move(*opened));
+        ++total_;
+        co_return raw;
+      }
+
+      // Slow path: DNS resolution through cache.
       auto addr = co_await dns_.resolve(host, port);
       if (!addr) {
         --bucket.opening;
         co_return unexpected(addr.error());
       }
       auto opened = co_await client_connection_t::open(ctx_, opt_, bufs_, wheel_, metrics_, host,
-                                                      port, &*addr);
+                                                       port, &*addr);
       --bucket.opening;
       if (!opened) co_return unexpected(opened.error());
 

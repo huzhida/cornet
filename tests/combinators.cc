@@ -173,7 +173,7 @@ TEST_F(combinators, canceler_during_io) {
 
     // spawn a coroutine that cancels after a short delay
     auto cancel_task = [&canceler, &ctx]() -> coro_t<void> {
-      co_await sleep(ctx, std::chrono::milliseconds(5));
+      co_await sleep(ctx, std::chrono::milliseconds(2));
       canceler.cancel();
     };
     ctx.spawn(cancel_task());
@@ -199,7 +199,7 @@ TEST_F(combinators, canceler_hierarchical) {
 
     // cancel parent after delay, should propagate to child
     auto cancel_task = [&parent, &ctx]() -> coro_t<void> {
-      co_await sleep(ctx, std::chrono::milliseconds(5));
+      co_await sleep(ctx, std::chrono::milliseconds(2));
       parent.cancel();
     };
     ctx.spawn(cancel_task());
@@ -280,7 +280,7 @@ TEST_F(combinators, task_scope_cancel) {
       });
       // cancel scope after short delay
       scope.spawn([&scope, &ctx]() -> coro_t<void> {
-        co_await sleep(ctx, std::chrono::milliseconds(3));
+        co_await sleep(ctx, std::chrono::milliseconds(2));
         scope.cancel();
       });
       co_return;
@@ -301,7 +301,7 @@ TEST_F(combinators, task_scope_with_parent_canceler) {
 
     // cancel from outside the scope
     auto cancel_task = [&parent, &ctx]() -> coro_t<void> {
-      co_await sleep(ctx, std::chrono::milliseconds(5));
+      co_await sleep(ctx, std::chrono::milliseconds(2));
       parent.cancel();
     };
     ctx.spawn(cancel_task());
@@ -435,7 +435,7 @@ TEST_F(combinators, await_transform_propagates_cancel) {
 
     // cancel after short delay
     auto cancel_task = [&canceler, &ctx]() -> coro_t<void> {
-      co_await sleep(ctx, std::chrono::milliseconds(5));
+      co_await sleep(ctx, std::chrono::milliseconds(2));
       canceler.cancel();
     };
     ctx.spawn(cancel_task());
@@ -481,7 +481,7 @@ TEST_F(combinators, coro_with_cancel_basic) {
     };
 
     auto cancel_task = [&canceler, &ctx]() -> coro_t<void> {
-      co_await sleep(ctx, std::chrono::milliseconds(5));
+      co_await sleep(ctx, std::chrono::milliseconds(2));
       canceler.cancel();
     };
     ctx.spawn(cancel_task());
@@ -507,7 +507,7 @@ TEST_F(combinators, coro_with_timeout_expires) {
       co_return result;
     };
 
-    auto result = co_await with_timeout(ctx, long_task(ctx), std::chrono::milliseconds(50));
+    auto result = co_await with_timeout(ctx, long_task(ctx), std::chrono::milliseconds(10));
     // expected<int> with ETIMEDOUT (flattened from ECANCELED)
     EXPECT_FALSE(result.has_value());
     EXPECT_EQ(result.error().code, ETIMEDOUT);
@@ -524,7 +524,7 @@ TEST_F(combinators, coro_with_timeout_completes_before_timeout) {
       co_return expected<void>{};
     };
 
-    auto result = co_await with_timeout(ctx, fast_task(ctx), std::chrono::milliseconds(50));
+    auto result = co_await with_timeout(ctx, fast_task(ctx), std::chrono::milliseconds(10));
     EXPECT_TRUE(result.has_value());
     co_return;
   };
@@ -544,7 +544,7 @@ TEST_F(combinators, coro_with_timeout_void_expires) {
     // void coroutine with timeout — throws on timeout
     bool threw = false;
     try {
-      co_await with_timeout(ctx, long_task(ctx), std::chrono::milliseconds(5));
+      co_await with_timeout(ctx, long_task(ctx), std::chrono::milliseconds(2));
     } catch (...) {
       threw = true;
     }

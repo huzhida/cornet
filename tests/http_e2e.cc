@@ -833,9 +833,9 @@ TEST(http_e2e, body_split_across_reads_keeps_headers_intact) {
         co_await sock.send(ctx, head.data(), head.size());
 
         // The server sees the headers with no body at all, then two more reads.
-        co_await sleep(ctx, std::chrono::milliseconds(30));
+        co_await sleep(ctx, std::chrono::milliseconds(5));
         co_await sock.send(ctx, "hello", 5);
-        co_await sleep(ctx, std::chrono::milliseconds(30));
+        co_await sleep(ctx, std::chrono::milliseconds(5));
         co_await sock.send(ctx, " world", 6);
 
         char buf[4096];

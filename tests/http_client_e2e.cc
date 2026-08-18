@@ -31,7 +31,7 @@ void run_e2e(const std::function<void(server_t&)>& setup,
   server_options_t sopt;
   sopt.address = "127.0.0.1";
   sopt.port = 0;
-  sopt.timer_tick = 20ms;
+  sopt.timer_tick = 10ms;
   server_t server(ctx, sopt);
   setup(server);
 
@@ -40,7 +40,7 @@ void run_e2e(const std::function<void(server_t&)>& setup,
   const uint16_t port = server.options().port;
 
   client_options_t copt;
-  copt.timer_tick = 20ms;
+  copt.timer_tick = 10ms;
   client_t cli(ctx, copt);
 
   ctx.spawn(server.serve());
