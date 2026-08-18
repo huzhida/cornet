@@ -34,7 +34,7 @@ void scheduler_t::resume_task() {
 size_t scheduler_t::harvest_async() {
   size_t n{0}, completed{0};
   do {
-    auto n = executor_.get_completed(async_tasks);
+    n = executor_.get_completed(async_tasks);
     for (size_t idx = 0; idx < n; ++idx) {
       this->schedule(async_tasks[idx]->handle);
     }

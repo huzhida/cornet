@@ -205,6 +205,14 @@ struct context_t {
   /**
    * @brief execute a callable on the thread pool and co_await the result.
    * Usage: auto result = co_await ctx.async([] { return heavy_work(); });
+   *
+   * If the callable has a non-trivial destructor — a captured std::string, a vector, a
+   * unique_ptr — bind it to a named local first and pass std::move(local). A callable
+   * written inline in the co_await expression is a temporary whose lifetime spans the
+   * suspend point, and gcc 11/12 gets that wrong: it gives the temporary two frame slots
+   * and destroys the one it never constructed, which frees a stale pointer. The hazard is
+   * the destructor, not the lambda: any temporary with one is affected, and a captureless
+   * or reference-capturing closure is fine.
    * @tparam F callable type
    * @param f callable to execute on worker thread
    * @return async_awaiter that yields the callable's return value

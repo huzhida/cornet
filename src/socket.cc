@@ -46,7 +46,10 @@ coro_t<expected<resolved_address>> resolve(context_t& ctx, std::string_view host
   std::string host_str(host);
   std::string port_str = std::to_string(port);
 
-  auto result = co_await ctx.async([host_str, port_str, family, type]() -> expected<resolved_address> {
+  // The closure is a named local, not a temporary inside the co_await expression: gcc
+  // (11 and 12) gives such a temporary two frame slots and destroys the one it never
+  // constructed, so the captured strings get freed from a stale interior pointer.
+  auto job = [host_str, port_str, family, type]() -> expected<resolved_address> {
     struct addrinfo hints{};
     struct addrinfo* res;
     hints.ai_family = family;
@@ -65,7 +68,9 @@ coro_t<expected<resolved_address>> resolve(context_t& ctx, std::string_view host
     std::memcpy(&r.addr, res->ai_addr, res->ai_addrlen);
     freeaddrinfo(res);
     return r;
-  });
+  };
+
+  auto result = co_await ctx.async(std::move(job));
 
   co_return result;
 }
