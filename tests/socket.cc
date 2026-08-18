@@ -350,3 +350,33 @@ TEST_F(socket, udp_local_sendto_recvfrom) {
   ctx->spawn(client(*ctx));
   ctx->run();
 }
+
+TEST(resolve, try_resolve_numeric_ipv4) {
+  auto addr = try_resolve_numeric("127.0.0.1", 8080);
+  EXPECT_TRUE(static_cast<bool>(addr));
+  EXPECT_EQ(addr->socklen, sizeof(sockaddr_in));
+  EXPECT_EQ(addr->addr.ss_family, AF_INET);
+  const auto* sin = reinterpret_cast<sockaddr_in*>(&addr->addr);
+  EXPECT_EQ(sin->sin_port, htons(8080));
+  EXPECT_EQ(sin->sin_addr.s_addr, htonl(INADDR_LOOPBACK));
+}
+
+TEST(resolve, try_resolve_numeric_ipv6) {
+  auto addr = try_resolve_numeric("::1", 443);
+  EXPECT_TRUE(static_cast<bool>(addr));
+  EXPECT_EQ(addr->socklen, sizeof(sockaddr_in6));
+  EXPECT_EQ(addr->addr.ss_family, AF_INET6);
+  const auto* sin6 = reinterpret_cast<sockaddr_in6*>(&addr->addr);
+  EXPECT_EQ(sin6->sin6_port, htons(443));
+  EXPECT_TRUE(IN6_IS_ADDR_LOOPBACK(&sin6->sin6_addr));
+}
+
+TEST(resolve, try_resolve_numeric_hostname) {
+  auto addr = try_resolve_numeric("localhost", 80);
+  EXPECT_FALSE(static_cast<bool>(addr));
+}
+
+TEST(resolve, try_resolve_numeric_invalid) {
+  auto addr = try_resolve_numeric("not.an.ip", 80);
+  EXPECT_FALSE(static_cast<bool>(addr));
+}

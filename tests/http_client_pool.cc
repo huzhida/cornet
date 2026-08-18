@@ -26,9 +26,9 @@ struct pool_env_t {
   context_t        ctx;
   client_options_t opt = [] {
     client_options_t o;
-    o.timer_tick = 20ms;
-    o.idle_timeout = 200ms;
-    o.pool_wait_timeout = 300ms;
+    o.timer_tick = 10ms;
+    o.idle_timeout = 50ms;
+    o.pool_wait_timeout = 50ms;
     // 127.0.0.1 resolves through the executor; caching it keeps the tests from
     // measuring getaddrinfo
     o.dns_cache_ttl = 5s;
@@ -99,13 +99,18 @@ TEST(http_client_pool, dns_is_cached_across_requests) {
   // The origin answers once per connection and then closes, so the second request
   // cannot reuse the first connection and has to resolve the host again — from the
   // cache, which is the point.
+  //
+  // Use "localhost" instead of the numeric 127.0.0.1: an IP literal is resolved
+  // synchronously by inet_pton and skips the DNS cache entirely.
   pool_env_t env;
   auto& cli = env.client();
 
   env.run([&]() -> coro_t<void> {
-    EXPECT_TRUE(co_await cli.get(origin.url("/a")));
-    co_await sleep(env.ctx, 30ms);
-    EXPECT_TRUE(co_await cli.get(origin.url("/b")));
+    std::string url = "http://localhost:" + std::to_string(origin.port()) + "/a";
+    EXPECT_TRUE(co_await cli.get(url));
+    co_await sleep(env.ctx, 1ms);
+    url = "http://localhost:" + std::to_string(origin.port()) + "/b";
+    EXPECT_TRUE(co_await cli.get(url));
   }());
 
   EXPECT_EQ(cli.metrics().dns_lookups, 1u);
@@ -152,7 +157,7 @@ TEST(http_client_pool, a_stale_pooled_connection_is_discarded_before_use) {
   env.run([&]() -> coro_t<void> {
     EXPECT_TRUE(co_await env.client().get(origin.url("/a")));
     // give the FIN time to arrive, so the peek has something to see
-    co_await sleep(env.ctx, 50ms);
+    co_await sleep(env.ctx, 2ms);
     auto b = co_await env.client().get(origin.url("/b"));
     EXPECT_TRUE(b);
     if (b) second = std::string(b->body());
@@ -265,7 +270,7 @@ TEST(http_client_pool, requests_queue_when_the_host_limit_is_reached) {
   origin_t origin([](int fd, int) {
     for (int i = 0; i < 2; ++i) {
       read_until(fd, "\r\n\r\n");
-      std::this_thread::sleep_for(20ms);
+      std::this_thread::sleep_for(1ms);
       write_all(fd, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi");
     }
   });
@@ -286,7 +291,7 @@ TEST(http_client_pool, requests_queue_when_the_host_limit_is_reached) {
     };
     env.ctx.spawn(task("/a"));
     env.ctx.spawn(task("/b"));
-    while (finished < 2) co_await sleep(env.ctx, 5ms);
+    while (finished < 2) co_await sleep(env.ctx, 1ms);
   }());
 
   EXPECT_EQ(done, 2u);
@@ -307,7 +312,7 @@ TEST(http_client_pool, waiting_for_a_connection_times_out) {
 
   pool_env_t env;
   env.opt.max_conns_per_host = 1;
-  env.opt.pool_wait_timeout = 100ms;
+  env.opt.pool_wait_timeout = 10ms;
   auto& cli = env.client();
 
   cornet::error_t err{};
@@ -337,7 +342,7 @@ TEST(http_client_pool, idle_connections_are_reaped) {
   });
 
   pool_env_t env;
-  env.opt.idle_timeout = 60ms;
+  env.opt.idle_timeout = 5ms;
   auto& cli = env.client();
 
   uint32_t idle_after_request = 0;
@@ -346,7 +351,7 @@ TEST(http_client_pool, idle_connections_are_reaped) {
   env.run([&]() -> coro_t<void> {
     EXPECT_TRUE(co_await cli.get(origin.url("/a")));
     idle_after_request = cli.pool().idle_count();
-    co_await sleep(env.ctx, 250ms);
+    co_await sleep(env.ctx, 15ms);
     idle_after_wait = cli.pool().idle_count();
   }());
 
