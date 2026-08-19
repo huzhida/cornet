@@ -3,8 +3,10 @@
 
 #include <sys/eventfd.h>
 #include <sys/signalfd.h>
+#include <sys/utsname.h>
 #include <signal.h>
 #include <unistd.h>
+#include <cstdlib>
 #include <vector>
 
 #include "cornet/io_uring/awaiters.h"
@@ -15,11 +17,34 @@
 
 namespace cornet {
 
+namespace {
+
+/**
+ * @brief probe the RUNNING kernel for >= 5.19.
+ *
+ * Compile-time kernel headers cannot answer this: in a container they describe
+ * the image that was built, not the host kernel the process actually runs on.
+ * uname() asks the kernel itself, which is the same kernel inside and outside
+ * a container.
+ */
+bool detect_kernel_ge_5_19() {
+  struct utsname u {};
+  if (::uname(&u) != 0) return false;
+  char* end = nullptr;
+  long major = std::strtol(u.release, &end, 10);
+  if (end == u.release || *end != '.') return false;
+  long minor = std::strtol(end + 1, nullptr, 10);
+  return major > 5 || (major == 5 && minor >= 19);
+}
+
+} // namespace
+
 context_t::context_t(config_t* config)
   : config_(config),
     tracker_(*this),
     uring_(tracker_, config),
-    scheduler_(tracker_, config) 
+    scheduler_(tracker_, config),
+    kernel_ge_5_19_(detect_kernel_ge_5_19())
     {
   #ifdef CORNET_METRICS
   uring_.metrics_ = &metrics_;
@@ -44,7 +69,13 @@ context_t::~context_t() {
 
 void context_t::run() {
   spawn(watch_loop("wakeup", wakeup_fd_, sizeof(uint64_t), nullptr));
-  switch_to(state_t::Running);
+  // An early stop()/shutdown() arriving before run() sets state to Canceling;
+  // only a plain start (still Terminated) earns the Running phase. Storing
+  // unconditionally used to clobber a just-posted Canceling and lose the stop.
+  auto expected = state_t::Terminated;
+  if (state_.compare_exchange_strong(expected, state_t::Running, std::memory_order_acq_rel)) {
+    SPDLOG_DEBUG("context switch to state:{}", to_string(state_t::Running));
+  }
   // exit only when nothing is inflight, framework io included
   while (!idle()) {
     // one clock read per turn serves every request handled in that turn
@@ -71,6 +102,10 @@ void context_t::shutdown(std::chrono::nanoseconds timeout) {
   set_keep_alive(false);
   auto expected = state_t::Running;
   if (!state_.compare_exchange_strong(expected, state_t::Draining, std::memory_order_acq_rel)) {
+    // Not running (yet). An early shutdown must still stop a later run() from
+    // entering a fresh Running phase, so post Canceling the way stop() does.
+    auto before_run = state_t::Terminated;
+    state_.compare_exchange_strong(before_run, state_t::Canceling, std::memory_order_acq_rel);
     return;
   }
   spawn_remote([this, timeout] () -> ccoro_t<void> {
@@ -90,8 +125,11 @@ void context_t::stop() {
   set_keep_alive(false);
   auto expected = state_t::Running;
   if (!state_.compare_exchange_strong(expected, state_t::Canceling, std::memory_order_acq_rel)) {
-    expected = state_t::Draining;
-    state_.compare_exchange_strong(expected, state_t::Canceling, std::memory_order_acq_rel);
+    if (expected == state_t::Draining || expected == state_t::Terminated) {
+      // Terminated covers "stop() before run()": without it the request was
+      // silently dropped and a later run() would start a full Running phase.
+      state_.compare_exchange_strong(expected, state_t::Canceling, std::memory_order_acq_rel);
+    }
   }
   wakeup();
 }
@@ -148,27 +186,27 @@ coro_t<void> context_t::watch_loop(const char* name, int fd, size_t len,
 }
 
 coro_t<void> context_t::cancel_sweep() {
-#if CORNET_LINUX_VERSION_GE_5_19
-  // CANCEL_ANY reaps every inflight op in one SQE, but only those already
-  // visible to the kernel — loop until it reports nothing left
-  while (true) {
-    auto ret = co_await as_system(cancel_awaiter{*this, nullptr, IORING_ASYNC_CANCEL_ANY});
-    if (!ret) {
-      if (ret.error().code != ENOENT) {
-        SPDLOG_WARN("cancel sweep failed: {}", ret.error().message());
+  if (kernel_ge_5_19_) {
+    // CANCEL_ANY reaps every inflight op in one SQE, but only those already
+    // visible to the kernel — loop until it reports nothing left
+    while (true) {
+      auto ret = co_await as_system(cancel_awaiter{*this, nullptr, IORING_ASYNC_CANCEL_ANY});
+      if (!ret) {
+        if (ret.error().code != ENOENT) {
+          SPDLOG_WARN("cancel sweep failed: {}", ret.error().message());
+        }
+        break;
       }
-      break;
+      if (*ret == 0) break;
     }
-    if (*ret == 0) break;
+  } else {
+    // older kernels have no CANCEL_ANY: walk the slot table and cancel per op
+    std::vector<uint64_t> active;
+    io_slots().for_each_active([&](uint64_t sd) { active.push_back(sd); });
+    for (auto sd : active) {
+      co_await as_system(cancel_awaiter{*this, reinterpret_cast<void*>(sd), 0});
+    }
   }
-#else
-  // older kernels have no CANCEL_ANY: walk the slot table and cancel per op
-  std::vector<uint64_t> active;
-  io_slots().for_each_active([&](uint64_t sd) { active.push_back(sd); });
-  for (auto sd : active) {
-    co_await as_system(cancel_awaiter{*this, reinterpret_cast<void*>(sd), 0});
-  }
-#endif
   // cleared after the sweep's own CQE lands, so run() cannot stack sweeps
   cancel_inflight_ = false;
   co_return;

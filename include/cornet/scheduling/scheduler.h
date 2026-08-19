@@ -5,6 +5,7 @@
 #include <vector>
 #include <coroutine>
 #include <array>
+#include <memory>
 
 #ifdef BLOCK_SIZE
 #undef BLOCK_SIZE
@@ -109,11 +110,18 @@ struct scheduler_t {
   }
 
   /**
-   * @brief push coroutine handle to ready queue.
+   * @brief push coroutine handle to the remote (cross-thread) queue.
+   *
+   * Counted IMMEDIATELY, not when harvested: the count is what keeps idle()
+   * false, and the window between "enqueue, counter still 0" and the owner's
+   * next harvest is exactly where run() used to exit with work unpublished —
+   * a lost task, and a runtime submit() future that never completes.
+   * harvest_remote() therefore moves handles without re-counting.
    * @param h coroutine handle
    */
   inline void schedule_remote(std::coroutine_handle<> h) {
     remote_tasks_.enqueue(h);
+    tracker_.coroutine_add();
   }
 
   /**
@@ -134,7 +142,7 @@ private:
   // thread-pool executor for offload heavy cpu task
   executor_t executor_;
   // async tasks buffer
-  std::array<atask_t*, 32> async_tasks;
+  std::array<std::shared_ptr<atask_t>, 32> async_tasks;
   // config pointer for reading scheduler tuning parameters at construction
   config_t* config_ = nullptr;
   // --------- schedule policy --------

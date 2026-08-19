@@ -3,6 +3,8 @@
 
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <unistd.h>
+#include <cerrno>
 
 #include "cornet/io_uring/utask.h"
 #include "cornet/coroutine/coro.h"
@@ -25,9 +27,19 @@ struct close_awaiter : utask_t {
     return completed;
   }
 
-  CORNET_NODISCARD CORNET_MAYBE_UNUSED expected<void> await_resume() const {
-    if (value < 0) return unexpected(-value);
-    return {};
+  CORNET_NODISCARD CORNET_MAYBE_UNUSED expected<void> await_resume() {
+    if (value >= 0) return {};
+    int err = -value;
+    if (err == ENOBUFS && fd_ >= 0) {
+      // The submission queue was full, so the close never reached the kernel.
+      // Falling back to a synchronous close keeps the fd from leaking; EINTR
+      // on Linux close() means the fd is already gone.
+      int save = fd_;
+      fd_ = -1;
+      if (::close(save) == 0 || errno == EINTR) return {};
+      return unexpected(errno);
+    }
+    return unexpected(err);
   }
  private:
   int fd_;

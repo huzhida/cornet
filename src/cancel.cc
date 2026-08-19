@@ -26,36 +26,29 @@ void canceler_t::cancel_subtree() {
 }
 
 void canceler_t::cancel_active_tasks() {
-  auto* head = active_head_;
+  // Detach every node while walking: the op stays inflight and its frame keeps
+  // referencing this canceler (tracked_ops_ is untouched; the awaiter decrements
+  // it when the CQE finally lands), but the list itself is dismantled now. A
+  // late CQE whose awaiter calls unlink_node() then sees a detached node and
+  // leaves whatever was linked after the cancel alone — clearing only
+  // active_head_ here used to let stale prev/next pointers corrupt exactly that.
+  auto* node = active_head_;
   active_head_ = nullptr;
 
-  for (auto* node = head; node; node = node->next) {
-#if CORNET_LINUX_VERSION_GE_5_19
-    // 5.19+ targets the op by its raw utask_t pointer, which is its user_data
-    if (node->task) {
-      auto sqe = ctx_->io_uring().get_sqe();
-      if (!sqe) {
-        // The cancel could not be queued. The op stays inflight and still
-        // resolves through its own completion path, so this degrades to
-        // "cancellation is late" rather than losing the task.
-        SPDLOG_WARN("cancel sqe unavailable, op left inflight: {}", sqe.error().message());
-        continue;
-      }
-      io_uring_prep_cancel(*sqe, reinterpret_cast<void*>(node->task), 0);
-      io_uring_sqe_set_data(*sqe, nullptr);
-    }
-#else
+  for (; node; ) {
+    auto* next = node->next;
+    node->prev = node->next = nullptr;
     if (node->task && node->task->io_token() != 0) {
       auto sqe = ctx_->io_uring().get_sqe();
       if (!sqe) {
         SPDLOG_WARN("cancel sqe unavailable, op left inflight: {}", sqe.error().message());
+        node = next;
         continue;
       }
       io_uring_prep_cancel(*sqe, reinterpret_cast<void*>(node->task->io_token()), 0);
       io_uring_sqe_set_data(*sqe, nullptr);
     }
-#endif
+    node = next;
   }
 }
-
 } // namespace cornet

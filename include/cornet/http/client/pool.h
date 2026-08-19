@@ -137,6 +137,11 @@ class client_pool_t {
     bucket_t*      bucket;
     waiter_t       waiter{};
 
+    // Parked waiters sit in two intrusive lists that outlive the coroutine
+    // frame; the destructor is the only thing that can pull one out when the
+    // frame dies mid-wait.
+    ~wait_awaiter();
+
     bool await_ready() const noexcept { return false; }
     void await_suspend(std::coroutine_handle<> h);
     CORNET_NODISCARD expected<client_connection_t*> await_resume();

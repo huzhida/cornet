@@ -84,7 +84,8 @@ connection_t::connection_t(context_t& ctx, tcp::socket_t sock, const server_opti
                            buffer_pool_t& pool, timer_wheel_t& wheel,
                            connection_metrics_t& metrics)
   : ctx_(ctx), sock_(std::move(sock)), opt_(opt), pool_(pool), wheel_(wheel),
-    metrics_(metrics), canceler_(ctx), parser_(parser_t::type_t::Request), reader_(*this) {
+    metrics_(metrics), read_canceler_(ctx), drain_canceler_(ctx),
+    parser_(parser_t::type_t::Request), reader_(*this) {
   if (opt_.tcp_nodelay) {
     int on = 1;
     ::setsockopt(sock_.native_fd(), IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
@@ -107,9 +108,12 @@ connection_t::connection_t(context_t& ctx, tcp::socket_t sock, const server_opti
     auto* self = static_cast<connection_t*>(owner);
     self->timed_out_ = true;
     ++self->metrics_.timeouts;
-    // Cancel only this connection's inflight read. A context-wide sweep would also
-    // reap writes in flight and truncate a response that is already on its way.
-    self->canceler_.cancel();
+    // A read deadline interrupts reads only. Writes are deliberately out of
+    // scope: cancelling a writev that is already mid-response truncates the
+    // reply on the wire, and latching the canceler would silently drop every
+    // response queued after it.
+    self->read_canceler_.cancel();
+    self->drain_canceler_.cancel();
   };
 }
 
@@ -153,9 +157,10 @@ void connection_t::release_buffers() {
 
 void connection_t::request_close() {
   closing_ = true;
-  // Only the read side is cancelled; anything already queued for write still goes
-  // out, which is what keeps a graceful drain from truncating responses.
-  canceler_.cancel();
+  // Only the read side is cancelled; anything already queued for write still
+  // goes out, which is what keeps a graceful drain from truncating responses.
+  // drain_canceler_ is left alone so shutdown_gracefully() keeps its window.
+  read_canceler_.cancel();
 }
 
 // ─────────────────────────────── reading ───────────────────────────────
@@ -169,7 +174,7 @@ coro_t<expected<uint32_t>> connection_t::fill() {
     co_return http_unexpected(http_error_t::HeaderTooLarge);
   }
   CORNET_HTTP_TRACE_LOG("fd={}: recv armed, window={}", sock_.native_fd(), w.size());
-  auto n = co_await with_cancel(ctx_, sock_.recv(ctx_, w.data(), w.size()), canceler_);
+  auto n = co_await with_cancel(ctx_, sock_.recv(ctx_, w.data(), w.size()), read_canceler_);
   if (!n) {
     CORNET_HTTP_TRACE_LOG("fd={}: recv failed ({}), timed_out={}",
                           sock_.native_fd(), n.error().message(), timed_out_);
@@ -362,8 +367,13 @@ void connection_t::frame_head(bool close_after) {
     serializer_t::header(head_out_, field_t::Connection,
                          close_after ? kConnClose : kConnKeepAlive);
   }
+  // RFC 9110 §8.6: Content-Length in a 1xx/204/304 response is a malformed
+  // message — the peer would wait for a body that never comes and the next
+  // pipelined exchange slides out of sync. HEAD is not affected: forbids-body
+  // is false for its 200, and Content-Length there is required semantics.
   if (!resp_.saw_content_length() && !resp_.saw_transfer_encoding() &&
-      resp_.body_source() != body_source_t::Streaming) {
+      resp_.body_source() != body_source_t::Streaming &&
+      !status_forbids_body(status)) {
     serializer_t::header_u64(head_out_, field_t::ContentLength, resp_.body_length());
   }
   if (resp_.body_source() == body_source_t::Streaming &&
@@ -419,8 +429,9 @@ CORNET_NODISCARD coro_t<expected<void>> connection_t::flush_stream() {
   uint32_t written_total = 0;
   while (written_total < total_len) {
     ++metrics_.writev_calls;
-    auto n = co_await with_cancel(
-        ctx_, sock_.writev(ctx_, iov, iov_n), canceler_);
+    // no cancellation on the write path: an interrupted writev is a truncated
+    // response (see the comment on the cancelers in connection.h)
+    auto n = co_await sock_.writev(ctx_, iov, iov_n);
     if (!n) {
       CORNET_HTTP_TRACE_LOG("fd={}: writev failed ({})", sock_.native_fd(), n.error().message());
       co_return unexpected(n.error());
@@ -591,8 +602,8 @@ coro_t<expected<void>> connection_t::flush() {
                         sock_.native_fd(), pending_n_, iov_n_, total);
   while (iov_head_ < iov_n_) {
     ++metrics_.writev_calls;
-    auto n = co_await with_cancel(
-        ctx_, sock_.writev(ctx_, iov_ + iov_head_, iov_n_ - iov_head_), canceler_);
+    // no cancellation on the write path, same rationale as send_stream()
+    auto n = co_await sock_.writev(ctx_, iov_ + iov_head_, iov_n_ - iov_head_);
     if (!n) {
       CORNET_HTTP_TRACE_LOG("fd={}: writev failed ({})", sock_.native_fd(), n.error().message());
       co_return unexpected(n.error());
@@ -633,7 +644,8 @@ coro_t<void> connection_t::shutdown_gracefully() {
   char scratch[512];
   wheel_.arm(timer_, std::chrono::milliseconds(200));
   for (int i = 0; i < 4; ++i) {
-    auto n = co_await with_cancel(ctx_, sock_.recv(ctx_, scratch, sizeof(scratch)), canceler_);
+    auto n = co_await with_cancel(ctx_, sock_.recv(ctx_, scratch, sizeof(scratch)),
+                                  drain_canceler_);
     if (!n || *n == 0) break;
   }
   wheel_.cancel(timer_);
@@ -658,27 +670,45 @@ coro_t<void> connection_t::run(const router_t& router) {
   uint32_t pipelined = 0;
 
   while (!closing_ && !timed_out_) {
-    // ── 1. read. No link_timeout: the wheel owns the deadline, so this costs one
-    //        SQE, not two.
+    // ── 1. read (or reuse leftover pipelined bytes) and (re)start parsing.
     if (in_body_ && !parser_.has_pending_input()) {
       // Mid-body: the header section stays where it is and the tail region is reused.
       CORNET_ASSERT(!parser_.mid_header(),
                     "rewinding under a half-accumulated header would splice its bytes");
       in_.rewind_to(body_window_);
     }
-    auto got = co_await fill();
-    if (!got) {
-      if (got.error().code == EAGAIN) continue;
-      break;
-    }
-    if (*got == 0) {
-      CORNET_HTTP_TRACE_LOG("fd={}: peer closed", sock_.native_fd());
-      break;
-    }
-    first_read = false;
-    wheel_.arm(timer_, in_body_ ? opt_.body_timeout : opt_.header_timeout);
+    parser_t::result_t r;
+    if (parser_.has_pending_input()) {
+      // A previous round stopped at the pipelining cap with requests already
+      // read but not yet parsed. Feeding only newly-read bytes here would skip
+      // them forever (execute() resets the feed window), and waiting on a read
+      // first would deadlock against a peer that is waiting for our responses.
+      r = parser_.resume();
+    } else {
+      // No link_timeout: the wheel owns the deadline, so this costs one
+      // SQE, not two.
+      auto got = co_await fill();
+      if (!got) {
+        if (got.error().code == EAGAIN) continue;
+        if (got.error().domain == error_domain::Http) {
+          // RFC 9110 §8.4: a header section that never fits still deserves an
+          // answer (431 via status_for_error), not a silent close.
+          write_error(status_for_error(got.error()));
+          if (auto flush_ok = co_await flush(); !flush_ok) {
+            reset_round();
+          }
+        }
+        break;
+      }
+      if (*got == 0) {
+        CORNET_HTTP_TRACE_LOG("fd={}: peer closed", sock_.native_fd());
+        break;
+      }
+      first_read = false;
+      wheel_.arm(timer_, in_body_ ? opt_.body_timeout : opt_.header_timeout);
 
-    auto r = parser_.execute(in_.write_pos() - *got, *got);
+      r = parser_.execute(in_.write_pos() - *got, *got);
+    }
     CORNET_HTTP_TRACE_LOG("fd={}: parse -> {}", sock_.native_fd(), parser_t::to_string(r));
 
     // ── 2. parse and dispatch, draining every complete request in this read

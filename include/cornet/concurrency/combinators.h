@@ -245,20 +245,48 @@ namespace detail {
   template<typename V, typename Rep, typename Period>
   coro_t<void> timeout_timer_task(context_t& ctx, std::shared_ptr<timeout_state<V>> state,
                                   std::chrono::duration<Rep, Period> duration) {
-    auto ret = co_await with_cancel(ctx, sleep(ctx, duration), *state->canceler);
-    if (ret && !state->done) {
-      state->done = true;
-      state->timed_out = true;
-      if (state->canceler) state->canceler->cancel();
-      if (state->continuation) ctx.spawn(state->continuation);
+    using clock = std::chrono::steady_clock;
+    const auto deadline = clock::now() + duration;
+    for (;;) {
+      if (state->done) co_return;
+      auto left = deadline - clock::now();
+      if (left <= clock::duration::zero()) {
+        // The timer op could never be armed (SQ pressure) and the whole window
+        // has elapsed anyway: expire the target rather than leave it running
+        // with its deadline silently switched off.
+        state->done = true;
+        state->timed_out = true;
+        if (state->canceler) state->canceler->cancel();
+        if (state->continuation) ctx.spawn(state->continuation);
+        co_return;
+      }
+      auto ret = co_await with_cancel(ctx, sleep(ctx, left), *state->canceler);
+      if (ret && !state->done) {
+        state->done = true;
+        state->timed_out = true;
+        if (state->canceler) state->canceler->cancel();
+        if (state->continuation) ctx.spawn(state->continuation);
+        co_return;
+      }
+      if (!ret && ret.error().code != ENOBUFS) co_return;  // target finished first
+      // ENOBUFS: the sleep SQE never reached the kernel (queue full). Retrying
+      // for what is left of the window keeps the deadline real under load,
+      // which is exactly when a timeout matters most.
     }
   }
-}
+} // namespace detail
 
 template<typename V>
 struct coro_timeout_awaiter {
   std::shared_ptr<detail::timeout_state<V>> state_;
   context_t& ctx_;
+
+  ~coro_timeout_awaiter() {
+    // Our coroutine was destroyed before either task won the race; the loser
+    // must not spawn a continuation pointing into a freed frame. (state_ is
+    // shared_ptr, so the tasks themselves keep living safely.)
+    if (state_ && !state_->done) state_->continuation = nullptr;
+  }
 
   bool await_ready() const { return state_->done; }
 

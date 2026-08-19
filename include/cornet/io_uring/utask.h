@@ -107,13 +107,11 @@ struct utask_t : task_t {
    */
   CORNET_NODISCARD bool is_user_work() const { return user_work; }
 
-#if !CORNET_LINUX_VERSION_GE_5_19
   /**
    * @brief the io_uring user_data token for this task (encoded slot index + generation).
    * Used by cancellation to target the inflight operation. 0 means not submitted.
    */
   CORNET_NODISCARD inline uint64_t io_token() const { return slot_data_; }
-#endif
 
   /**
    * @brief the raw result of the async syscall (negative errno on failure).
@@ -138,11 +136,12 @@ protected:
   // owner context
   context_t* ctx{nullptr};
 
-#if !CORNET_LINUX_VERSION_GE_5_19
 private:
-  // encoded slot data (index + generation) for safe lifetime tracking
+  // encoded slot data (index + generation) for safe lifetime tracking.
+  // Unconditional on every kernel: the generation in the token is what lets a
+  // stale CQE be told apart from a live one, which the raw-pointer scheme
+  // (5.19+ compile-time path, when it existed) could not do.
   uint64_t slot_data_{0};
-#endif
 };
 
 /**

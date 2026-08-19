@@ -195,7 +195,15 @@ class connection_t {
   buffer_pool_t&           pool_;
   timer_wheel_t&           wheel_;
   connection_metrics_t&    metrics_;
-  canceler_t               canceler_;
+  // Two scopes, matching the two timeout semantics. read_canceler_ is what the
+  // idle/header/body deadlines and request_close() interrupt; writes are never
+  // cancelled (a write in flight must either complete or fail on its own, or
+  // the response gets truncated mid-bytes), so nothing wraps them. drain_canceler_
+  // serves only shutdown_gracefully()'s drain window: it must not be pre-latched
+  // by an earlier request_close(), or the "wait for the peer to read" window
+  // collapses to zero.
+  canceler_t               read_canceler_;
+  canceler_t               drain_canceler_;
   timer_node_t             timer_{};
 
   head_buffer_t  in_;

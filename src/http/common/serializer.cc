@@ -103,7 +103,24 @@ void serializer_t::status_line(out_buffer_t& out, status_t s) {
   out.put_crlf();
 }
 
+namespace {
+
+// A header name or value holding CR or LF splits one header into two on the
+// wire — response splitting for server code, request smuggling for a client
+// that forwards tainted input. Nothing else in the line grammar protects this,
+// because put() appends bytes verbatim.
+CORNET_MAYBE_UNUSED bool has_crlf(std::string_view s) {
+  return s.find('\r') != std::string_view::npos || s.find('\n') != std::string_view::npos;
+}
+
+} // namespace
+
 void serializer_t::header(out_buffer_t& out, field_t f, std::string_view value) {
+  if (has_crlf(value)) {
+    // fail the buffer rather than emit a split message; flushers answer 500
+    out.fail(http_error(http_error_t::InvalidHeader));
+    return;
+  }
   uint32_t len = 0;
   if (const char* prefix = field_prefix(f, len)) {
     out.put(prefix, len);
@@ -113,6 +130,10 @@ void serializer_t::header(out_buffer_t& out, field_t f, std::string_view value) 
 }
 
 void serializer_t::header(out_buffer_t& out, std::string_view name, std::string_view value) {
+  if (has_crlf(name) || has_crlf(value)) {
+    out.fail(http_error(http_error_t::InvalidHeader));
+    return;
+  }
   out.put(name);
   out.put(": ", 2);
   out.put(value);

@@ -36,7 +36,13 @@ size_t scheduler_t::harvest_async() {
   do {
     n = executor_.get_completed(async_tasks);
     for (size_t idx = 0; idx < n; ++idx) {
-      this->schedule(async_tasks[idx]->handle);
+      // A null handle means the awaiting frame was destroyed while the pool
+      // ran the job; the shared bookkeeping kept the result write safe, and
+      // there is simply nobody left to resume.
+      if (async_tasks[idx]->handle) {
+        this->schedule(async_tasks[idx]->handle);
+      }
+      async_tasks[idx].reset();
     }
     completed += n;
   } while(n > 0);
@@ -48,7 +54,8 @@ uint32_t scheduler_t::harvest_remote() {
   std::coroutine_handle<> h;
   uint32_t n = 0;
   while (remote_tasks_.try_dequeue(h)) {
-    schedule(h);
+    // Already counted in schedule_remote(); only the queue ownership moves.
+    ready_tasks_.push(h);
     ++n;
   }
   return n;
@@ -71,10 +78,12 @@ void scheduler_t::sched(context_t& ctx) {
     stats.tasks_resumed++;
     CORNET_METRICS_ADD(ctx.metrics().tasks_resumed);
   }
-  if (++cycles % 32) {
-    stats.task_runtime_ns +=
-      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
-  }
+  // Measured every cycle now: adapt() consumes instantaneous stats and smooths
+  // them with the member EWMA fields, so skipping cycles starved the controller
+  // of its inputs for an arbitrary 1-in-32 blackout (and task_runtime on the
+  // cycles that did feed it was silently dropped every 32nd).
+  stats.task_runtime_ns +=
+    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
   // submit sqes to io uring
   uring.submit();
   // harvest completed io task
@@ -89,17 +98,16 @@ void scheduler_t::sched(context_t& ctx) {
     // wakeup(), never blocks with remote work pending
     context_t::park_scope park(ctx);
     if (harvest_remote() == 0 && harvest_async() == 0) {
-      uring.wait_cqes(ctx, 1, io_wait_);
+      // these completions count toward IO pressure just like the peeked ones
+      cqes += uring.wait_cqes(ctx, 1, io_wait_);
     }
   }
 
   stats.cqes_ready = cqes;
   stats.inflight = uring.running_task_nr();
-  if (cycles % 32) {
-    stats.loop_runtime_ns +=
-      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
-    adapt(stats);
-  }
+  stats.loop_runtime_ns +=
+    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
+  adapt(stats);
 }
 
 void scheduler_t::adapt(const sched_stats& stats) {

@@ -3,6 +3,7 @@
 
 #include <coroutine>
 #include <memory>
+#include <optional>
 
 #include <spdlog/spdlog.h>
 
@@ -13,6 +14,13 @@ namespace cornet {
 
 class context_t;
 template<typename T> struct coro_t;
+class scope_t;
+
+namespace detail {
+template<typename F>
+coro_t<void> scope_runner(std::shared_ptr<scope_t> scope, F body,
+                          std::coroutine_handle<> continuation);
+} // namespace detail
 
 /**
  * @brief structured concurrency scope.
@@ -132,7 +140,9 @@ public:
   /**
    * @brief get the first error that occurred in any child task.
    */
-  CORNET_NODISCARD const expected<void>& error() const { return first_error_; }
+  CORNET_NODISCARD expected<void> error() const {
+    return as_expected();
+  }
 
 private:
   friend struct scope_join_awaiter;
@@ -146,6 +156,29 @@ private:
   template<typename F>
   friend auto task_scope(canceler_t& parent, F&& body);
 
+  template<typename F>
+  friend coro_t<void> detail::scope_runner(std::shared_ptr<scope_t>, F,
+                                           std::coroutine_handle<>);
+
+  /**
+   * @brief record a child's failure: keep the first one and cancel siblings.
+   * Returns without cancelling when an error was already recorded.
+   */
+  void record_failure(const char* what) {
+    if (first_error_) return;
+    if (what) {
+      SPDLOG_ERROR("task_scope: child task threw exception: {}", what);
+    } else {
+      SPDLOG_ERROR("task_scope: child task threw unknown exception");
+    }
+    first_error_ = error_t{EFAULT, error_domain::Exception};
+    canceler_->cancel();
+  }
+
+  expected<void> as_expected() const {
+    return first_error_ ? unexpected(*first_error_) : expected<void>{};
+  }
+
   /**
    * @brief runner for coro_t<void> tasks
    */
@@ -154,17 +187,9 @@ private:
     try {
       co_await task;
     } catch (const std::exception& e) {
-      if (!s.first_error_.has_value()) {
-        SPDLOG_ERROR("task_scope: child task threw exception: {}", e.what());
-        s.first_error_ = unexpected(EFAULT, error_domain::Exception);
-        s.canceler_->cancel();
-      }
+      s.record_failure(e.what());
     } catch (...) {
-      if (!s.first_error_.has_value()) {
-        SPDLOG_ERROR("task_scope: child task threw unknown exception");
-        s.first_error_ = unexpected(EFAULT, error_domain::Exception);
-        s.canceler_->cancel();
-      }
+      s.record_failure(nullptr);
     }
     s.on_child_done();
   }
@@ -177,17 +202,9 @@ private:
     try {
       co_await task;
     } catch (const std::exception& e) {
-      if (!s.first_error_.has_value()) {
-        SPDLOG_ERROR("task_scope: child task threw exception: {}", e.what());
-        s.first_error_ = unexpected(EFAULT, error_domain::Exception);
-        s.canceler_->cancel();
-      }
+      s.record_failure(e.what());
     } catch (...) {
-      if (!s.first_error_.has_value()) {
-        SPDLOG_ERROR("task_scope: child task threw unknown exception");
-        s.first_error_ = unexpected(EFAULT, error_domain::Exception);
-        s.canceler_->cancel();
-      }
+      s.record_failure(nullptr);
     }
     s.on_child_done();
   }
@@ -200,17 +217,9 @@ private:
     try {
       out = co_await task;
     } catch (const std::exception& e) {
-      if (!s.first_error_.has_value()) {
-        SPDLOG_ERROR("task_scope: child task threw exception: {}", e.what());
-        s.first_error_ = unexpected(EFAULT, error_domain::Exception);
-        s.canceler_->cancel();
-      }
+      s.record_failure(e.what());
     } catch (...) {
-      if (!s.first_error_.has_value()) {
-        SPDLOG_ERROR("task_scope: child task threw unknown exception");
-        s.first_error_ = unexpected(EFAULT, error_domain::Exception);
-        s.canceler_->cancel();
-      }
+      s.record_failure(nullptr);
     }
     s.on_child_done();
   }
@@ -225,17 +234,11 @@ private:
     } catch (const std::exception& e) {
       SPDLOG_ERROR("task_scope: child task threw exception: {}", e.what());
       out = unexpected(EFAULT, error_domain::Exception);
-      if (!s.first_error_.has_value()) {
-        s.first_error_ = unexpected(EFAULT, error_domain::Exception);
-        s.canceler_->cancel();
-      }
+      s.record_failure(nullptr);
     } catch (...) {
       SPDLOG_ERROR("task_scope: child task threw unknown exception");
       out = unexpected(EFAULT, error_domain::Exception);
-      if (!s.first_error_.has_value()) {
-        s.first_error_ = unexpected(EFAULT, error_domain::Exception);
-        s.canceler_->cancel();
-      }
+      s.record_failure(nullptr);
     }
     s.on_child_done();
   }
@@ -251,17 +254,9 @@ private:
     try {
       co_await f();
     } catch (const std::exception& e) {
-      if (!s.first_error_.has_value()) {
-        SPDLOG_ERROR("task_scope: child task threw exception: {}", e.what());
-        s.first_error_ = unexpected(EFAULT, error_domain::Exception);
-        s.canceler_->cancel();
-      }
+      s.record_failure(e.what());
     } catch (...) {
-      if (!s.first_error_.has_value()) {
-        SPDLOG_ERROR("task_scope: child task threw unknown exception");
-        s.first_error_ = unexpected(EFAULT, error_domain::Exception);
-        s.canceler_->cancel();
-      }
+      s.record_failure(nullptr);
     }
     s.on_child_done();
   }
@@ -278,7 +273,10 @@ private:
   std::unique_ptr<canceler_t> canceler_;
   int active_count_{0};
   std::coroutine_handle<> waiter_{nullptr};
-  expected<void> first_error_{};
+  // nullopt until a child or the body fails; expected<void> cannot express
+  // "no error recorded yet" (its default state is success), which used to
+  // disable every catch block above.
+  std::optional<error_t> first_error_;
 };
 
 /**
@@ -294,9 +292,38 @@ struct scope_join_awaiter {
   }
 
   expected<void> await_resume() {
-    return scope_.first_error_;
+    return scope_.as_expected();
   }
 };
+
+namespace detail {
+
+/**
+ * @brief shared body of both task_scope overloads: run body under the scope,
+ * then join, then resume whoever awaited us. The join runs even when the body
+ * throws, and the continuation is spawned unconditionally — the detached
+ * runner used to swallow a body exception into its promise and never resume
+ * the awaiting coroutine.
+ *
+ * The scope is shared, not unique: if the awaiting coroutine is destroyed
+ * while the runner still stands between body and continuation, the runner's
+ * reference must not dangle on a freed unique_ptr.
+ */
+template<typename F>
+coro_t<void> scope_runner(std::shared_ptr<scope_t> scope, F body,
+                          std::coroutine_handle<> continuation) {
+  try {
+    co_await body(*scope);
+  } catch (const std::exception& e) {
+    scope->record_failure(e.what());
+  } catch (...) {
+    scope->record_failure(nullptr);
+  }
+  co_await scope_join_awaiter{*scope};
+  scope->ctx_.spawn(continuation);
+}
+
+} // namespace detail
 
 /**
  * @brief create a structured concurrency scope and execute body within it.
@@ -318,23 +345,17 @@ auto task_scope(context_t& ctx, F&& body) {
   struct awaiter {
     context_t& ctx_;
     std::decay_t<F> body_;
-    std::unique_ptr<scope_t> scope_;
+    std::shared_ptr<scope_t> scope_;
 
     bool await_ready() { return false; }
 
     void await_suspend(std::coroutine_handle<> h) {
-      scope_ = std::make_unique<scope_t>(ctx_);
-      auto runner = [](std::unique_ptr<scope_t>& scope, std::decay_t<F> body,
-                       std::coroutine_handle<> continuation) -> coro_t<void> {
-        co_await body(*scope);
-        co_await scope_join_awaiter{*scope};
-        scope->ctx_.spawn(continuation);
-      };
-      ctx_.spawn(runner(scope_, std::move(body_), h));
+      scope_ = std::make_shared<scope_t>(ctx_);
+      ctx_.spawn(detail::scope_runner(scope_, std::move(body_), h));
     }
 
     expected<void> await_resume() {
-      return scope_->first_error_;
+      return scope_->as_expected();
     }
   };
 
@@ -361,23 +382,17 @@ auto task_scope(context_t& ctx, canceler_t& parent, F&& body) {
     context_t& ctx_;
     canceler_t& parent_;
     std::decay_t<F> body_;
-    std::unique_ptr<scope_t> scope_;
+    std::shared_ptr<scope_t> scope_;
 
     bool await_ready() { return false; }
 
     void await_suspend(std::coroutine_handle<> h) {
-      scope_ = std::make_unique<scope_t>(ctx_, parent_);
-      auto runner = [](std::unique_ptr<scope_t>& scope, std::decay_t<F> body,
-                       std::coroutine_handle<> continuation) -> coro_t<void> {
-        co_await body(*scope);
-        co_await scope_join_awaiter{*scope};
-        scope->ctx_.spawn(continuation);
-      };
-      ctx_.spawn(runner(scope_, std::move(body_), h));
+      scope_ = std::make_shared<scope_t>(ctx_, parent_);
+      ctx_.spawn(detail::scope_runner(scope_, std::move(body_), h));
     }
 
     expected<void> await_resume() {
-      return scope_->first_error_;
+      return scope_->as_expected();
     }
   };
 

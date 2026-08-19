@@ -1,5 +1,7 @@
 #include "cornet/scheduling/runtime.h"
 #include <latch>
+#include <csignal>
+#include <pthread.h>
 
 namespace cornet {
 
@@ -20,6 +22,19 @@ runtime_t::~runtime_t() {
 }
 
 void runtime_t::start(std::function<void(size_t, context_t&)> init_fn, bool keepalive) {
+  // Block BEFORE the first worker exists so every thread (this one included)
+  // inherits the mask. signalfd handlers are process-wide only if no thread can
+  // take the signal with its default disposition — masking inside on_signal()
+  // used to cover just the calling thread, so e.g. SIGINT hitting the main
+  // thread of a multi-thread runtime still killed the process. SIGPIPE must
+  // never fire at all: a send racing a peer close would otherwise kill us.
+  sigset_t mask;
+  sigemptyset(&mask);
+  sigaddset(&mask, SIGINT);
+  sigaddset(&mask, SIGTERM);
+  sigaddset(&mask, SIGPIPE);
+  pthread_sigmask(SIG_BLOCK, &mask, nullptr);
+
   std::latch init_done(thread_nr_);
 
   for (size_t i = 0; i < thread_nr_; ++i) { 

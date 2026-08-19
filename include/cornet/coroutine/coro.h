@@ -7,6 +7,7 @@
 #include <concepts>
 #include <coroutine>
 #include <exception>
+#include <stdexcept>
 #include <iterator>
 #include <memory_resource>
 
@@ -266,6 +267,11 @@ struct basic_coro_t : task_t {
       }
 
       CORNET_MAYBE_UNUSED V await_resume() {
+        // await_ready() waves an empty (moved-from) handle straight through
+        // to here; dereferencing it used to be UB.
+        if (!handle) {
+          throw std::logic_error("co_await on a moved-from coro_t");
+        }
         if constexpr (std::is_void_v<V>) {
           if (handle.promise().value.index() == 1)
             std::rethrow_exception(std::get<1>(handle.promise().value));
@@ -294,11 +300,20 @@ struct basic_coro_t : task_t {
   bool done() { return handle && handle.done(); }
 
   /**
-   * @brief let coroutine take own their own lifecycle, coro_t destruct don't destroy coroutine_handle
+   * @brief hand the coroutine its own lifetime: it self-destructs at
+   * final_suspend and this wrapper must never touch the frame again.
+   *
+   * Like unique_ptr::release, the handle leaves the wrapper as the return
+   * value — keeping it here used to leave a dangling pointer behind once the
+   * coroutine destroyed itself, after which this wrapper's destructor read
+   * promise().detached from freed memory (and would double-destroy if that
+   * byte reused as falsy).
+   * @return the released coroutine handle (this wrapper is empty afterwards)
    */
-  void detach() {
-    if (!handle || handle.done()) return;
+  std::coroutine_handle<> detach() {
+    if (!handle || handle.done()) return handle;
     native_handle().promise().detached = true;
+    return std::exchange(handle, nullptr);
   }
 
   /**

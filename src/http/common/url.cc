@@ -39,6 +39,15 @@ expected<uint16_t> parse_port(std::string_view text) {
 } // namespace
 
 expected<url_t> url_t::parse(std::string_view raw) {
+  // Everything in here is spliced verbatim into the request line later, so any
+  // control byte is a request-smuggling foot-gun, not a cosmetic difference.
+  // (A legal url percent-encodes spaces; seeing one raw is a bug to report.)
+  for (char c : raw) {
+    if (static_cast<unsigned char>(c) <= 0x20 || c == 0x7f) {
+      return http_unexpected(http_error_t::BadUrl);
+    }
+  }
+
   url_t u;
   u.raw_ = raw;
 

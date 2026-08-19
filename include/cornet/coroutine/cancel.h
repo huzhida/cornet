@@ -95,7 +95,10 @@ struct canceler_t {
   CORNET_NODISCARD bool is_cancelled() const { return cancelled_; }
 
   expected<void> reset() {
-    if (active_head_) {
+    // List membership alone cannot prove quiescence: cancel_active_tasks()
+    // detaches nodes while their ops are still inflight, and those frames keep
+    // referencing this canceler until their CQEs land. tracked_ops_ counts them.
+    if (tracked_ops_ != 0) {
       return unexpected(EBUSY);
     }
     cancelled_ = false;
@@ -113,12 +116,17 @@ struct canceler_t {
       active_head_->prev = node;
     }
     active_head_ = node;
+    ++tracked_ops_;
   }
 
   /**
    * @brief unregister an op that resolved on its own.
+   * Idempotent: a node already detached by cancel_active_tasks() (prev/next
+   * cleared, not the head) is left untouched, so a late CQE cannot corrupt
+   * whatever the list holds now.
    */
   void unlink_node(cancel_node* node) {
+    if (!node->prev && !node->next && active_head_ != node) return;
     if (node->prev) {
       node->prev->next = node->next;
     } else {
@@ -139,9 +147,17 @@ private:
    */
   void cancel_active_tasks();
 
+  /**
+   * @brief an op's frame finished with this canceler (CQE landed or submit
+   * failed); pairs with the ++tracked_ops_ in link_node.
+   */
+  void op_resolved() { --tracked_ops_; }
+
   bool cancelled_{false};
   context_t* ctx_{nullptr};
   cancel_node* active_head_{nullptr};
+  // ops whose frames currently reference this canceler; reset() requires 0
+  uint32_t tracked_ops_{0};
   canceler_t* parent_{nullptr};
   canceler_t* first_child_{nullptr};
   canceler_t* next_sibling_{nullptr};
@@ -163,6 +179,9 @@ struct cancellable_awaiter {
   cancel_node node_;
   bool submitted_{false};
   bool submit_failed_{false};
+  bool cancelled_before_submit_{false};
+  // set once await_resume() detached this op from the canceler
+  bool resolved_{false};
 
   cancellable_awaiter(Awaitable op, canceler_t* canceler)
     : op_(std::move(op)), canceler_(canceler) {}
@@ -170,23 +189,50 @@ struct cancellable_awaiter {
   cancellable_awaiter(Awaitable op, canceler_t& canceler)
     : op_(std::move(op)), canceler_(&canceler) {}
 
+  ~cancellable_awaiter() {
+    // The coroutine frame is being destroyed while its op is still armed: the
+    // node cannot stay on the cancel list (it lives in this frame), or a later
+    // cancel() would walk freed memory. Balance the book the same way a normal
+    // completion would. The kernel-side completion of the op itself is a
+    // separate matter (see the destroy-while-armed contract on utask_t).
+    if (canceler_ && submitted_ && !resolved_) {
+      canceler_->unlink_node(&node_);
+      canceler_->op_resolved();
+    }
+  }
+
+  cancellable_awaiter(const cancellable_awaiter&) = delete;
+  cancellable_awaiter& operator=(const cancellable_awaiter&) = delete;
+
   bool await_ready() {
     if (canceler_) [[likely]] {
-      if (canceler_->is_cancelled()) return true;
+      if (canceler_->is_cancelled()) {
+        // Distinguish this from "op completed synchronously in await_ready":
+        // both skip await_suspend with submitted_ == false, and only the flag
+        // keeps await_resume from misreporting a success as ECANCELED.
+        cancelled_before_submit_ = true;
+        return true;
+      }
     }
     return op_.await_ready();
   }
 
   bool await_suspend(std::coroutine_handle<> h) {
     if (canceler_) [[likely]] {
-      if (canceler_->is_cancelled()) return false;
+      if (canceler_->is_cancelled()) {
+        cancelled_before_submit_ = true;
+        return false;
+      }
       node_.task = &op_;
       canceler_->link_node(&node_);
     }
     if (!op_.await_suspend(h)) {
       // Submission failed, so no CQE is coming. Unlink and resume immediately;
       // staying suspended here would wait on a wakeup that cannot arrive.
-      if (canceler_) canceler_->unlink_node(&node_);
+      if (canceler_) {
+        canceler_->unlink_node(&node_);
+        canceler_->op_resolved();
+      }
       submit_failed_ = true;
       return false;
     }
@@ -199,8 +245,16 @@ struct cancellable_awaiter {
       // Distinguish "cancelled before submission" from "could not submit": the
       // first is a deliberate cancellation, the second is back pressure, and a
       // caller that retries wants to tell them apart.
-      if (!submitted_ && !submit_failed_) return unexpected(ECANCELED);
-      if (submitted_) canceler_->unlink_node(&node_);
+      if (cancelled_before_submit_) return unexpected(ECANCELED);
+      if (submitted_ && !resolved_) {
+        // May already be detached if cancel() ran first; unlink_node is
+        // idempotent, but the op is resolved either way. The flag matters when
+        // await_resume ran more than once (promise resumption paths) and for
+        // the destructor's bookkeeping.
+        resolved_ = true;
+        canceler_->unlink_node(&node_);
+        canceler_->op_resolved();
+      }
     }
     return op_.await_resume();
   }

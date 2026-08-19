@@ -50,7 +50,10 @@ void timer_wheel_t::arm(timer_node_t& node, std::chrono::milliseconds delay) {
   unlink(node);
   uint64_t ticks = uint64_t((delay + tick_ - std::chrono::milliseconds(1)) / tick_);
   if (ticks == 0) ticks = 1;
-  node.rounds = uint32_t(ticks / kSlots);
+  // An exact wheel multiple lands back on the cursor's slot with the deadline
+  // still one revolution out; rounds must count the laps VISITED before this
+  // one can fire, so ticks=512 fires after 512 ticks, not 1024.
+  node.rounds = uint32_t((ticks - 1) / kSlots);
   auto slot = uint32_t((cursor_ + ticks) % kSlots);
   link(node, slot);
 }

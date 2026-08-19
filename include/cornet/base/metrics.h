@@ -142,9 +142,13 @@ struct context_metrics_t {
 #define CORNET_METRICS_ADD_N(val, n) do { \
   (val) += n; \
 } while(0)
-#define CORNET_METRICS_SCOPE_TIMER(latency) do { \
-  scoped_timer_t timer(&latency); \
-} while(0)
+// The timer must survive until the end of the enclosing scope, so it needs a
+// name and no do-while wrapper: the previous `do { scoped_timer_t timer(..); }
+// while(0)` destroyed it inside the macro, and every latency metric read ~0ns.
+#define CORNET_METRICS_DETAIL_CAT2(a, b) a##b
+#define CORNET_METRICS_DETAIL_CAT(a, b) CORNET_METRICS_DETAIL_CAT2(a, b)
+#define CORNET_METRICS_SCOPE_TIMER(latency) \
+  scoped_timer_t CORNET_METRICS_DETAIL_CAT(scope_timer_, __LINE__){&(latency)}
 
 } // namespace cornet
 #else
