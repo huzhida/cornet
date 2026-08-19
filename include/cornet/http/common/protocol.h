@@ -236,6 +236,7 @@ enum class http_error_t : int {
   TooManyRedirects   = kProtocolErrorBase + 11,
   PoolExhausted      = kProtocolErrorBase + 12,  // no connection available in time
   ResponseIncomplete = kProtocolErrorBase + 13,  // peer closed mid-message
+  InvalidHeader      = kProtocolErrorBase + 14,  // CR/LF in a header name or value
 };
 
 /**

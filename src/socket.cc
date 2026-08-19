@@ -1,6 +1,7 @@
 #include "cornet/net/socket.h"
 
 #include <spdlog/spdlog.h>
+#include <sys/stat.h>
 
 #include "cornet/scheduling/context.h"
 
@@ -87,11 +88,9 @@ socket_t::~socket_t() {
     fd = -1;
   }
 }
-socket_t::socket_t(socket_t&& s) noexcept {
-  if (this != &s) {
-    this->fd = s.fd;
-    s.fd = -1;
-  }
+socket_t::socket_t(socket_t&& s) noexcept
+  : fd(s.fd), domain(s.domain), type(s.type), protocol(s.protocol) {
+  s.fd = -1;
 }
 socket_t& socket_t::operator=(socket_t&& s) noexcept {
   if (this != &s) {
@@ -99,6 +98,9 @@ socket_t& socket_t::operator=(socket_t&& s) noexcept {
       ::close(this->fd);
     }
     this->fd = s.fd;
+    this->domain = s.domain;
+    this->type = s.type;
+    this->protocol = s.protocol;
     s.fd = -1;
   }
   return *this;
@@ -204,10 +206,10 @@ socket_t::writev_awaiter::writev_awaiter(context_t& ctx, int fd, const struct io
   };
 }
 
-socket_t::sendto_awaiter::sendto_awaiter(context_t& ctx, int fd, void* buf, size_t nbytes, sockaddr* addr, socklen_t socklen, int flag)
+socket_t::sendto_awaiter::sendto_awaiter(context_t& ctx, int fd, const void* buf, size_t nbytes, sockaddr* addr, socklen_t socklen, int flag)
   : fd_(fd), flag_(flag) {
   this->ctx = &ctx;
-  iov_ = {buf, nbytes};
+  iov_ = {const_cast<void*>(buf), nbytes};
   msg_ = {};
   msg_.msg_name = addr;
   msg_.msg_namelen = socklen;
@@ -226,7 +228,8 @@ socket_t::recvfrom_awaiter::recvfrom_awaiter(context_t& ctx, int fd, void* buf, 
   iov_ = {buf, nbytes};
   msg_ = {};
   msg_.msg_name = addr;
-  msg_.msg_namelen = *socklen;
+  // nullptr socklen means "caller does not want the peer length back"
+  msg_.msg_namelen = socklen ? *socklen : 0;
   msg_.msg_iov = &iov_;
   msg_.msg_iovlen = 1;
   this->prepare_fn = [](utask_t* self, io_uring_sqe* sqe) {
@@ -302,7 +305,14 @@ expected<void> socket_t::bind(std::string_view address, uint16_t port) const {
   sockaddr_storage addr{};
   socklen_t socklen;
   if (this->domain == AF_UNIX) {
-    ::unlink(std::string(address).c_str());
+    // Rebind wants the stale pathname gone, but only a socket file may be
+    // touched: blindly unlinking used to delete whatever happened to sit at a
+    // mistyped path. Anything else is left in place so ::bind() reports
+    // EADDRINUSE, which is the honest outcome.
+    struct stat st {};
+    if (::lstat(std::string(address).c_str(), &st) == 0 && S_ISSOCK(st.st_mode)) {
+      ::unlink(std::string(address).c_str());
+    }
     auto socklen_ = to_address(address, addr);
     if (!socklen_) {
       return unexpected(socklen_.error());
@@ -356,7 +366,7 @@ socket_t::socket_t(int fd) : cornet::socket_t(fd) {
   type = SOCK_DGRAM;
   protocol = IPPROTO_UDP;
 }
-socket_t::sendto_awaiter socket_t::sendto(context_t& ctx, void *buf, size_t nbytes, sockaddr *addr, socklen_t socklen, int flag) const {
+socket_t::sendto_awaiter socket_t::sendto(context_t& ctx, const void *buf, size_t nbytes, sockaddr *addr, socklen_t socklen, int flag) const {
   return sendto_awaiter{ctx, fd, buf, nbytes, addr, socklen, flag};
 }
 socket_t::recvfrom_awaiter socket_t::recvfrom(context_t& ctx, void *buf, size_t nbytes, sockaddr *addr, socklen_t *socklen, int flag) const {
@@ -366,7 +376,7 @@ socket_t::recvfrom_awaiter socket_t::recvfrom(context_t& ctx, void *buf, size_t 
 } // cornet
 
 namespace cornet::tcp::local {
-socket_t::socket_t() : cornet::tcp::socket_t(::socket(AF_UNIX, SOCK_STREAM, 0)) {
+socket_t::socket_t() : cornet::tcp::socket_t(::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0)) {
   domain = AF_UNIX;
 }
 socket_t::socket_t(int fd) : cornet::tcp::socket_t(fd) {
@@ -375,7 +385,7 @@ socket_t::socket_t(int fd) : cornet::tcp::socket_t(fd) {
 } // cornet::tcp::local
 
 namespace cornet::tcp::v4 {
-socket_t::socket_t() : cornet::tcp::socket_t(::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) {
+socket_t::socket_t() : cornet::tcp::socket_t(::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, IPPROTO_TCP)) {
   domain = AF_INET;
 }
 socket_t::socket_t(int fd) : cornet::tcp::socket_t(fd) {
@@ -384,7 +394,7 @@ socket_t::socket_t(int fd) : cornet::tcp::socket_t(fd) {
 } // cornet::tcp::v4
 
 namespace cornet::tcp::v6 {
-socket_t::socket_t() : cornet::tcp::socket_t(::socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP)) {
+socket_t::socket_t() : cornet::tcp::socket_t(::socket(AF_INET6, SOCK_STREAM | SOCK_CLOEXEC, IPPROTO_TCP)) {
   domain = AF_INET6;
 }
 socket_t::socket_t(int fd) : cornet::tcp::socket_t(fd) {
@@ -400,7 +410,7 @@ void socket_t::v6_only(bool on) const {
 } // cornet::tcp::v6
 
 namespace cornet::udp::local {
-socket_t::socket_t() : cornet::udp::socket_t(::socket(AF_UNIX, SOCK_DGRAM, 0)) {
+socket_t::socket_t() : cornet::udp::socket_t(::socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0)) {
   domain = AF_UNIX;
 }
 socket_t::socket_t(int fd) : cornet::udp::socket_t(fd) {
@@ -409,7 +419,7 @@ socket_t::socket_t(int fd) : cornet::udp::socket_t(fd) {
 } // cornet::udp::local
 
 namespace cornet::udp::v4 {
-socket_t::socket_t() : cornet::udp::socket_t(::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) {
+socket_t::socket_t() : cornet::udp::socket_t(::socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, IPPROTO_UDP)) {
   domain = AF_INET;
 }
 socket_t::socket_t(int fd) : cornet::udp::socket_t(fd) {
@@ -418,7 +428,7 @@ socket_t::socket_t(int fd) : cornet::udp::socket_t(fd) {
 } // cornet::udp::v4
 
 namespace cornet::udp::v6 {
-socket_t::socket_t() : cornet::udp::socket_t(::socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP)) {
+socket_t::socket_t() : cornet::udp::socket_t(::socket(AF_INET6, SOCK_DGRAM | SOCK_CLOEXEC, IPPROTO_UDP)) {
   domain = AF_INET6;
 }
 socket_t::socket_t(int fd) : cornet::udp::socket_t(fd) {

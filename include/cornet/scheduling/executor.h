@@ -2,6 +2,8 @@
 #define CORNET_EXECUTOR_H
 
 #include <moodycamel/concurrentqueue.h>
+#include <array>
+#include <memory>
 #include <vector>
 
 #ifdef BLOCK_SIZE
@@ -19,11 +21,17 @@ struct atask_t;
  * @brief thread pool executor for offloading blocking/CPU-intensive work.
  * Tasks are submitted via add(), executed on worker threads, and
  * collected back via get_completed() on the owner thread.
+ *
+ * Tasks travel as shared_ptr through both queues: a worker may finish its
+ * callable while the coroutine that asked for it has already been destroyed,
+ * and the queue reference is what guarantees the result write still targets
+ * live memory. (The resume itself is filtered by the owner thread checking
+ * the task's handle, which the dead frame's awaiter nulled.)
  */
 class executor_t {
  public:
-  using block_queue_t = moodycamel::BlockingConcurrentQueue<atask_t*>;
-  using queue_t = moodycamel::ConcurrentQueue<atask_t*>;
+  using block_queue_t = moodycamel::BlockingConcurrentQueue<std::shared_ptr<atask_t>>;
+  using queue_t = moodycamel::ConcurrentQueue<std::shared_ptr<atask_t>>;
 
   /**
    * @brief construct executor (threads started lazily on first add()).
@@ -43,17 +51,17 @@ class executor_t {
 
   /**
    * @brief submit a task to be executed on a worker thread
-   * @param t task to execute
+   * @param t task to execute (queue takes a share of ownership)
    * @return true if enqueued, false if queue is full
    */
-  bool add(atask_t* t);
+  bool add(std::shared_ptr<atask_t> t);
 
   /**
    * @brief collect completed tasks back to the owner thread
-   * @param tasks output array for completed task pointers
+   * @param tasks output array for completed tasks
    * @return number of tasks dequeued
    */
-  size_t get_completed(std::array<atask_t*, 32>& tasks);
+  size_t get_completed(std::array<std::shared_ptr<atask_t>, 32>& tasks);
 
   /**
    * @brief gracefully stop all workers and drain remaining tasks

@@ -361,8 +361,7 @@ public:
 
     auto future = task_future_t<V>{state};
     auto coro = detail::make_submit_wrapper<F, V>(std::forward<F>(f), &ctx, std::move(state));
-    coro.detach();
-    ctx.spawn_remote(coro.handle);
+    ctx.spawn_remote(coro.detach());
     return future;
   }
 
@@ -420,8 +419,7 @@ public:
 
     auto coro = detail::make_async_wrapper<std::decay_t<F>, R>(
         &ctx, std::move(state), std::forward<F>(f));
-    coro.detach();
-    ctx.spawn_remote(coro.handle);
+    ctx.spawn_remote(coro.detach());
     return future;
   }
 
@@ -465,8 +463,7 @@ public:
     auto& ctx = select_context();
 
     auto coro = detail::make_spawn_async_wrapper<std::decay_t<F>>(&ctx, std::forward<F>(f));
-    coro.detach();
-    ctx.spawn_remote(coro.handle);
+    ctx.spawn_remote(coro.detach());
   }
 
 private:

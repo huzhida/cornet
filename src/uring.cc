@@ -120,20 +120,29 @@ expected<void> uring_t::get_sqes(io_uring_sqe** out, size_t n) {
   // try to acquire all n SQEs without intermediate submit
   for (size_t i = 0; i < n; ++i) {
     out[i] = io_uring_get_sqe(uring.get());
+    if (out[i]) continue;
+    // Every SQE acquired so far sits in out[0..i) untouched: the ring holds no
+    // un-prepped slot from us, so submitting here is safe. Submitting *after*
+    // grabbing slots but before prepping them would hand the kernel stale SQE
+    // contents (old opcode/fd/buf/user_data) — that is what the retry loop this
+    // replaces used to do.
+    CORNET_METRICS_ADD(metrics_->get_sqe_submit_forced);
+    int ret = io_uring_submit(uring.get());
+    if (ret > 0) tracker_.io_submit(static_cast<uint32_t>(ret));
+    out[i] = io_uring_get_sqe(uring.get());
     if (!out[i]) {
-      // not enough space, submit pending and retry all from scratch
-      CORNET_METRICS_ADD(metrics_->get_sqe_submit_forced);
-      int ret = io_uring_submit(uring.get());
-      if (ret > 0) tracker_.io_submit(static_cast<uint32_t>(ret));
-      for (size_t j = 0; j < n; ++j) {
-        out[j] = io_uring_get_sqe(uring.get());
-        if (!out[j]) {
-          CORNET_METRICS_ADD(metrics_->get_sqe_exhausted);
-          SPDLOG_WARN("submission queue exhausted, could not acquire {} linked sqes", n);
-          return unexpected(ENOBUFS);
-        }
+      // Submitting freed nothing, so the kernel side is saturated. The i slots
+      // already grabbed cannot be returned to the ring; prep them as NOPs with
+      // null user_data so a later submit() ships something harmless and the CQ
+      // side ignores them (null user_data resolves to no utask).
+      for (size_t j = 0; j < i; ++j) {
+        io_uring_prep_nop(out[j]);
+        io_uring_sqe_set_data(out[j], nullptr);
+        out[j] = nullptr;
       }
-      return {};
+      CORNET_METRICS_ADD(metrics_->get_sqe_exhausted);
+      SPDLOG_WARN("submission queue exhausted, could not acquire {} linked sqes", n);
+      return unexpected(ENOBUFS);
     }
   }
   return {};

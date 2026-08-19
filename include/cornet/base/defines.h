@@ -7,12 +7,11 @@
 // CPU cache line size for alignment purposes
 #define CORNET_CACHE_LINE 64
 
-// Linux kernel version check (5.19 = 393779) — IORING_ASYNC_CANCEL_ANY support
-#include <linux/version.h>
-#ifndef KERNEL_VERSION
-#define KERNEL_VERSION(a,b,c) (((a) << 16) + ((b) << 8) + ((c) > 255 ? 255 : (c)))
-#endif
-#define CORNET_LINUX_VERSION_GE_5_19 0
+// Kernel features depend on the RUNNING kernel, not any set of headers: a
+// container image's linux/version.h describes the image, not the host kernel
+// it executes on. Version-sensitive behavior (the one-shot cancel sweep) is
+// therefore probed at runtime via uname() (see context.cc), and there is no
+// compile-time kernel gate here.
 
 // suppress unused warnings
 #define CORNET_MAYBE_UNUSED [[maybe_unused]]

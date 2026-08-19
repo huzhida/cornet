@@ -169,7 +169,7 @@ class socket_t {
    * @brief sendto awaiter with embedded iovec/msghdr
    */
   struct sendto_awaiter : utask_t {
-    sendto_awaiter(context_t& ctx, int fd, void* buf, size_t nbytes, sockaddr* addr, socklen_t socklen, int flag);
+    sendto_awaiter(context_t& ctx, int fd, const void* buf, size_t nbytes, sockaddr* addr, socklen_t socklen, int flag);
    private:
     int fd_;
     int flag_;
@@ -178,22 +178,34 @@ class socket_t {
   };
 
   /**
-   * @brief recvfrom awaiter with embedded iovec/msghdr
+   * @brief recvfrom awaiter with embedded iovec/msghdr.
+   * Passing socklen == nullptr means "don't report the peer address" (and is
+   * also the only legal way to pass addr == nullptr); it used to crash in the
+   * constructor dereferencing it.
    */
   struct recvfrom_awaiter : utask_t {
     recvfrom_awaiter(context_t& ctx, int fd, void* buf, size_t nbytes, sockaddr* addr, socklen_t* socklen, int flag);
 
-    CORNET_NODISCARD CORNET_MAYBE_UNUSED expected<int> await_resume() const {
+    CORNET_NODISCARD CORNET_MAYBE_UNUSED expected<int> await_resume() {
       if (value < 0) return unexpected(-value);
-      *user_socklen_ = msg_.msg_namelen;
+      truncated_ = (msg_.msg_flags & MSG_TRUNC) != 0;
+      if (user_socklen_) *user_socklen_ = msg_.msg_namelen;
       return value;
     }
+
+    /**
+     * @brief true when the datagram did not fit the buffer and was truncated.
+     * The syscall reports bytes written, not bytes dropped, so without this a
+     * caller silently accepts a partial datagram as a complete one.
+     */
+    CORNET_NODISCARD bool truncated() const { return truncated_; }
    private:
     int fd_;
     int flag_;
     struct iovec iov_;
     struct msghdr msg_;
     socklen_t* user_socklen_;
+    bool truncated_{false};
   };
 
   ~socket_t();
@@ -231,9 +243,12 @@ class socket_t {
     return ::getsockname(fd, addr, socklen);
   }
   /**
-   * @brief async close socket
+   * @brief async close socket.
+   * The socket relinquishes the fd immediately; the awaiter owns it from there.
+   * The result MUST be co_await-ed (or the fd leaks), hence nodiscard. If the
+   * op cannot reach the kernel, the awaiter falls back to ::close() itself.
    */
-  close_awaiter close(context_t& ctx);
+  CORNET_NODISCARD close_awaiter close(context_t& ctx);
   /**
    * @brief async shutdown socket (half-close).
    * @param ctx context for io_uring operations
@@ -320,12 +335,15 @@ class socket_t : public cornet::socket_t {
 
   /**
    * @brief accept a connection, returning a new tcp socket.
+   * Accepted fds are CLOEXEC by default, matching the socket() constructors;
+   * pass flag = 0 to opt out.
    */
-  tcp_accept_awaiter accept(context_t& ctx, int flag = 0) const;
+  tcp_accept_awaiter accept(context_t& ctx, int flag = SOCK_CLOEXEC) const;
   /**
    * @brief accept a connection with raw sockaddr.
    */
-  accept_awaiter accept(context_t& ctx, sockaddr* addr, socklen_t* socklen, int flag = 0) const;
+  accept_awaiter accept(context_t& ctx, sockaddr* addr, socklen_t* socklen,
+                        int flag = SOCK_CLOEXEC) const;
   /**
    * @brief sync listen on address:port
    */
@@ -338,7 +356,7 @@ class socket_t : public cornet::socket_t {
  protected:
   explicit socket_t(int fd);
  public:
-  sendto_awaiter sendto(context_t& ctx, void* buf, size_t nbytes, sockaddr* addr, socklen_t socklen, int flag = 0) const;
+  sendto_awaiter sendto(context_t& ctx, const void* buf, size_t nbytes, sockaddr* addr, socklen_t socklen, int flag = 0) const;
   recvfrom_awaiter recvfrom(context_t& ctx, void* buf, size_t nbytes, sockaddr* addr, socklen_t* socklen, int flag = 0) const;
 };
 } // cornet::udp

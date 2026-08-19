@@ -91,9 +91,10 @@ struct context_t {
       static_assert(std::is_base_of_v<task_t, R>,
                     "T must be derived from task_t");
       if constexpr (std::is_rvalue_reference_v<decltype(task)>) {
-        task.detach();
+        scheduler_.schedule(task.detach());
+      } else {
+        scheduler_.schedule(task.handle);
       }
-      scheduler_.schedule(task.handle);
     }
   }
 
@@ -116,8 +117,7 @@ struct context_t {
     auto wrapper = detail::make_wrapper_coro([f = std::decay_t<F>(std::forward<F>(fn))]() mutable {
       return f();
     });
-    wrapper.detach();
-    scheduler_.schedule(wrapper.handle);
+    scheduler_.schedule(wrapper.detach());
   }
 
   /**
@@ -147,9 +147,10 @@ struct context_t {
       static_assert(std::is_base_of_v<task_t, R>,
                     "T must be derived from task_t");
       if constexpr (std::is_rvalue_reference_v<decltype(task)>) {
-        task.detach();
+        h = task.detach();
+      } else {
+        h = task.handle;
       }
-      h = task.handle;
     }
     scheduler_.schedule_remote(h);
     wakeup();
@@ -174,8 +175,7 @@ struct context_t {
     auto wrapper = detail::make_wrapper_coro([f = std::decay_t<F>(std::forward<F>(fn))]() mutable {
       return f();
     });
-    wrapper.detach();
-    scheduler_.schedule_remote(wrapper.handle);
+    scheduler_.schedule_remote(wrapper.detach());
     wakeup();
   }
 
@@ -198,8 +198,7 @@ struct context_t {
                                                ...as = std::decay_t<Args>(std::forward<Args>(args))]() mutable {
       return f(std::move(as)...);
     });
-    wrapper.detach();
-    scheduler_.schedule_remote(wrapper.handle);
+    scheduler_.schedule_remote(wrapper.detach());
     wakeup();
   }
 
@@ -214,21 +213,40 @@ struct context_t {
   template<typename F, typename R = std::invoke_result_t<F>>
   struct async_awaiter {
     context_t& ctx_;
-    async_task_t<std::decay_t<F>, R> task_;
+    // Heap + shared ownership: the executor queues hold a reference too, so a
+    // worker finishing after this coroutine died still writes live memory, and
+    // the destructor below removes ourselves from the resume path.
+    std::shared_ptr<async_task_t<std::decay_t<F>, R>> task_;
+    bool submitted_{false};
+    bool resumed_{false};
+
     explicit async_awaiter(context_t& ctx, F&& f)
-      : ctx_(ctx), task_(std::forward<F>(f)) {}
+      : ctx_(ctx) {
+      task_ = std::make_shared<async_task_t<std::decay_t<F>, R>>(std::forward<F>(f));
+    }
+
+    ~async_awaiter() {
+      if (submitted_ && !resumed_ && task_) {
+        // Never resolved: nobody may resume the dead coroutine. The completion
+        // still lands harmlessly on the heap block the queues keep alive.
+        task_->handle = nullptr;
+      }
+    }
+
     bool await_ready() { return false; }
     void await_suspend(std::coroutine_handle<> h) {
-      task_.handle = h;
-      if (!ctx_.executor().add(&task_)) {
-        task_.exception = std::make_exception_ptr(
+      task_->handle = h;
+      submitted_ = true;
+      if (!ctx_.executor().add(task_)) {
+        task_->exception = std::make_exception_ptr(
             std::system_error(ENOBUFS, std::system_category(), "executor queue full"));
         ctx_.spawn(h);
       }
     }
     R await_resume() {
-      if (task_.exception) std::rethrow_exception(task_.exception);
-      if constexpr (!std::is_void_v<R>) return std::move(task_.result_);
+      resumed_ = true;
+      if (task_->exception) std::rethrow_exception(task_->exception);
+      if constexpr (!std::is_void_v<R>) return std::move(task_->result_);
     }
   };
 
@@ -611,6 +629,9 @@ private:
   std::unordered_map<int, std::function<void(int)>> signal_handlers_;
   // keep-alive flag: prevents auto-exit when user tasks are idle
   bool keep_alive_{false};
+  // kernel >= 5.19 probe result (runtime, via uname()); gates the one-shot
+  // cancel sweep. Compile-time headers would lie inside containers.
+  const bool kernel_ge_5_19_{false};
   // true while a cancellation sweep is in flight; keeps run() from spawning a
   // fresh sweep on every iteration while the previous one is still working
   bool cancel_inflight_{false};

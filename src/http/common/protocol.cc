@@ -321,6 +321,7 @@ const char* http_error_name(int code) {
     case http_error_t::TooManyRedirects:   return "too many redirects";
     case http_error_t::PoolExhausted:      return "no connection available";
     case http_error_t::ResponseIncomplete: return "peer closed before the response ended";
+    case http_error_t::InvalidHeader:      return "CR/LF in header name or value";
     default: break;
   }
   if (code >= 0 && code < kProtocolErrorBase) {
@@ -342,6 +343,7 @@ status_t status_for_error(error_t err) {
       return status_t::HttpVersionNotSupported;
     case http_error_t::OutputOverflow:
     case http_error_t::InvalidState:
+    case http_error_t::InvalidHeader:
       return status_t::InternalServerError;
     default:
       break;

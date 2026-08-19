@@ -76,7 +76,12 @@ coro_t<expected<void>> body_writer_t::write(std::string_view data) {
   conn_->stream_out_.put(data);
   conn_->stream_out_.put_crlf();
 
-  co_await conn_->flush_stream();
+  // The chunk was staged only if there was room; anything larger than the
+  // stream buffer already failed inside put(), and flush_stream() re-reports
+  // that. Propagating it keeps >buffer writes from silently truncating while
+  // telling the handler everything went out.
+  auto ok = co_await conn_->flush_stream();
+  if (!ok) co_return unexpected(ok.error());
   co_return expected<void>{};
 }
 
@@ -85,7 +90,8 @@ coro_t<expected<void>> body_writer_t::finish() {
   // Send terminating zero-length chunk: "0\r\n\r\n"
   static const char kTerm[] = "0\r\n\r\n";
   conn_->stream_out_.put(kTerm, sizeof(kTerm) - 1);
-  co_await conn_->flush_stream();
+  auto ok = co_await conn_->flush_stream();
+  if (!ok) co_return unexpected(ok.error());
   co_return expected<void>{};
 }
 

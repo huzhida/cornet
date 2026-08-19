@@ -29,6 +29,22 @@ void set_port(resolved_address& addr, uint16_t port) {
   }
 }
 
+/**
+ * @brief balances bucket.opening across the suspension points of acquire().
+ * A coroutine destroyed while its DNS resolve or connect is still suspended
+ * never runs the "--opening" epilogue; without the guard every such cancelled
+ * request leaked one slot of the per-host budget until nobody could ever open
+ * a connection to that origin again. A coroutine frame destruction runs local
+ * destructors, which is the hook this relies on.
+ */
+struct opening_guard_t {
+  uint32_t& n;
+  explicit opening_guard_t(uint32_t& n) : n(n) { ++n; }
+  ~opening_guard_t() { --n; }
+  opening_guard_t(const opening_guard_t&) = delete;
+  opening_guard_t& operator=(const opening_guard_t&) = delete;
+};
+
 } // namespace
 
 coro_t<expected<resolved_address>> dns_cache_t::resolve(std::string_view host, uint16_t port) {
@@ -179,6 +195,18 @@ void client_pool_t::on_wait_expired(void* owner) {
   if (waiter->handle) waiter->pool->ctx_.spawn(waiter->handle);
 }
 
+client_pool_t::wait_awaiter::~wait_awaiter() {
+  // Destroyed while parked (e.g. the request coroutine was cancelled mid-wait):
+  // pull out of both queues — grant_or_park and the wheel must never walk a
+  // waiter embedded in a freed coroutine frame. Both removals are address-based
+  // no-ops once the grant/expire path has already dequeued us.
+  pool->wheel_.cancel(waiter.timer);
+  if (waiter.bucket) {
+    auto& q = static_cast<bucket_t*>(waiter.bucket)->waiters;
+    q.erase(std::remove(q.begin(), q.end(), &waiter), q.end());
+  }
+}
+
 void client_pool_t::wait_awaiter::await_suspend(std::coroutine_handle<> h) {
   waiter.handle = h;
   waiter.pool = pool;
@@ -235,14 +263,13 @@ coro_t<expected<client_connection_t*>> client_pool_t::acquire(std::string_view h
     // ── 2. room for a new one ──
     if (bucket.busy.size() + bucket.opening < opt_.max_conns_per_host &&
         total_ < opt_.max_total_conns) {
-      ++bucket.opening;
+      opening_guard_t opening{bucket.opening};
 
       // Fast path: numeric IP — skip the DNS cache coroutine entirely.
       auto addr_or = try_resolve_numeric(host, port);
       if (addr_or) {
         auto opened = co_await client_connection_t::open(ctx_, opt_, bufs_, wheel_, metrics_, host,
                                                          port, &*addr_or);
-        --bucket.opening;
         if (!opened) co_return unexpected(opened.error());
 
         (*opened)->set_pool(this);
@@ -255,12 +282,10 @@ coro_t<expected<client_connection_t*>> client_pool_t::acquire(std::string_view h
       // Slow path: DNS resolution through cache.
       auto addr = co_await dns_.resolve(host, port);
       if (!addr) {
-        --bucket.opening;
         co_return unexpected(addr.error());
       }
       auto opened = co_await client_connection_t::open(ctx_, opt_, bufs_, wheel_, metrics_, host,
                                                        port, &*addr);
-      --bucket.opening;
       if (!opened) co_return unexpected(opened.error());
 
       (*opened)->set_pool(this);

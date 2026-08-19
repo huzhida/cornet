@@ -185,6 +185,11 @@ match_t router_t::match(method_t m, std::string_view path, param_slots_t& out) c
     const impl_t::node_t* node;
     uint32_t seg;
     uint32_t params;
+    // Which alternative is still untried at this node. The previous code did not
+    // record this and always retried ':name' first, which meant a path whose
+    // param branch dead-ended never reached '/a/*rest' at all (404 instead of
+    // matching the wildcard sitting right there).
+    enum class alt_t : uint8_t { Param, Wildcard } alt;
   };
 
   std::string_view captured[param_slots_t::kMax];
@@ -192,7 +197,6 @@ match_t router_t::match(method_t m, std::string_view path, param_slots_t& out) c
 
   const impl_t::node_t* node = &impl_->root;
   uint32_t i = 0;
-  bool wildcard_hit = false;
 
   // Small explicit backtracking stack: only ':' and '*' create alternatives, and
   // real route tables are shallow.
@@ -204,16 +208,20 @@ match_t router_t::match(method_t m, std::string_view path, param_slots_t& out) c
       auto lit = node->literal.find(std::string(seg));
       if (lit != node->literal.end()) {
         // remember the alternatives in case this branch dead-ends
-        if (node->param || node->wildcard) {
-          stack.push_back(frame_t{node, i, captured_n});
+        if (node->param) {
+          stack.push_back(frame_t{node, i, captured_n, frame_t::alt_t::Param});
+        } else if (node->wildcard) {
+          stack.push_back(frame_t{node, i, captured_n, frame_t::alt_t::Wildcard});
         }
         node = lit->second.get();
         ++i;
         continue;
       }
       if (node->param) {
+        if (node->wildcard) {
+          stack.push_back(frame_t{node, i, captured_n, frame_t::alt_t::Wildcard});
+        }
         if (captured_n < param_slots_t::kMax) captured[captured_n++] = seg;
-        if (node->wildcard) stack.push_back(frame_t{node, i, captured_n - 1});
         node = node->param.get();
         ++i;
         continue;
@@ -225,7 +233,6 @@ match_t router_t::match(method_t m, std::string_view path, param_slots_t& out) c
         }
         node = node->wildcard.get();
         i = uint32_t(segs.size());
-        wildcard_hit = true;
         continue;
       }
       return false;
@@ -240,8 +247,11 @@ match_t router_t::match(method_t m, std::string_view path, param_slots_t& out) c
     node = frame.node;
     i = frame.seg;
     captured_n = frame.params;
-    // retry this node preferring the parameterised alternatives
-    if (node->param) {
+    if (frame.alt == frame_t::alt_t::Param && node->param) {
+      // keep the wildcard alternative reachable for the next round
+      if (node->wildcard) {
+        stack.push_back(frame_t{node, i, captured_n, frame_t::alt_t::Wildcard});
+      }
       if (captured_n < param_slots_t::kMax) captured[captured_n++] = segs[i];
       node = node->param.get();
       ++i;
@@ -250,13 +260,11 @@ match_t router_t::match(method_t m, std::string_view path, param_slots_t& out) c
       if (captured_n < param_slots_t::kMax) captured[captured_n++] = path.substr(rest_start);
       node = node->wildcard.get();
       i = uint32_t(segs.size());
-      wildcard_hit = true;
     } else {
       continue;
     }
     matched = try_descend();
   }
-  (void)wildcard_hit;
 
   if (!matched) return {};
 
