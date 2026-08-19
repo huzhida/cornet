@@ -83,7 +83,11 @@ class uring_t {
      CORNET_METRICS_ADD(metrics_->wait_calls);
      cqe_t cqe;
      __kernel_timespec ts = to_kernel_timespec(timeout);
+     // liburing flushes pending SQEs as part of the wait; count them for
+     // io_inflight_ the same way submit_and_wait_cqes() does.
+     const unsigned to_submit = io_uring_sq_ready(uring.get());
      int ret = io_uring_wait_cqes(uring.get(), &cqe, wait_nr, &ts, mask);
+     if (to_submit > 0) tracker_.io_submit(to_submit);
      if (ret == -ETIME) {
        CORNET_METRICS_ADD(metrics_->wait_timeouts);
        return 0;
@@ -91,6 +95,43 @@ class uring_t {
      uint32_t n = process_cqes(ctx, cqe);
      CORNET_METRICS_ADD(metrics_->wait_cqes_processed);
      return n;
+   }
+
+  /**
+   * @brief flush pending SQEs and wait for CQEs in a single io_uring_enter
+   *
+   * Preferred over a separate submit() + wait_cqes() pair on the idle path:
+   * the enter that carries the SQEs doubles as the wait, halving the syscall
+   * count of an "edge" cycle that has fresh SQEs but nothing immediately
+   * completable. Under IORING_SETUP_IOPOLL reaping only advances on enter,
+   * which this call performs by construction, so it never regresses to a
+   * userspace-only peek loop either.
+   * @param ctx context reference
+   * @param wait_nr minimum number of CQEs to wait for
+   * @param timeout timeout period
+   * @param mask signal mask
+   * @return number of processed CQEs
+   */
+  template <typename Rep, typename Period>
+  uint32_t submit_and_wait_cqes(context_t& ctx, uint32_t wait_nr, std::chrono::duration<Rep, Period> timeout,
+                                sigset_t* mask = nullptr) {
+    CORNET_METRICS_ADD(metrics_->wait_calls);
+    cqe_t cqe;
+    __kernel_timespec ts = to_kernel_timespec(timeout);
+    // io_inflight_ accounting pairs with process_cqes()'s io_complete(): SQEs
+    // flushed by this call reach the kernel even when the wait itself times
+    // out, so they must be counted here — the sched() loop no longer
+    // guarantees an independent submit() before every wait.
+    const unsigned to_submit = io_uring_sq_ready(uring.get());
+    int ret = io_uring_submit_and_wait_timeout(uring.get(), &cqe, wait_nr, &ts, mask);
+    if (to_submit > 0) tracker_.io_submit(to_submit);
+    if (ret == -ETIME) {
+      CORNET_METRICS_ADD(metrics_->wait_timeouts);
+      return 0;
+    }
+    uint32_t n = process_cqes(ctx, cqe);
+    CORNET_METRICS_ADD(metrics_->wait_cqes_processed);
+    return n;
   }
 
   /**

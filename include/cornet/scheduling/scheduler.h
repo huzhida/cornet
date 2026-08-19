@@ -112,16 +112,17 @@ struct scheduler_t {
   /**
    * @brief push coroutine handle to the remote (cross-thread) queue.
    *
-   * Counted IMMEDIATELY, not when harvested: the count is what keeps idle()
-   * false, and the window between "enqueue, counter still 0" and the owner's
-   * next harvest is exactly where run() used to exit with work unpublished —
-   * a lost task, and a runtime submit() future that never completes.
-   * harvest_remote() therefore moves handles without re-counting.
+   * Contract: spawn_remote() is for keep-alive contexts. The handle is counted
+   * at harvest time, on the owner thread, which keeps the tracker strictly
+   * single-threaded — no atomics on the hot path. That is safe because with
+   * keep_alive set, user_idle()/idle() can never turn true, so an enqueued
+   * handle can never be abandoned by the idle exit; the loop only leaves on an
+   * explicit stop()/shutdown(), and spawning new work into a closing context
+   * is a usage error either way.
    * @param h coroutine handle
    */
   inline void schedule_remote(std::coroutine_handle<> h) {
     remote_tasks_.enqueue(h);
-    tracker_.coroutine_add();
   }
 
   /**

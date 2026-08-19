@@ -177,10 +177,16 @@ uint32_t uring_t::wait_cqes(context_t &ctx, uint32_t wait_nr, sigset_t *mask) {
   CORNET_METRICS_ADD(metrics_->wait_calls);
   CORNET_METRICS_SCOPE_TIMER(metrics_->wait_latency);
   cqe_t cqe;
+  // liburing flushes pending SQEs as part of the wait; count them for
+  // io_inflight_ the same way submit_and_wait_cqes() does, since callers are
+  // no longer guaranteed to have emptied the SQ through submit() first.
+  const unsigned to_submit = io_uring_sq_ready(uring.get());
   if (io_uring_wait_cqes(uring.get(), &cqe, wait_nr, nullptr, mask) < 0) {
+    if (to_submit > 0) tracker_.io_submit(to_submit);
     CORNET_METRICS_ADD(metrics_->wait_timeouts);
     return 0;
   }
+  if (to_submit > 0) tracker_.io_submit(to_submit);
   uint32_t n = process_cqes(ctx, cqe);
   CORNET_METRICS_ADD_N(metrics_->wait_cqes_processed, n);
   return n;

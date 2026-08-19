@@ -29,6 +29,17 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release"
       }
+    },
+    {
+      "name": "profile",
+      "inherits": "default",
+      "displayName": "Profile (保留帧指针+调试符号, 供 tools/profile.sh 使用)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CORNET_ENABLE_BENCH": "ON",
+        "CMAKE_CXX_FLAGS": "-fno-omit-frame-pointer -g",
+        "CMAKE_EXE_LINKER_FLAGS": "-rdynamic"
+      }
     }
   ],
   "buildPresets": [
@@ -39,6 +50,10 @@
     {
       "name": "release",
       "configurePreset": "release"
+    },
+    {
+      "name": "profile",
+      "configurePreset": "profile"
     }
   ]
 }

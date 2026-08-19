@@ -327,9 +327,20 @@ coro_t<expected<void>> body_reader_t::drain() {
 
 // ──────────────────────────── dispatch ────────────────────────────
 
+// Runs a filter chain that is known to be sync-only straight through, without
+// a run_filters() coroutine frame. Callers must check has_async_filters().
+static bool run_sync_filters(const router_t& router, request_t& req, response_t& resp) {
+  for (const auto& f : router.filters()) {
+    if (!f.sync_fn(req, resp)) return false;
+  }
+  return true;
+}
+
 coro_t<void> connection_t::invoke(const route_t& route) {
   // A synchronous handler is called directly: no frame, no suspension, no trip
   // through the scheduler. That is the whole reason the two kinds are separate.
+  // (Both dispatch sites in run() branch on kind first, so this path only runs
+  // for async handlers and pays for a frame only when one can actually suspend.)
   if (route.kind == route_t::kind_t::Sync) {
     route.sync_fn(req_, resp_);
     co_return;
@@ -788,8 +799,18 @@ coro_t<void> connection_t::run(const router_t& router) {
             req_.set_reader(&reader_);
             if (route_) {
               bool proceed = true;
-              if (router.has_filters()) proceed = co_await run_filters(router);
-              if (proceed) co_await invoke(*route_);
+              if (router.has_filters()) {
+                proceed = router.has_async_filters()
+                              ? co_await run_filters(router)
+                              : run_sync_filters(router, req_, resp_);
+              }
+              if (proceed) {
+                if (route_->kind == route_t::kind_t::Sync) {
+                  route_->sync_fn(req_, resp_);
+                } else {
+                  co_await invoke(*route_);
+                }
+              }
             } else {
               resp_.not_found();
             }
@@ -850,8 +871,18 @@ coro_t<void> connection_t::run(const router_t& router) {
 
           if (route_) {
             bool proceed = true;
-            if (router.has_filters()) proceed = co_await run_filters(router);
-            if (proceed) co_await invoke(*route_);
+            if (router.has_filters()) {
+              proceed = router.has_async_filters()
+                            ? co_await run_filters(router)
+                            : run_sync_filters(router, req_, resp_);
+            }
+            if (proceed) {
+              if (route_->kind == route_t::kind_t::Sync) {
+                route_->sync_fn(req_, resp_);
+              } else {
+                co_await invoke(*route_);
+              }
+            }
           } else {
             resp_.not_found();
           }

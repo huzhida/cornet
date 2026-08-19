@@ -157,6 +157,7 @@ if(CORNET_ENABLE_TESTS)
         tests/combinators.cc
         tests/runtime.cc
         tests/fs_io.cc
+        tests/frame_pool.cc
     )
     target_link_libraries(unit PRIVATE
         cornet

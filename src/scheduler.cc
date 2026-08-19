@@ -54,8 +54,9 @@ uint32_t scheduler_t::harvest_remote() {
   std::coroutine_handle<> h;
   uint32_t n = 0;
   while (remote_tasks_.try_dequeue(h)) {
-    // Already counted in schedule_remote(); only the queue ownership moves.
-    ready_tasks_.push(h);
+    // Counted here, on the owner thread: schedule_remote() is caller-thread
+    // code and must not touch the tracker's plain counters (see its comment).
+    schedule(h);
     ++n;
   }
   return n;
@@ -67,41 +68,58 @@ void scheduler_t::sched(context_t& ctx) {
   auto& uring = ctx.io_uring();
   uint32_t cqes = 0;
   sched_stats stats;
+  auto start = std::chrono::steady_clock::now();
+  // Resume ready handles up to this cycle's batch budget, crediting the time
+  // to task_runtime. Runs after every CQE harvest point too, so completions
+  // are resumed in the same cycle that reaps them instead of waiting a full
+  // sched() round trip — the queue push/pop costs nanoseconds, and keeping
+  // every resume on this single loop keeps adapt()'s inputs (task_runtime,
+  // tasks_resumed) honest. Measured every cycle: adapt() consumes
+  // instantaneous stats and smooths them with EWMA, so skipping cycles
+  // starves the controller of its inputs.
+  auto resume_ready = [&]() {
+    if (ready_tasks_.empty()) return;
+    auto t0 = std::chrono::steady_clock::now();
+    while (!ready_tasks_.empty() && stats.tasks_resumed < cpu_batch_) {
+      resume_task();
+      stats.tasks_resumed++;
+      CORNET_METRICS_ADD(ctx.metrics().tasks_resumed);
+    }
+    stats.task_runtime_ns +=
+      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+  };
   // harvest remote queue handles
   harvest_remote();
   // harvest async completed handles
   harvest_async();
-  auto start = std::chrono::steady_clock::now();
-  // resume ready handles
-  while (!ready_tasks_.empty() && stats.tasks_resumed < cpu_batch_) {
-    resume_task();
-    stats.tasks_resumed++;
-    CORNET_METRICS_ADD(ctx.metrics().tasks_resumed);
-  }
-  // Measured every cycle now: adapt() consumes instantaneous stats and smooths
-  // them with the member EWMA fields, so skipping cycles starved the controller
-  // of its inputs for an arbitrary 1-in-32 blackout (and task_runtime on the
-  // cycles that did feed it was silently dropped every 32nd).
-  stats.task_runtime_ns +=
-    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
-  // submit sqes to io uring
-  uring.submit();
-  // harvest completed io task
+  resume_ready();
+  // Reap completions from earlier submissions before touching the SQ:
+  // peeking costs no syscall, and anything reaped here resumes in this
+  // same cycle rather than the next one.
   if (uring.running_task_nr() > 0) {
     cqes = uring.peek_cqes(ctx);
   }
-  // wait if no ready task to resume. peek_cqes above enqueues rather than
-  // resumes inline, so an empty ready queue already accounts for this cycle's
-  // CQEs
-  if (ready_tasks_.empty()) {
+  resume_ready();
+  if (!ready_tasks_.empty()) {
+    // busy: flush this cycle's SQEs and keep rolling; their completions are
+    // reaped on a following cycle
+    uring.submit();
+  } else {
     // park token + re-check on both producer queues: Dekker handshake with
     // wakeup(), never blocks with remote work pending
     context_t::park_scope park(ctx);
     if (harvest_remote() == 0 && harvest_async() == 0) {
-      // these completions count toward IO pressure just like the peeked ones
-      cqes += uring.wait_cqes(ctx, 1, io_wait_);
+      // One io_uring_enter both flushes pending SQEs and waits: an
+      // independent submit() in front of the wait would be a second syscall
+      // buying nothing on this edge path.
+      cqes += uring.submit_and_wait_cqes(ctx, 1, io_wait_);
+    } else {
+      uring.submit();
     }
   }
+  // Completions reaped above, and remote/async work admitted while parking,
+  // also run in this same cycle.
+  resume_ready();
 
   stats.cqes_ready = cqes;
   stats.inflight = uring.running_task_nr();

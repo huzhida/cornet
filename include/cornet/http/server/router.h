@@ -187,6 +187,7 @@ class router_t {
                     "an http filter returns bool (synchronous) or coro_t<bool> (asynchronous)");
       e.kind = filter_entry_t::kind_t::Async;
       e.async_fn = std::forward<F>(fn);
+      has_async_filters_ = true;
     }
     filters_.push_back(std::move(e));
   }
@@ -207,6 +208,8 @@ class router_t {
 
   CORNET_NODISCARD const std::vector<filter_entry_t>& filters() const { return filters_; }
   CORNET_NODISCARD bool has_filters() const { return !filters_.empty(); }
+  // when false the whole chain can run inline without a coroutine frame
+  CORNET_NODISCARD bool has_async_filters() const { return has_async_filters_; }
 
   CORNET_NODISCARD uint32_t size() const { return count_; }
 
@@ -218,6 +221,7 @@ class router_t {
   std::vector<filter_entry_t> filters_;
   route_t  fallback_{};
   uint32_t count_{0};
+  bool has_async_filters_{false};
 };
 
 } // namespace cornet::http
