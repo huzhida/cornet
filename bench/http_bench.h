@@ -106,7 +106,7 @@ class server_thread_t {
       // round is flushed, so body_static(req.body()) would hand the kernel a block
       // that is already back in the pool.
       server.post(kPath, [](cornet::http::request_t& req, cornet::http::response_t& resp) {
-        resp.body(req.body());
+        resp.body_static(req.body());
       });
 
       if (auto ok = server.listen(); !ok) {
@@ -395,7 +395,7 @@ inline result_t run_cornet_http(const scenario_t& scenario, cornet::config_t& co
 
       auto t0 = std::chrono::steady_clock::now();
       auto req = cli.request(http::method_t::Post, kUrl);
-      req.header(http::field_t::ContentType, "application/octet-stream").body(payload);
+      req.header(http::field_t::ContentType, "application/octet-stream").body_static(payload);
       auto resp = co_await req.send();
       if (!resp || resp->body().size() != payload.size()) {
         collector.record_failure();

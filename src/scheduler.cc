@@ -24,6 +24,18 @@ scheduler_t::~scheduler_t() {
   executor_.terminate();
 }
 
+void scheduler_t::resume_ready(context_t& ctx) {
+  if (ready_tasks_.empty()) return;
+  auto t0 = std::chrono::steady_clock::now();
+  while (!ready_tasks_.empty() && stats.tasks_resumed < cpu_batch_) {
+    resume_task();
+    stats.tasks_resumed++;
+    CORNET_METRICS_ADD(ctx.metrics().tasks_resumed);
+  }
+  stats.task_runtime_ns +=
+    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+}
+
 void scheduler_t::resume_task() {
   auto task = ready_tasks_.front();
   ready_tasks_.pop();
@@ -67,39 +79,20 @@ void scheduler_t::sched(context_t& ctx) {
   CORNET_METRICS_ADD(ctx.metrics().sched_cycles);
   auto& uring = ctx.io_uring();
   uint32_t cqes = 0;
-  sched_stats stats;
+  stats.reset();
   auto start = std::chrono::steady_clock::now();
-  // Resume ready handles up to this cycle's batch budget, crediting the time
-  // to task_runtime. Runs after every CQE harvest point too, so completions
-  // are resumed in the same cycle that reaps them instead of waiting a full
-  // sched() round trip — the queue push/pop costs nanoseconds, and keeping
-  // every resume on this single loop keeps adapt()'s inputs (task_runtime,
-  // tasks_resumed) honest. Measured every cycle: adapt() consumes
-  // instantaneous stats and smooths them with EWMA, so skipping cycles
-  // starves the controller of its inputs.
-  auto resume_ready = [&]() {
-    if (ready_tasks_.empty()) return;
-    auto t0 = std::chrono::steady_clock::now();
-    while (!ready_tasks_.empty() && stats.tasks_resumed < cpu_batch_) {
-      resume_task();
-      stats.tasks_resumed++;
-      CORNET_METRICS_ADD(ctx.metrics().tasks_resumed);
-    }
-    stats.task_runtime_ns +=
-      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
-  };
   // harvest remote queue handles
   harvest_remote();
   // harvest async completed handles
   harvest_async();
-  resume_ready();
+  resume_ready(ctx);
   // Reap completions from earlier submissions before touching the SQ:
   // peeking costs no syscall, and anything reaped here resumes in this
   // same cycle rather than the next one.
   if (uring.running_task_nr() > 0) {
     cqes = uring.peek_cqes(ctx);
   }
-  resume_ready();
+  resume_ready(ctx);
   if (!ready_tasks_.empty()) {
     // busy: flush this cycle's SQEs and keep rolling; their completions are
     // reaped on a following cycle
@@ -119,16 +112,16 @@ void scheduler_t::sched(context_t& ctx) {
   }
   // Completions reaped above, and remote/async work admitted while parking,
   // also run in this same cycle.
-  resume_ready();
+  resume_ready(ctx);
 
   stats.cqes_ready = cqes;
   stats.inflight = uring.running_task_nr();
   stats.loop_runtime_ns +=
     std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
-  adapt(stats);
+  adapt();
 }
 
-void scheduler_t::adapt(const sched_stats& stats) {
+void scheduler_t::adapt() {
   /*
    * 1. IO completion pressure
    *

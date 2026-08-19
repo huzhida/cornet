@@ -343,7 +343,7 @@ struct basic_coro_t : task_t {
  * @brief zero-overhead coroutine wrapper (no cancellation support)
  * @tparam V return value type
  */
-template <typename V>
+template <typename V = void>
 struct coro_t : basic_coro_t<V, coro_t<V>> {
   using basic_coro_t<V, coro_t<V>>::basic_coro_t;
   using promise_type = typename coro_promise<coro_t<V>>::type;
@@ -354,13 +354,13 @@ struct coro_t : basic_coro_t<V, coro_t<V>> {
  * All internal utask_t-based operations are automatically wrapped with cancellable_awaiter.
  * @tparam V return value type
  */
-template <typename V>
+template <typename V = void>
 struct cancelable_coro_t : basic_coro_t<V, cancelable_coro_t<V>> {
   using basic_coro_t<V, cancelable_coro_t<V>>::basic_coro_t;
   using promise_type = typename coro_promise<cancelable_coro_t<V>>::type;
 };
 
-template<typename V>
+template<typename V = void>
 using ccoro_t = cancelable_coro_t<V>;
 
 /**
