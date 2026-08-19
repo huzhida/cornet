@@ -3,13 +3,13 @@
 
 #include "cornet/base/task.h"
 #include "cornet/coroutine/cancel.h"
+#include "cornet/coroutine/frame_pool.h"
 
 #include <concepts>
 #include <coroutine>
 #include <exception>
 #include <stdexcept>
 #include <iterator>
-#include <memory_resource>
 
 #include <type_traits>
 #include <utility>
@@ -22,7 +22,7 @@ namespace cornet {
  * @tparam V return value type
  */
 template <typename V>
-struct base_promise_t {
+struct base_promise_t : detail::frame_allocator_mixin_t {
   // variant return value: monostate (initial) | V (result) | exception_ptr (error)
   std::variant<std::monostate, V, std::exception_ptr> value;
 
@@ -43,7 +43,7 @@ struct base_promise_t {
 };
 
 template <>
-struct base_promise_t<void> {
+struct base_promise_t<void> : detail::frame_allocator_mixin_t {
   // variant: monostate (initial) | exception_ptr (error)
   std::variant<std::monostate, std::exception_ptr> value;
 
@@ -453,7 +453,12 @@ struct generator_t : task_t {
   /**
    * @brief begin iteration, resumes coroutine to get first value
    */
-  iterator begin() { if (handle) handle.resume(); return {handle}; }
+  iterator begin() {
+    if (handle) handle.resume();
+    // task_t::handle is coroutine_handle<> — aggregate init cannot convert it
+    // to coroutine_handle<promise_type> implicitly, so rebuild it by address.
+    return {std::coroutine_handle<promise_type>::from_address(handle.address())};
+  }
 
   /**
    * @brief sentinel for end of iteration
