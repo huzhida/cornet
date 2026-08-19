@@ -54,65 +54,11 @@ coro_t<int> client(context_t& ctx) {
   co_return 0;
 }
 
-coro_t<expected<void>> connect_baidu(context_t& ctx)
-{
-  tcp::v4::socket_t s;
-  // auto ok = co_await s.connect("www.baidu.com", 80, std::chrono::milliseconds(500));
-  auto ok = co_await with_timeout(ctx, s.connect(ctx, "www.baidu.com", 1234), std::chrono::milliseconds(1000));
-  if (!ok)
-  {
-    SPDLOG_ERROR("failed to connect: {}", ok.error().message());
-    co_return unexpected(ok.error());
-  }
-  auto sent = co_await s.send(ctx, "GET / HTTP/1.1\r\nHost: www.baidu.com\r\nConnection: close\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\n\r\n",
-    strlen("GET / HTTP/1.1\r\nHost: www.baidu.com\r\nConnection: close\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\n\r\n"));
-  if (!sent)
-  {
-    SPDLOG_ERROR("failed to send: {}", sent.error().message());
-    co_return unexpected(sent.error());
-  }
-  char buf[4096] = {0};
-  expected<int> recieved;
-  do {
-    recieved = co_await s.recv(ctx, buf, sizeof(buf));
-    SPDLOG_INFO("{}", buf);
-  } while (recieved.value() != 0);
-  co_return {};
-}
-
-coro_t<void> run_server(context_t& ctx) {
-  using namespace http;
-  http::server_t server(ctx);
-  server.get("/abc", [](request_t& req, response_t& resp) {
-    resp.text("hello ~");
-  });
-  // listen() reports through expected; ignoring it turns a busy port into a server
-  // that silently never answers
-  if (auto ok = server.listen("0.0.0.0", 12345); !ok) {
-    SPDLOG_ERROR("http listen failed: {}", ok.error().message());
-    co_return;
-  }
-  SPDLOG_INFO("http listening on 0.0.0.0:12345 — try: curl -v http://127.0.0.1:12345/abc");
-  ctx.on_signal({SIGINT, SIGTERM}, [&server](int sig) {
-    SPDLOG_INFO("signal {}, draining", sig);
-    server.drain();
-  });
-  co_await server.serve();
-  SPDLOG_INFO("http server stopped");
-}
-
 int main(int argc, char* argv[]) {
   context_t ctx;
 
-  // ctx.spawn(server(ctx));
-  // ctx.spawn(client(ctx));
-
-  // ctx.run();
-
-  // ctx.spawn(connect_baidu(ctx));
-  // ctx.run();
-
-  ctx.spawn(run_server(ctx));
+  ctx.spawn(server(ctx));
+  ctx.spawn(client(ctx));
   ctx.run();
 
   return 0;

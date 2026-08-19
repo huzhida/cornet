@@ -86,6 +86,10 @@ struct scheduler_t {
 
     uint64_t task_runtime_ns{};
     uint64_t loop_runtime_ns{};
+
+    inline void reset() {
+      *this = {};
+    }
   };
 
   scheduler_t(task_tracker_t& tracker, config_t* config);
@@ -147,6 +151,8 @@ private:
   // config pointer for reading scheduler tuning parameters at construction
   config_t* config_ = nullptr;
   // --------- schedule policy --------
+  // schedule stats
+  sched_stats stats;
   // schedule cycles count
   size_t cycles{0};
   // scheduler cpu batch size
@@ -170,12 +176,14 @@ private:
 
   // resume one task from the ready queue
   void resume_task();
+  // resume ready tasks up to cpu_batch_, measuring time into stats
+  void resume_ready(context_t& ctx);
   // collect completed executor tasks into ready queue, returns how many moved
   size_t harvest_async();
   // drain the cross-thread queue into the ready queue, returns how many moved
   uint32_t harvest_remote();
 
-  void adapt(const sched_stats& stats);
+  void adapt();
 
   friend struct context_t;
 };
