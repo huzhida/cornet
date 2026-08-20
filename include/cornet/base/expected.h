@@ -17,6 +17,7 @@ enum class error_domain : uint8_t {
   Internal,   // framework internal errors
   Exception,  // unexpected exception thrown from coroutine
   Http,       // HTTP protocol errors (llhttp errno), rendered via the resolver below
+  Tls,        // tls module errors (tls_error_t), rendered via the resolver below
 };
 
 /**
@@ -35,6 +36,15 @@ using domain_message_fn = const char* (*)(int);
  * ordering dependency on some global object's construction.
  */
 inline domain_message_fn& http_message_resolver() {
+  static domain_message_fn fn = nullptr;
+  return fn;
+}
+
+/**
+ * @brief renderer slot for error_domain::Tls. Same pattern as the http one:
+ * the core never sees OpenSSL, so the tls module registers its code table.
+ */
+inline domain_message_fn& tls_message_resolver() {
   static domain_message_fn fn = nullptr;
   return fn;
 }
@@ -60,6 +70,10 @@ struct error_t {
       case error_domain::Http: {
         auto fn = http_message_resolver();
         return fn ? fn(code) : "http protocol error";
+      }
+      case error_domain::Tls: {
+        auto fn = tls_message_resolver();
+        return fn ? fn(code) : "tls error";
       }
       default: return "no error";
     }

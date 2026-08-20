@@ -53,6 +53,33 @@ target_link_options(
     $<$<CONFIG:Debug>:-fsanitize=address>
 )
 
+# ─── TLS 模块 ───
+# transport_t（明文/TLS 统一传输抽象）总是构建，但加密路径需要 OpenSSL。
+# 与 llhttp 同策略：OpenSSL 私有链接，公开头文件不出现 openssl 类型
+# （tls_context_t/tls_engine_t 均为 pimpl），CORNET_WITH_TLS=OFF 时
+# start_tls() 在运行时返回 tls_error_t::Disabled 而不是链接失败。
+option(CORNET_WITH_TLS "Build TLS support in the transport (requires OpenSSL)" ON)
+add_library(cornet_tls STATIC
+    src/tls/error.cc
+    src/tls/context.cc
+    src/tls/engine.cc
+    src/tls/stream.cc
+    src/tls/transport.cc
+)
+add_library(cornet::tls ALIAS cornet_tls)
+target_link_libraries(cornet_tls PUBLIC cornet)
+if(CORNET_WITH_TLS)
+    find_package(OpenSSL REQUIRED)
+    # PRIVATE: callers never call OpenSSL themselves, and this target is the
+    # only thing that should
+    target_link_libraries(cornet_tls PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+endif()
+target_compile_options(
+    cornet_tls PRIVATE
+    $<$<NOT:$<CONFIG:Debug>>:-O2 -funroll-loops -march=native>
+    $<$<CONFIG:Debug>:-fsanitize=address -g>
+)
+
 # ─── HTTP 模块 ───
 # 独立 target：llhttp 私有链接进 cornet_http，且 llhttp.h 不出现在任何公开
 # 头文件中（parser_t 用不透明状态数组隔离依赖），避免传递依赖给核心库用户
@@ -113,6 +140,7 @@ if(CORNET_WITH_HTTP)
         add_executable(http-client examples/http_client.cc)
         target_link_libraries(http-client PRIVATE cornet_http)
     endif()
+
 endif()
 
 # ─── 主程序 ───
@@ -135,6 +163,10 @@ if(CORNET_ENABLE_BENCH)
 
     # The HTTP echo rows only exist when the http module is built; without them the
     # bench still runs, it just has nothing to price the protocol against.
+    target_sources(unit PRIVATE tests/tls_engine.cc)
+    target_include_directories(unit PRIVATE tests)
+    target_link_libraries(unit PRIVATE cornet_tls)
+
     if(CORNET_WITH_HTTP)
         target_link_libraries(bench PRIVATE cornet_http)
         target_compile_definitions(bench PRIVATE CORNET_BENCH_HTTP)
@@ -165,6 +197,8 @@ if(CORNET_ENABLE_TESTS)
         GTest::gtest_main
         GTest::gmock
     )
+    # engine pair tests run without io_uring (pure BIO shuffle); with TLS off
+    # they still verify the Disabled error stays precise
     if(CORNET_WITH_HTTP)
         target_sources(unit PRIVATE
             tests/http_common.cc

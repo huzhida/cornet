@@ -1,0 +1,66 @@
+#ifndef CORNET_TESTS_TLS_CERTS_H
+#define CORNET_TESTS_TLS_CERTS_H
+
+/**
+ * @brief throwaway PKI for the TLS test suites
+ *
+ * Generated with tests/gen_tls_certs.sh; regenerate only if something here
+ * expires. "evil" is a second, unrelated root for negative verification
+ * tests. EC keys keep the PEMs small and the handshakes fast. Never use
+ * these near a real deployment -- the private keys are in git.
+ */
+
+#include <string_view>
+
+namespace cornet::test::tls {
+
+inline constexpr std::string_view kCaCert = R"PEM(-----BEGIN CERTIFICATE-----
+MIIBhjCCAS2gAwIBAgIUXUbLl93pp5ubPPHc00lu4Vr80JgwCgYIKoZIzj0EAwIw
+GTEXMBUGA1UEAwwOY29ybmV0LXRlc3QtY2EwHhcNMjYwODIwMDYwMzEwWhcNMzYw
+ODE3MDYwMzEwWjAZMRcwFQYDVQQDDA5jb3JuZXQtdGVzdC1jYTBZMBMGByqGSM49
+AgEGCCqGSM49AwEHA0IABHT/qVvyXeEboCjX0mq3yX0Pb4soCBEeTDX5e82dwc5J
+6J4HITw5J2v9ieRxlKd+y0BA3Yl56GoqeQszSXsJHYWjUzBRMB0GA1UdDgQWBBT1
+g7PeD34QYyYo935ubKwMxkVkVDAfBgNVHSMEGDAWgBT1g7PeD34QYyYo935ubKwM
+xkVkVDAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0cAMEQCIHSaqQP+RiT4
+jQfoOI0J61zGem0Ea9uXnix7fmjYFJiIAiB3MJNA+wf4/vFUEG5DA3zKMfl1Bgvo
+lJf8TAxjujVgNQ==
+-----END CERTIFICATE-----
+)PEM";
+
+inline constexpr std::string_view kServerCert = R"PEM(-----BEGIN CERTIFICATE-----
+MIIBvDCCAWKgAwIBAgIUGifr2W/DBP2tAifqWPOKlJTnnEkwCgYIKoZIzj0EAwIw
+GTEXMBUGA1UEAwwOY29ybmV0LXRlc3QtY2EwHhcNMjYwODIwMDYwMzEwWhcNMzYw
+ODE3MDYwMzEwWjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwWTATBgcqhkjOPQIBBggq
+hkjOPQMBBwNCAAT54e9RzV4IKXWYz1+3Ay2y3TmEhueLcZPp1pkfoJgDq15Ku24J
++Ml+MDh5juPxxUMt2H2zvVGF73i8DtimEqO6o4GMMIGJMBoGA1UdEQQTMBGCCWxv
+Y2FsaG9zdIcEfwAAATAJBgNVHRMEAjAAMAsGA1UdDwQEAwIFoDATBgNVHSUEDDAK
+BggrBgEFBQcDATAdBgNVHQ4EFgQUa/K5VuCKZkWWAubGJiLq5hFANaowHwYDVR0j
+BBgwFoAU9YOz3g9+EGMmKPd+bmysDMZFZFQwCgYIKoZIzj0EAwIDSAAwRQIhAPbl
+ybjoWK+Hf048AxQ0TLUf87WVeNaXD7KkRdgJIVzRAiAMzWN7Ks29+Z+NQBqAGeW1
+hRGnkkrnGCnzKUOIH+uqpA==
+-----END CERTIFICATE-----
+)PEM";
+
+inline constexpr std::string_view kServerKey = R"PEM(-----BEGIN EC PRIVATE KEY-----
+MHcCAQEEIOEH5vQrFyT5ysicxWQrvSPbAq+xB38Ljg8Oqgr4+Ji9oAoGCCqGSM49
+AwEHoUQDQgAE+eHvUc1eCCl1mM9ftwMtst05hIbni3GT6daZH6CYA6teSrtuCfjJ
+fjA4eY7j8cVDLdh9s71Rhe94vA7YphKjug==
+-----END EC PRIVATE KEY-----
+)PEM";
+
+inline constexpr std::string_view kEvilCaCert = R"PEM(-----BEGIN CERTIFICATE-----
+MIIBiDCCAS2gAwIBAgIUI+SMBAbIQacgF9IMy7lSO+zZkNgwCgYIKoZIzj0EAwIw
+GTEXMBUGA1UEAwwOY29ybmV0LWV2aWwtY2EwHhcNMjYwODIwMDYwMzEwWhcNMzYw
+ODE3MDYwMzEwWjAZMRcwFQYDVQQDDA5jb3JuZXQtZXZpbC1jYTBZMBMGByqGSM49
+AgEGCCqGSM49AwEHA0IABApXEt50mnktn0hxtOdUmybC8sbEE7udcooa+nGFIU1y
+d81sfMShfPJdyVf9nglkgrvi4zhofYfEt+z+A3bzUX2jUzBRMB0GA1UdDgQWBBTs
+Elc1pkxFR8eXZ3MyHVSR3Q6lSDAfBgNVHSMEGDAWgBTsElc1pkxFR8eXZ3MyHVSR
+3Q6lSDAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0kAMEYCIQDbVcWiZk2v
+2wkGvh8589HtTMy5Zw9wMaoAVKxdQ2Wk7wIhAIzw/V09XY7VK4O1QK7aoLG2tW3P
+05q7vAz5COrhFkJL
+-----END CERTIFICATE-----
+)PEM";
+
+} // namespace cornet::test::tls
+
+#endif // CORNET_TESTS_TLS_CERTS_H
