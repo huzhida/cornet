@@ -106,6 +106,36 @@ struct canceler_t {
   }
 
   /**
+   * @brief hand ownership over to the inflight registrants: the canceler frees
+   * itself once the last tracked op resolves (immediately when none remain).
+   *
+   * Orphaning is the escape hatch for an owner that dies while ops it armed
+   * are still in flight: those ops hold raw canceler_t* back-pointers and
+   * resolve asynchronously, so a plain delete now would have them unlinking
+   * from freed memory later. The caller must treat the pointer as dead after
+   * this call — it may already be freed.
+   *
+   * Only valid for a heap-allocated canceler. Wrappers that own a canceler on
+   * behalf of a coroutine (e.g. coroutine-level with_timeout) call this on
+   * their orphan path instead of delete.
+   */
+  void orphan() {
+    orphaned_ = true;
+    if (tracked_ops_ == 0) delete this;
+  }
+
+private:
+  /**
+   * @brief an op's frame finished with this canceler (CQE landed or submit
+   * failed); pairs with the ++tracked_ops_ in link_node. The last resolution
+   * of an orphaned canceler frees it — the registrants then hold no
+   * back-pointer anymore, so nobody can observe the delete.
+   */
+  void op_resolved() {
+    if (--tracked_ops_ == 0 && orphaned_) delete this;
+  }
+
+  /**
    * @brief register an inflight op so cancel() can reach it.
    * Backend-agnostic intrusive list push; the node lives in the awaiter frame.
    */
@@ -147,17 +177,13 @@ private:
    */
   void cancel_active_tasks();
 
-  /**
-   * @brief an op's frame finished with this canceler (CQE landed or submit
-   * failed); pairs with the ++tracked_ops_ in link_node.
-   */
-  void op_resolved() { --tracked_ops_; }
-
   bool cancelled_{false};
   context_t* ctx_{nullptr};
   cancel_node* active_head_{nullptr};
   // ops whose frames currently reference this canceler; reset() requires 0
   uint32_t tracked_ops_{0};
+  // set by orphan(): the canceler self-deletes when tracked_ops_ reaches 0
+  bool orphaned_{false};
   canceler_t* parent_{nullptr};
   canceler_t* first_child_{nullptr};
   canceler_t* next_sibling_{nullptr};

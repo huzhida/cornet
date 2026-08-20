@@ -1,4 +1,5 @@
 #include "cornet/concurrency/combinators.h"
+#include "cornet/concurrency/timer_wheel.h"
 #include "cornet/scheduling/context.h"
 
 #include <sys/eventfd.h>
@@ -57,6 +58,9 @@ context_t::context_t(config_t* config)
 }
 
 context_t::~context_t() {
+  // Stop the wheel before teardown: its run() coroutine loops on ctx state,
+  // and the cancel sweep has already reaped its tick SQE by now.
+  if (timeout_wheel_) timeout_wheel_->stop();
   if (signal_fd_ >= 0) {
     ::close(signal_fd_);
     signal_fd_ = -1;
@@ -65,6 +69,17 @@ context_t::~context_t() {
     ::close(wakeup_fd_);
     wakeup_fd_ = -1;
   }
+}
+
+timer_wheel_t& context_t::timeout_wheel() {
+  if (!timeout_wheel_) {
+    // 5ms tick: coarse enough that an idle wheel is noise on the ring (~200
+    // wakeups/s), fine enough that coroutine-level deadlines quantize to at
+    // most one small scheduler quantum late.
+    timeout_wheel_ = std::make_unique<timer_wheel_t>(*this, std::chrono::milliseconds(5));
+    spawn(timeout_wheel_->run());
+  }
+  return *timeout_wheel_;
 }
 
 void context_t::run() {
@@ -83,8 +98,12 @@ void context_t::run() {
 
     if (state_.load(std::memory_order_acquire) == state_t::Canceling
         && !cancel_inflight_) {
-      // latched: one sweep at a time, re-armable
+      // latched: one sweep at a time, re-armable. Stop the shared timeout
+      // wheel here: its runner may be parked (no SQE in flight for the sweep
+      // to cancel) and must be kicked so it exits while this loop is still
+      // going — the wheel itself is freed right after run() returns.
       cancel_inflight_ = true;
+      if (timeout_wheel_) timeout_wheel_->stop();
       spawn(cancel_sweep());
     }
 

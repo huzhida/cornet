@@ -99,9 +99,11 @@ if (!result.get<2>()) handle_error(result.get<2>().error());
 
 ### 安全性
 
-`when_all` 内部使用 `shared_ptr` 管理状态生命周期。即使 parent 协程被外部取消
+`when_all` 的状态用普通非原子引用计数管理生命周期（所有参与者都运行在
+context 属主线程上，无需 shared_ptr 的原子操作）。即使 parent 协程被外部取消
 （如在 `when_any` 中输掉），子任务仍可安全完成而不会触发 use-after-free。
-awaiter 析构时自动置空 continuation，防止已销毁的协程被误调度。
+awaiter 析构时自动置空 continuation 并释放自己的一处引用，防止已销毁的协程
+被误调度；最后一个释放引用的一方负责回收状态。
 
 ## when_any
 
@@ -368,20 +370,26 @@ if (!result) {
 
 #### 工作原理
 
-1. 创建一个 `shared_ptr<canceler_t>` 并注入到协程 promise
-2. 启动一个定时器协程，到期后调用 `canceler->cancel()`
-3. 协程完成后立即取消定时器（避免泄漏）
-4. 当 V 是 `expected<T>` 类型时，自动将 ECANCELED 转换为 ETIMEDOUT
+1. awaiter 驻留在调用方协程帧内，持有一个堆分配的 `canceler_t` 并注入到目标协程 promise
+2. 在 context 共享的**时间轮**（`context_t::timeout_wheel()`）上挂载一个定时器节点，
+   到期回调即 `canceler->cancel()`——没有独立定时器协程，也没有独占 timeout SQE
+3. 目标协程通过对称转移直接进入（不经调度队列）；其结束时同样对称转回调用方
+4. 成功路径零额外 SQE：仅需从时间轮摘掉节点；目标协程抛出的异常优先于超时报告
+
+每次调用的成本：1 次 `canceler_t` 分配 + 1 次 O(1) 时间轮挂载。超时精度按时间轮
+tick（默认 5ms）量化为 `[D, D+tick)`；需要亚 tick 精度的单个 IO 请使用 op 级
+`with_timeout`（io_uring `link_timeout`）。
 
 #### 返回类型
 
 | 协程返回类型 | with_timeout 返回类型 | 超时行为 |
 |---|---|---|
-| `ccoro_t<expected<T>>` | `ccoro_t<expected<T>>` | 返回 `unexpected(ETIMEDOUT)` |
-| `ccoro_t<expected<void>>` | `ccoro_t<expected<void>>` | 返回 `unexpected(ETIMEDOUT)` |
-| `ccoro_t<void>` | `ccoro_t<void>` | 协程被取消，IO 返回 ECANCELED |
+| `ccoro_t<expected<T>>` | `expected<T>` | 返回 `unexpected(ETIMEDOUT)` |
+| `ccoro_t<expected<void>>` | `expected<void>` | 返回 `unexpected(ETIMEDOUT)` |
+| `ccoro_t<void>` | `expected<void>` | 返回 `unexpected(ETIMEDOUT)` |
 
-推荐协程返回 `expected<T>` 以获得最佳超时体验（ETIMEDOUT 自动展平）。
+`ccoro_t<void>` 的超时同样以 `expected<void>` 上报——不设置返回通道的话，
+超时将无可观测地"静默成功"，因此 void 版本也强制提供错误通道。
 
 ### 实现细节
 

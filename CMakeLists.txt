@@ -28,6 +28,7 @@ add_library(cornet STATIC
     src/awaiters.cc
     src/socket.cc
     src/runtime.cc
+    src/timer_wheel.cc
 )
 add_library(cornet::cornet ALIAS cornet)
 target_include_directories(
@@ -53,8 +54,8 @@ target_link_options(
 )
 
 # ─── HTTP 模块 ───
-# 独立 target：README 承诺「核心仅依赖 liburing」。llhttp 私有链接进 cornet_http，
-# 且 llhttp.h 不出现在任何公开头文件中（parser_t 用不透明状态数组隔离依赖）
+# 独立 target：llhttp 私有链接进 cornet_http，且 llhttp.h 不出现在任何公开
+# 头文件中（parser_t 用不透明状态数组隔离依赖），避免传递依赖给核心库用户
 option(CORNET_WITH_HTTP "Build the cornet http module (requires llhttp)" ON)
 # Phase tracing for the request path. Logs at INFO so it is visible without
 # rebuilding spdlog's compile-time level; see include/cornet/http/common/trace.h.
@@ -74,7 +75,6 @@ if(CORNET_WITH_HTTP)
         src/http/common/headers.cc
         src/http/common/parser.cc
         src/http/common/serializer.cc
-        src/http/common/timer_wheel.cc
         src/http/common/url.cc
         src/http/server/message.cc
         src/http/server/router.cc

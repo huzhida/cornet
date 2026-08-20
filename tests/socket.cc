@@ -3,6 +3,9 @@
 
 #include <gtest/gtest.h>
 #include <asio/buffer.hpp>
+#include <filesystem>
+
+#include "ephemeral_port.h"
 
 using namespace cornet;
 
@@ -72,13 +75,8 @@ TEST_F(socket, tcpv4_listen) {
   auto test = [](context_t& ctx) -> coro_t<void> {
     tcp::v4::socket_t sock;
     sock.address_reuse(true);
-    EXPECT_TRUE(sock.listen("127.0.0.1", 0).has_value());
-    sockaddr_storage addr{};
-    socklen_t len = sizeof(addr);
-    EXPECT_EQ(sock.getsockname(reinterpret_cast<sockaddr*>(&addr), &len), 0);
-
-    const auto* sin = reinterpret_cast<sockaddr_in*>(&addr);
-    EXPECT_GT(ntohs(sin->sin_port), 0);
+    uint16_t port = listen_ephemeral(sock);
+    EXPECT_TRUE(port != 0);
 
     auto _ = co_await sock.close(ctx);
     co_return;
@@ -88,17 +86,19 @@ TEST_F(socket, tcpv4_listen) {
 }
 
 TEST_F(socket, tcpv4_accept_and_connect) {
-  auto listener = [](context_t& ctx) -> coro_t<void> {
-    tcp::v4::socket_t sock;
-    sock.address_reuse(true);
-    EXPECT_TRUE(sock.listen("127.0.0.1", 12345).has_value());
+  tcp::v4::socket_t listen_sock;
+  listen_sock.address_reuse(true);
+  uint16_t port = listen_ephemeral(listen_sock);
+  EXPECT_TRUE(port != 0);
+
+  auto listener = [sock = std::move(listen_sock)](context_t& ctx) -> coro_t<void> {
     auto client = co_await sock.accept(ctx);
     EXPECT_TRUE(client.has_value());
     co_return;
   };
-  auto connector = [](context_t& ctx) -> coro_t<void> {
+  auto connector = [port](context_t& ctx) -> coro_t<void> {
     tcp::v4::socket_t sock;
-    auto ret = co_await sock.connect(ctx, "127.0.0.1", 12345);
+    auto ret = co_await sock.connect(ctx, "127.0.0.1", port);
     EXPECT_TRUE(ret.has_value());
   };
   ctx->spawn(listener(*ctx));
@@ -107,10 +107,12 @@ TEST_F(socket, tcpv4_accept_and_connect) {
 }
 
 TEST_F(socket, tcpv4_send_recv) {
-  auto listener = [](context_t& ctx) -> coro_t<void> {
-    tcp::v4::socket_t sock;
-    sock.address_reuse(true);
-    EXPECT_TRUE(sock.listen("127.0.0.1", 12345).has_value());
+  tcp::v4::socket_t listen_sock;
+  listen_sock.address_reuse(true);
+  uint16_t port = listen_ephemeral(listen_sock);
+  EXPECT_TRUE(port != 0);
+
+  auto listener = [sock = std::move(listen_sock)](context_t& ctx) -> coro_t<void> {
     auto client = co_await sock.accept(ctx);
     EXPECT_TRUE(client.has_value());
     char buffer[16] = {};
@@ -125,9 +127,9 @@ TEST_F(socket, tcpv4_send_recv) {
     }
     co_return;
   };
-  auto connector = [](context_t& ctx) -> coro_t<void> {
+  auto connector = [port](context_t& ctx) -> coro_t<void> {
     tcp::v4::socket_t sock;
-    auto conn = co_await sock.connect(ctx, "127.0.0.1", 12345);
+    auto conn = co_await sock.connect(ctx, "127.0.0.1", port);
     EXPECT_TRUE(conn.has_value());
     char buffer[16] = "hello world.";
     for (int i = 0; i < 8; ++i) {
@@ -144,10 +146,12 @@ TEST_F(socket, tcpv4_send_recv) {
   ctx->run();
 }
 TEST_F(socket, tcpv6_send_recv) {
-  auto listener = [](context_t& ctx) -> coro_t<void> {
-    tcp::v6::socket_t sock;
-    sock.address_reuse(true);
-    EXPECT_TRUE(sock.listen("::1", 12345).has_value());
+  tcp::v6::socket_t listen_sock;
+  listen_sock.address_reuse(true);
+  uint16_t port = listen_ephemeral(listen_sock, "::1");
+  EXPECT_TRUE(port != 0);
+
+  auto listener = [sock = std::move(listen_sock)](context_t& ctx) -> coro_t<void> {
     auto client = co_await sock.accept(ctx);
     EXPECT_TRUE(client.has_value());
     char buffer[16] = {};
@@ -162,9 +166,9 @@ TEST_F(socket, tcpv6_send_recv) {
     }
     co_return;
   };
-  auto connector = [](context_t& ctx) -> coro_t<void> {
+  auto connector = [port](context_t& ctx) -> coro_t<void> {
     tcp::v6::socket_t sock;
-    auto conn = co_await sock.connect(ctx, "::1", 12345);
+    auto conn = co_await sock.connect(ctx, "::1", port);
     EXPECT_TRUE(conn.has_value());
     char buffer[16] = "hello world.";
     for (int i = 0; i < 8; ++i) {
@@ -181,10 +185,14 @@ TEST_F(socket, tcpv6_send_recv) {
   ctx->run();
 }
 TEST_F(socket, tcp_local_send_recv) {
-  auto listener = [](context_t& ctx) -> coro_t<void> {
+  // Per-process socket path: a leftover file from an earlier run turns
+  // listen() into EADDRINUSE, and parallel runs would fight over a fixed name.
+  const std::string path = "/tmp/cornet." + std::to_string(::getpid()) + ".tcp.sock";
+  std::filesystem::remove(path);
+
+  auto listener = [&path](context_t& ctx) -> coro_t<void> {
     tcp::local::socket_t sock;
     sock.address_reuse(true);
-    auto path = "/tmp/cornet.sock";
     EXPECT_TRUE(sock.listen(path).has_value());
     auto client = co_await sock.accept(ctx);
     EXPECT_TRUE(client.has_value());
@@ -200,9 +208,8 @@ TEST_F(socket, tcp_local_send_recv) {
     }
     co_return;
   };
-  auto connector = [](context_t& ctx) -> coro_t<void> {
+  auto connector = [&path](context_t& ctx) -> coro_t<void> {
     tcp::local::socket_t sock;
-    auto path = "/tmp/cornet.sock";
     auto conn = co_await sock.connect(ctx, path);
     EXPECT_TRUE(conn.has_value());
     char buffer[16] = "hello world.";
@@ -218,14 +225,17 @@ TEST_F(socket, tcp_local_send_recv) {
   ctx->spawn(listener(*ctx));
   ctx->spawn(connector(*ctx));
   ctx->run();
+  std::filesystem::remove(path);
 }
 
 TEST_F(socket, udpv4_sendto_recvfrom) {
-  auto server = [](context_t& ctx) -> coro_t<void> {
-    udp::v4::socket_t sock;
-    sock.address_reuse(true);
-    sock.port_reuse(true);
-    EXPECT_TRUE(sock.bind("127.0.0.1", 12345).has_value());
+  udp::v4::socket_t server_sock;
+  server_sock.address_reuse(true);
+  server_sock.port_reuse(true);
+  uint16_t port = bind_ephemeral(server_sock);
+  EXPECT_TRUE(port != 0);
+
+  auto server = [sock = std::move(server_sock)](context_t& ctx) -> coro_t<void> {
     char buffer[16] = {};
     sockaddr_storage addr{};
     socklen_t len{sizeof(addr)};
@@ -241,10 +251,10 @@ TEST_F(socket, udpv4_sendto_recvfrom) {
     }
   };
 
-  auto client = [](context_t& ctx) -> coro_t<void> {
+  auto client = [port](context_t& ctx) -> coro_t<void> {
     udp::v4::socket_t sock;
     sockaddr_storage addr{sizeof(addr)};
-    auto socklen_ = to_address("127.0.0.1", 12345, addr, AF_INET, SOCK_DGRAM);
+    auto socklen_ = to_address("127.0.0.1", port, addr, AF_INET, SOCK_DGRAM);
     auto socklen = socklen_.value();
     char buffer[16] = {"hello world."};
     for (int i = 0; i < 8; ++i) {
@@ -255,7 +265,7 @@ TEST_F(socket, udpv4_sendto_recvfrom) {
       EXPECT_TRUE(received.has_value());
       EXPECT_EQ(*received, (int)strlen("hello world."));
       EXPECT_EQ(addr.ss_family, AF_INET);
-      EXPECT_EQ(((sockaddr_in*)&addr)->sin_port, htons(12345));
+      EXPECT_EQ(((sockaddr_in*)&addr)->sin_port, htons(port));
     }
   };
 
@@ -264,11 +274,13 @@ TEST_F(socket, udpv4_sendto_recvfrom) {
   ctx->run();
 }
 TEST_F(socket, udpv6_sendto_recvfrom) {
-  auto server = [](context_t& ctx) -> coro_t<void> {
-    udp::v6::socket_t sock;
-    sock.address_reuse(true);
-    sock.port_reuse(true);
-    EXPECT_TRUE(sock.bind("::1", 12345).has_value());
+  udp::v6::socket_t server_sock;
+  server_sock.address_reuse(true);
+  server_sock.port_reuse(true);
+  uint16_t port = bind_ephemeral(server_sock, "::1");
+  EXPECT_TRUE(port != 0);
+
+  auto server = [sock = std::move(server_sock)](context_t& ctx) -> coro_t<void> {
     char buffer[16] = {};
     sockaddr_storage addr{};
     socklen_t len{sizeof(addr)};
@@ -284,10 +296,10 @@ TEST_F(socket, udpv6_sendto_recvfrom) {
     }
   };
 
-  auto client = [](context_t& ctx) -> coro_t<void> {
+  auto client = [port](context_t& ctx) -> coro_t<void> {
     udp::v6::socket_t sock;
     sockaddr_storage addr{sizeof(addr)};
-    auto socklen_ = to_address("::1", 12345, addr, AF_INET6, SOCK_DGRAM);
+    auto socklen_ = to_address("::1", port, addr, AF_INET6, SOCK_DGRAM);
     auto socklen = socklen_.value();
     char buffer[16] = {"hello world."};
     for (int i = 0; i < 8; ++i) {
@@ -298,7 +310,7 @@ TEST_F(socket, udpv6_sendto_recvfrom) {
       EXPECT_TRUE(received.has_value());
       EXPECT_EQ(*received, (int)strlen("hello world."));
       EXPECT_EQ(addr.ss_family, AF_INET6);
-      EXPECT_EQ(((sockaddr_in6*)&addr)->sin6_port, htons(12345));
+      EXPECT_EQ(((sockaddr_in6*)&addr)->sin6_port, htons(port));
     }
   };
 
@@ -307,9 +319,13 @@ TEST_F(socket, udpv6_sendto_recvfrom) {
   ctx->run();
 }
 TEST_F(socket, udp_local_sendto_recvfrom) {
-  auto server = [](context_t& ctx) -> coro_t<void> {
+  const std::string path = "/tmp/cornet." + std::to_string(::getpid()) + ".sock";
+  const std::string self = path + ".client";
+  std::filesystem::remove(path);
+  std::filesystem::remove(self);
+
+  auto server = [&path, &self](context_t& ctx) -> coro_t<void> {
     udp::local::socket_t sock;
-    auto path = "/tmp/cornet.sock";
     EXPECT_TRUE(sock.bind(path).has_value());
     char buffer[16] = {};
     sockaddr_storage addr{};
@@ -318,7 +334,7 @@ TEST_F(socket, udp_local_sendto_recvfrom) {
       auto received = co_await sock.recvfrom(ctx, buffer, sizeof(buffer), (sockaddr*)&addr, &len);
       EXPECT_TRUE(received.has_value());
       EXPECT_EQ(*received, (int)strlen("hello world."));
-      EXPECT_EQ(len, sizeof(sockaddr_un) - 108 + strlen("/tmp/cornet.client.sock") + 1);
+      EXPECT_EQ(len, sizeof(sockaddr_un) - 108 + self.size() + 1);
       auto sent = co_await sock.sendto(ctx, buffer, strlen(buffer), (sockaddr*)&addr, len);
       EXPECT_TRUE(sent.has_value());
       EXPECT_EQ(*sent, (int)strlen("hello world."));
@@ -326,11 +342,9 @@ TEST_F(socket, udp_local_sendto_recvfrom) {
     }
   };
 
-  auto client = [](context_t& ctx) -> coro_t<void> {
+  auto client = [&path, &self](context_t& ctx) -> coro_t<void> {
     udp::local::socket_t sock;
     sockaddr_storage addr{};
-    auto path = "/tmp/cornet.sock";
-    auto self = "/tmp/cornet.client.sock";
     EXPECT_TRUE(sock.bind(self).has_value());
     auto socklen_ = to_address(path, addr);
     auto socklen = socklen_.value();
@@ -349,6 +363,8 @@ TEST_F(socket, udp_local_sendto_recvfrom) {
   ctx->spawn(server(*ctx));
   ctx->spawn(client(*ctx));
   ctx->run();
+  std::filesystem::remove(path);
+  std::filesystem::remove(self);
 }
 
 TEST(resolve, try_resolve_numeric_ipv4) {

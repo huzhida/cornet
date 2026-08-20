@@ -1,9 +1,9 @@
-#include "cornet/http/common/timer_wheel.h"
+#include "cornet/concurrency/timer_wheel.h"
 
 #include "cornet/concurrency/combinators.h"
 #include "cornet/scheduling/context.h"
 
-namespace cornet::http {
+namespace cornet {
 
 timer_wheel_t::timer_wheel_t(context_t& ctx, std::chrono::milliseconds tick)
   : ctx_(ctx), tick_(tick.count() > 0 ? tick : std::chrono::milliseconds(500)) {}
@@ -56,10 +56,19 @@ void timer_wheel_t::arm(timer_node_t& node, std::chrono::milliseconds delay) {
   node.rounds = uint32_t((ticks - 1) / kSlots);
   auto slot = uint32_t((cursor_ + ticks) % kSlots);
   link(node, slot);
+  // The run() coroutine parks when the wheel is empty; the first arm wakes it.
+  kick();
 }
 
 void timer_wheel_t::cancel(timer_node_t& node) {
   unlink(node);
+}
+
+void timer_wheel_t::kick() {
+  if (parked_runner_) {
+    auto h = std::exchange(parked_runner_, nullptr);
+    ctx_.spawn(h);
+  }
 }
 
 void timer_wheel_t::advance() {
@@ -83,9 +92,18 @@ void timer_wheel_t::advance() {
 
 coro_t<void> timer_wheel_t::run() {
   while (running_ && ctx_.is_running()) {
-    // as_system: the tick must not count as user work, or a context with an idle
-    // wheel could never reach user_idle() and graceful shutdown would never start
-    // draining.
+    // Nothing to do: park instead of keeping a tick SQE in flight. arm() and
+    // stop() kick the handle stashed by park_awaiter; while parked the wheel
+    // shows up as nothing at all to the context (no io, no ready task), which
+    // is exactly right — an idle wheel should not hold the loop open.
+    while (running_ && ctx_.is_running() && armed_ == 0) {
+      co_await park_awaiter{*this};
+      parked_runner_ = nullptr;  // the kick that resumed us is consumed
+    }
+    if (!running_ || !ctx_.is_running()) break;
+    // as_system: the tick must not count as user work, or a context with an
+    // armed wheel could never reach user_idle() and graceful shutdown would
+    // never start draining.
     auto ok = co_await as_system(sleep(ctx_, tick_));
     if (!ok) break;
     if (!running_) break;
@@ -94,4 +112,4 @@ coro_t<void> timer_wheel_t::run() {
   co_return;
 }
 
-} // namespace cornet::http
+} // namespace cornet

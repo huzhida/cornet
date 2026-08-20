@@ -67,6 +67,7 @@ TEST_F(runtime_test, multi_producer_spawn_remote) {
   // Test that multiple threads can submit coroutines to the same context
   runtime_t rt(nullptr, 4);
   std::atomic<int> counter{0};
+  std::latch done(3);
 
   rt.start([&](size_t idx, context_t&) {
     if (idx != 0) {
@@ -75,11 +76,17 @@ TEST_F(runtime_test, multi_producer_spawn_remote) {
       // Each thread submits a coroutine to thread 0
       auto task = [&]() -> coro_t<void> {
         counter.fetch_add(1);
+        done.count_down();
         co_return;
       };
       ctx0.spawn_remote(task);
     }
   });
+
+  // Wait for the tasks to actually run on thread 0 before draining: a
+  // spawn_remote that lands after the target context terminated is dropped
+  // by contract, so shutting down on a fixed timer is inherently racy.
+  done.wait();
 
   rt.shutdown(std::chrono::milliseconds(100));
   rt.join();

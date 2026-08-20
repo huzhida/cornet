@@ -5,6 +5,7 @@
 #include "cornet/coroutine/cancel.h"
 #include "cornet/scheduling/context.h"
 #include "cornet/concurrency/scope.h"
+#include "cornet/concurrency/timer_wheel.h"
 
 #include <tuple>
 #include <memory>
@@ -66,7 +67,6 @@ struct timeout_awaiter {
   context_t* ctx_;
   __kernel_timespec ts_;
   bool timeout_armed_{false};
-  bool timed_out_{false};
 
   timeout_awaiter(context_t& ctx, Awaitable op, std::chrono::duration<Rep, Period> duration)
     : op_(std::move(op)), ctx_(&ctx), ts_(to_kernel_timespec(duration)) {
@@ -98,12 +98,6 @@ struct timeout_awaiter {
     return true;
   }
 
-  /**
-   * @brief whether the linked timeout is what ended the operation.
-   * Only meaningful once await_resume() has run.
-   */
-  CORNET_NODISCARD bool timed_out() const { return timed_out_; }
-
   R await_resume() {
     if (timeout_armed_ && op_.io_result() == -ECANCELED) {
       // ECANCELED on a linked op has two possible sources: our link_timeout
@@ -116,7 +110,6 @@ struct timeout_awaiter {
       if (ctx_ && !ctx_->is_running()) {
         return unexpected(ECANCELED);
       }
-      timed_out_ = true;
       return unexpected(ETIMEDOUT);
     }
     return op_.await_resume();
@@ -167,9 +160,15 @@ coro_cancellable_awaiter<V> with_cancel(context_t& ctx, cancelable_coro_t<V> cor
 }
 
 /**
- * @brief coroutine-level with_timeout. Injects a canceler into the coro's promise
- * and races it against a timer. If timeout fires first, cancels the coro's IO.
- * Returns coro_t<V> transparently — when V is expected<T>, timeout returns unexpected(ETIMEDOUT).
+ * @brief coroutine-level with_timeout. Races a cancelable coroutine against a
+ * deadline on the context's shared timing wheel: if the deadline fires first,
+ * the canceler injected into the coro's promise cancels its inflight IO.
+ *
+ * Cost per call: one canceler_t allocation and one O(1) wheel arm. No wrapper
+ * coroutines, no timer SQE, no cancel SQE on the success path — the target is
+ * entered by symmetric transfer and its final suspend transfers straight back,
+ * so neither side pays a scheduler round-trip. Compare the utask-level
+ * with_timeout for sub-tick precision on a single op.
  */
 
 namespace detail {
@@ -177,137 +176,115 @@ namespace detail {
   template<typename T> struct is_expected<expected<T>> : std::true_type {};
   template<> struct is_expected<expected<void>> : std::true_type {};
 
+  /**
+   * @brief shared machinery of the coroutine timeout awaiter (both void and
+   * value flavours). Lives in the awaiting coroutine's frame.
+   */
   template<typename V>
-  struct timeout_state {
-    struct canceler_deleter {
-      void operator()(canceler_t* p) const {
-        if (p) {
-          p->cancel();  // cancel any remaining IO (timer) before destroying
-          delete p;
-        }
-      }
-    };
-    std::unique_ptr<canceler_t, canceler_deleter> canceler;
-    bool done{false};
-    bool timed_out{false};
-    std::coroutine_handle<> continuation{nullptr};
-    std::optional<V> result;
-    std::exception_ptr exception;
-  };
+  struct coro_timeout_awaiter_base {
+    context_t& ctx_;
+    cancelable_coro_t<V> coro_;
+    // Heap-allocated: unlike this awaiter, the canceler may still be referenced
+    // by ops the target has in flight after we are gone — see the dtor's
+    // orphan path and canceler_t::orphan().
+    canceler_t* canceler_;
+    timer_node_t node_{};
+    std::chrono::nanoseconds timeout_;
+    bool timed_out_{false};
+    bool started_{false};
 
-  template<>
-  struct timeout_state<void> {
-    struct canceler_deleter {
-      void operator()(canceler_t* p) const {
-        if (p) {
-          p->cancel();  // cancel any remaining IO (timer) before destroying
-          delete p;
-        }
-      }
-    };
-    std::unique_ptr<canceler_t, canceler_deleter> canceler;
-    bool done{false};
-    bool timed_out{false};
-    std::coroutine_handle<> continuation{nullptr};
-    std::exception_ptr exception;
-  };
+    template<typename Rep, typename Period>
+    coro_timeout_awaiter_base(context_t& ctx, cancelable_coro_t<V> coro,
+                              std::chrono::duration<Rep, Period> d)
+      : ctx_(ctx), coro_(std::move(coro)), canceler_(new canceler_t(ctx)),
+        timeout_(std::chrono::duration_cast<std::chrono::nanoseconds>(d)) {}
 
-  template<typename V>
-  coro_t<void> timeout_target_task(context_t& ctx, std::shared_ptr<timeout_state<V>> state, cancelable_coro_t<V> coro) {
-    try {
-      coro.native_handle().promise().canceler_ = state->canceler.get();
-      if constexpr (std::is_void_v<V>) {
-        co_await coro;
-        if (!state->done) {
-          state->done = true;
-          if (state->canceler) state->canceler->cancel();
-          if (state->continuation) ctx.spawn(state->continuation);
-        }
-      } else {
-        auto result = co_await coro;
-        if (!state->done) {
-          state->done = true;
-          state->result.emplace(std::move(result));
-          if (state->canceler) state->canceler->cancel();
-          if (state->continuation) ctx.spawn(state->continuation);
-        }
+    coro_timeout_awaiter_base(const coro_timeout_awaiter_base&) = delete;
+    coro_timeout_awaiter_base& operator=(const coro_timeout_awaiter_base&) = delete;
+    coro_timeout_awaiter_base(coro_timeout_awaiter_base&&) = delete;
+    coro_timeout_awaiter_base& operator=(coro_timeout_awaiter_base&&) = delete;
+
+    ~coro_timeout_awaiter_base() {
+      // A fired timer is already unlinked by the wheel; cancel() is a no-op on
+      // an unarmed node, so this also covers "never armed".
+      if (node_.armed()) ctx_.timeout_wheel().cancel(node_);
+      if (!started_ || coro_.done()) {
+        // Never co_awaited, or the target completed: nobody out there can
+        // still hold a registrant on the canceler.
+        delete canceler_;
+        return;
       }
-    } catch (...) {
-      if (!state->done) {
-        state->done = true;
-        state->exception = std::current_exception();
-        if (state->canceler) state->canceler->cancel();
-        if (state->continuation) ctx.spawn(state->continuation);
-      }
+      // Orphan: our coroutine is being destroyed while the target still runs.
+      // Stop the target's inflight IO, hand the target its own lifetime, and
+      // let the canceler free itself once the last op resolves — the late
+      // unlinks of those ops land on valid memory. The wheel node is already
+      // disarmed above, so the expiry callback can never fire into freed
+      // memory either.
+      canceler_->cancel();
+      coro_.detach();
+      canceler_->orphan();
     }
-  }
 
-  template<typename V, typename Rep, typename Period>
-  coro_t<void> timeout_timer_task(context_t& ctx, std::shared_ptr<timeout_state<V>> state,
-                                  std::chrono::duration<Rep, Period> duration) {
-    using clock = std::chrono::steady_clock;
-    const auto deadline = clock::now() + duration;
-    for (;;) {
-      if (state->done) co_return;
-      auto left = deadline - clock::now();
-      if (left <= clock::duration::zero()) {
-        // The timer op could never be armed (SQ pressure) and the whole window
-        // has elapsed anyway: expire the target rather than leave it running
-        // with its deadline silently switched off.
-        state->done = true;
-        state->timed_out = true;
-        if (state->canceler) state->canceler->cancel();
-        if (state->continuation) ctx.spawn(state->continuation);
-        co_return;
-      }
-      auto ret = co_await with_cancel(ctx, sleep(ctx, left), *state->canceler);
-      if (ret && !state->done) {
-        state->done = true;
-        state->timed_out = true;
-        if (state->canceler) state->canceler->cancel();
-        if (state->continuation) ctx.spawn(state->continuation);
-        co_return;
-      }
-      if (!ret && ret.error().code != ENOBUFS) co_return;  // target finished first
-      // ENOBUFS: the sleep SQE never reached the kernel (queue full). Retrying
-      // for what is left of the window keeps the deadline real under load,
-      // which is exactly when a timeout matters most.
+    CORNET_MAYBE_UNUSED bool await_ready() const noexcept { return false; }
+
+    CORNET_MAYBE_UNUSED std::coroutine_handle<> await_suspend(std::coroutine_handle<> h) {
+      started_ = true;
+      auto child = coro_.native_handle();
+      // All of the target's utask ops auto-register on our canceler
+      // (await_transform), and its final suspend transfers back to our parent.
+      child.promise().canceler_ = canceler_;
+      child.promise().continuation = h;
+      node_.owner = this;
+      node_.on_expire = [](void* owner) {
+        auto* self = static_cast<coro_timeout_awaiter_base*>(owner);
+        self->timed_out_ = true;
+        self->canceler_->cancel();
+      };
+      // Round up to whole milliseconds; arm() further ceils into ticks, so the
+      // timer can only ever fire late, never early.
+      using namespace std::chrono;
+      const auto delay = duration_cast<milliseconds>(timeout_ + milliseconds(1) - nanoseconds(1));
+      ctx_.timeout_wheel().arm(node_, delay);
+      return child;
     }
-  }
+  };
 } // namespace detail
 
+/**
+ * @brief coroutine timeout awaiter for ccoro_t<expected<T>>.
+ * Timeout is reported as unexpected(ETIMEDOUT); a target exception rethrows
+ * and wins over the timeout race.
+ */
 template<typename V>
-struct coro_timeout_awaiter {
-  std::shared_ptr<detail::timeout_state<V>> state_;
-  context_t& ctx_;
-
-  ~coro_timeout_awaiter() {
-    // Our coroutine was destroyed before either task won the race; the loser
-    // must not spawn a continuation pointing into a freed frame. (state_ is
-    // shared_ptr, so the tasks themselves keep living safely.)
-    if (state_ && !state_->done) state_->continuation = nullptr;
-  }
-
-  bool await_ready() const { return state_->done; }
-
-  void await_suspend(std::coroutine_handle<> h) {
-    state_->continuation = h;
-    if (state_->done) {
-      ctx_.spawn(h);
-    }
-  }
+struct coro_timeout_awaiter : detail::coro_timeout_awaiter_base<V> {
+  using detail::coro_timeout_awaiter_base<V>::coro_timeout_awaiter_base;
 
   V await_resume() {
-    if constexpr (std::is_void_v<V>) {
-      if (state_->exception) std::rethrow_exception(state_->exception);
-      return;
-    } else {
-      if (state_->exception) std::rethrow_exception(state_->exception);
-      if (state_->timed_out) {
-        return unexpected(ETIMEDOUT);
-      }
-      return std::move(*state_->result);
+    auto& prom = this->coro_.native_handle().promise();
+    if (prom.value.index() == 2) {
+      std::rethrow_exception(std::get<2>(std::move(prom.value)));
     }
+    if (this->timed_out_) return unexpected(ETIMEDOUT);
+    return this->coro_.value();
+  }
+};
+
+/**
+ * @brief coroutine timeout awaiter for ccoro_t<void>.
+ * Yields expected<void> so a timeout is observable at all: previously a void
+ * coroutine's deadline could fire without the caller seeing anything.
+ */
+template<>
+struct coro_timeout_awaiter<void> : detail::coro_timeout_awaiter_base<void> {
+  using detail::coro_timeout_awaiter_base<void>::coro_timeout_awaiter_base;
+
+  expected<void> await_resume() {
+    auto& prom = this->coro_.native_handle().promise();
+    if (prom.value.index() == 1) {
+      std::rethrow_exception(std::get<1>(std::move(prom.value)));
+    }
+    if (this->timed_out_) return unexpected(ETIMEDOUT);
+    return {};
   }
 };
 
@@ -315,28 +292,55 @@ template<typename V, typename Rep, typename Period>
 coro_timeout_awaiter<V> with_timeout(context_t& ctx, cancelable_coro_t<V> coro, std::chrono::duration<Rep, Period> duration) {
   static_assert(std::is_void_v<V> || detail::is_expected<V>::value,
                 "coroutine-level with_timeout requires ccoro_t<expected<T>> or ccoro_t<void>");
-
-  auto state = std::make_shared<detail::timeout_state<V>>();
-  using deleter_t = typename detail::timeout_state<V>::canceler_deleter;
-  state->canceler = std::unique_ptr<canceler_t, deleter_t>(
-      new canceler_t(ctx), deleter_t{});
-  ctx.spawn(detail::timeout_target_task(ctx, state, std::move(coro)));
-  ctx.spawn(detail::timeout_timer_task(ctx, state, duration));
-  return {std::move(state), ctx};
+  return coro_timeout_awaiter<V>{ctx, std::move(coro), duration};
 }
 
 namespace detail {
 
 /**
- * @brief state for when_all/when_any with N coroutines
+ * @brief yields the current coroutine's own handle without suspending.
+ * The finishing when_* wrapper uses it to chain itself to the awaiting parent:
+ * setting promise().continuation makes the framework's final_awaiter resume the
+ * parent by symmetric transfer (constant stack) instead of a ready-queue hop.
+ */
+struct self_handle_awaiter {
+  std::coroutine_handle<> self{nullptr};
+  bool await_ready() const noexcept { return false; }
+  bool await_suspend(std::coroutine_handle<> h) noexcept {
+    self = h;
+    return false;  // resume immediately
+  }
+  std::coroutine_handle<> await_resume() const noexcept { return self; }
+};
+
+/**
+ * @brief chain this (detached, spawned) coroutine to `parent`: at final
+ * suspend, control transfers straight into the parent.
+ * Must be the last statement before the coroutine completes — anything
+ * touching shared state after this point risks use-after-free, because the
+ * resumed parent may delete that state before this coroutine's destroy runs.
+ */
+template<typename Promise>
+void chain_to(std::coroutine_handle<> self, std::coroutine_handle<> parent) {
+  std::coroutine_handle<Promise>::from_address(self.address()).promise().continuation = parent;
+}
+
+/**
+ * @brief shared state for when_all/when_any with N coroutines.
+ *
+ * Heap-allocated exactly once per call and refcounted with a plain int: every
+ * user (the awaiter and the N wrapper tasks) runs on the context's owner
+ * thread, so shared_ptr's atomics would buy nothing. The awaiter holds one
+ * ref and each wrapper one; whoever releases the last ref deletes the state.
+ * The heap (rather than the awaiting frame) is what lets an abandoned awaiter
+ * leave safely — wrappers may still write results after their parent is gone.
  */
 template<typename... Ts>
 struct when_all_state {
   std::tuple<expected<Ts>...> results;
-  int remaining;
+  int remaining{int(sizeof...(Ts))};
+  int refs{int(sizeof...(Ts)) + 1};
   std::coroutine_handle<> continuation{nullptr};
-
-  when_all_state() : remaining(sizeof...(Ts)) {}
 };
 
 template<typename... Ts>
@@ -344,22 +348,19 @@ struct when_any_state {
   std::tuple<expected<Ts>...> results;
   bool done{false};
   int completed_index{-1};
+  int refs{int(sizeof...(Ts)) + 1};
   std::coroutine_handle<> continuation{nullptr};
   canceler_t* canceler{nullptr};
-
-  when_any_state() = default;
-  explicit when_any_state(canceler_t* c) : canceler(c) {}
 };
 
 template<size_t I, typename State, typename T>
-coro_t<void> when_all_task(context_t& ctx, std::shared_ptr<State> state, coro_t<T> coro) {
+coro_t<void> when_all_task(State* state, coro_t<T> coro) {
   try {
     if constexpr (std::is_void_v<T>) {
       co_await coro;
       std::get<I>(state->results) = expected<void>{};
     } else {
-      auto result = co_await coro;
-      std::get<I>(state->results) = std::move(result);
+      std::get<I>(state->results) = co_await coro;
     }
   } catch (const std::exception& e) {
     SPDLOG_ERROR("when_all: task {} threw exception: {}", I, e.what());
@@ -368,54 +369,75 @@ coro_t<void> when_all_task(context_t& ctx, std::shared_ptr<State> state, coro_t<
     SPDLOG_ERROR("when_all: task {} threw unknown exception", I);
     std::get<I>(state->results) = unexpected(EFAULT, error_domain::Exception);
   }
+  std::coroutine_handle<> to_wake{nullptr};
   if (--state->remaining == 0) {
-    if (state->continuation) {
-      ctx.spawn(state->continuation);
-    }
+    to_wake = state->continuation;
+    state->continuation = nullptr;
+  }
+  // Finishing protocol — must inline, not helper-into-a-coroutine: the chain
+  // has to land on THIS coroutine's own promise for the detached final_suspend
+  // to destroy us and transfer control straight into the parent. Unref before
+  // chaining: the parent we are about to resume may drop the last ref itself.
+  if (--state->refs == 0) delete state;
+  if (to_wake) {
+    auto self = co_await self_handle_awaiter{};
+    chain_to<typename coro_t<void>::promise_type>(self, to_wake);
   }
   co_return;
 }
 
 template<size_t I, typename State, typename T>
-coro_t<void> when_any_task(context_t& ctx, std::shared_ptr<State> state, coro_t<T> coro) {
+coro_t<void> when_any_task(State* state, coro_t<T> coro) {
   try {
     if constexpr (std::is_void_v<T>) {
       co_await coro;
-      if (state->done) co_return;
-      std::get<I>(state->results) = expected<void>{};
+      if (!state->done) std::get<I>(state->results) = expected<void>{};
     } else {
       auto result = co_await coro;
-      if (state->done) co_return;
-      std::get<I>(state->results) = std::move(result);
+      if (!state->done) std::get<I>(state->results) = std::move(result);
     }
   } catch (const std::exception& e) {
-    if (state->done) co_return;
-    SPDLOG_ERROR("when_any: task {} threw exception: {}", I, e.what());
-    std::get<I>(state->results) = unexpected(EFAULT, error_domain::Exception);
+    if (!state->done) {
+      SPDLOG_ERROR("when_any: task {} threw exception: {}", I, e.what());
+      std::get<I>(state->results) = unexpected(EFAULT, error_domain::Exception);
+    } else {
+      // Losers' results are discarded by contract — including their exceptions.
+      // Keep a trace: a silently-vanished losing task is a debugging black hole.
+      SPDLOG_DEBUG("when_any: loser task {} threw (discarded): {}", I, e.what());
+    }
   } catch (...) {
-    if (state->done) co_return;
-    SPDLOG_ERROR("when_any: task {} threw unknown exception", I);
-    std::get<I>(state->results) = unexpected(EFAULT, error_domain::Exception);
+    if (!state->done) {
+      SPDLOG_ERROR("when_any: task {} threw unknown exception", I);
+      std::get<I>(state->results) = unexpected(EFAULT, error_domain::Exception);
+    } else {
+      SPDLOG_DEBUG("when_any: loser task {} threw unknown exception (discarded)", I);
+    }
   }
-  state->done = true;
-  state->completed_index = I;
-  if (state->canceler) {
-    state->canceler->cancel();
+  std::coroutine_handle<> to_wake{nullptr};
+  if (!state->done) {
+    state->done = true;
+    state->completed_index = int(I);
+    to_wake = state->continuation;
+    state->continuation = nullptr;
+    if (state->canceler) state->canceler->cancel();
   }
-  if (state->continuation) {
-    ctx.spawn(state->continuation);
+  // See when_all_task for why this protocol must inline here.
+  if (--state->refs == 0) delete state;
+  if (to_wake) {
+    auto self = co_await self_handle_awaiter{};
+    chain_to<typename coro_t<void>::promise_type>(self, to_wake);
   }
   co_return;
 }
 
 template<typename State, typename Tuple, size_t... Is>
-void launch_all_impl(context_t& ctx, std::shared_ptr<State> state, Tuple& coros, std::index_sequence<Is...>) {
-  (ctx.spawn(when_all_task<Is>(ctx, state, std::move(std::get<Is>(coros)))), ...);
+void launch_all_impl(context_t& ctx, State* state, Tuple& coros, std::index_sequence<Is...>) {
+  (ctx.spawn(when_all_task<Is>(state, std::move(std::get<Is>(coros)))), ...);
 }
 
 template<typename State, typename Tuple, size_t... Is>
-void launch_any_impl(context_t& ctx, std::shared_ptr<State> state, Tuple& coros, std::index_sequence<Is...>) {
-  (ctx.spawn(when_any_task<Is>(ctx, state, std::move(std::get<Is>(coros)))), ...);
+void launch_any_impl(context_t& ctx, State* state, Tuple& coros, std::index_sequence<Is...>) {
+  (ctx.spawn(when_any_task<Is>(state, std::move(std::get<Is>(coros)))), ...);
 }
 
 } // namespace detail
@@ -457,17 +479,21 @@ struct when_any_result {
 template<typename... Ts>
 auto when_all(context_t& ctx, coro_t<Ts>... coros) {
   struct awaiter {
-    context_t& ctx_;
-    std::shared_ptr<detail::when_all_state<Ts...>> state_;
-    std::tuple<coro_t<Ts>...> coros_;
+    awaiter(context_t& ctx, detail::when_all_state<Ts...>* s, std::tuple<coro_t<Ts>...> c)
+      : ctx_(ctx), state_(s), coros_(std::move(c)) {}
+    awaiter(const awaiter&) = delete;
+    awaiter& operator=(const awaiter&) = delete;
 
     ~awaiter() {
-      if (state_) {
-        state_->continuation = nullptr;
-      }
+      // If we go away before the children finish, they must not wake a dead
+      // frame; they keep the state itself alive through their own refs.
+      if (!state_) return;
+      state_->continuation = nullptr;
+      if (--state_->refs == 0) delete state_;
     }
 
-    bool await_ready() { return false; }
+    // Empty pack: nothing to wait for, resume inline without ever suspending.
+    bool await_ready() const noexcept { return sizeof...(Ts) == 0; }
 
     void await_suspend(std::coroutine_handle<> h) {
       state_->continuation = h;
@@ -477,9 +503,13 @@ auto when_all(context_t& ctx, coro_t<Ts>... coros) {
     when_all_result<Ts...> await_resume() {
       return {std::move(state_->results)};
     }
+
+    context_t& ctx_;
+    detail::when_all_state<Ts...>* state_;
+    std::tuple<coro_t<Ts>...> coros_;
   };
 
-  return awaiter{ctx, std::make_shared<detail::when_all_state<Ts...>>(), std::tuple{std::move(coros)...}};
+  return awaiter{ctx, new detail::when_all_state<Ts...>(), std::tuple{std::move(coros)...}};
 }
 
 /**
@@ -491,17 +521,18 @@ auto when_all(context_t& ctx, coro_t<Ts>... coros) {
 template<typename... Ts>
 auto when_any(context_t& ctx, coro_t<Ts>... coros) {
   struct awaiter {
-    context_t& ctx_;
-    std::shared_ptr<detail::when_any_state<Ts...>> state_;
-    std::tuple<coro_t<Ts>...> coros_;
+    awaiter(context_t& ctx, detail::when_any_state<Ts...>* s, std::tuple<coro_t<Ts>...> c)
+      : ctx_(ctx), state_(s), coros_(std::move(c)) {}
+    awaiter(const awaiter&) = delete;
+    awaiter& operator=(const awaiter&) = delete;
 
     ~awaiter() {
-      if (state_) {
-        state_->continuation = nullptr;
-      }
+      if (!state_) return;
+      state_->continuation = nullptr;
+      if (--state_->refs == 0) delete state_;
     }
 
-    bool await_ready() { return false; }
+    bool await_ready() const noexcept { return sizeof...(Ts) == 0; }
 
     void await_suspend(std::coroutine_handle<> h) {
       state_->continuation = h;
@@ -511,9 +542,13 @@ auto when_any(context_t& ctx, coro_t<Ts>... coros) {
     when_any_result<Ts...> await_resume() {
       return {std::move(state_->results), state_->completed_index};
     }
+
+    context_t& ctx_;
+    detail::when_any_state<Ts...>* state_;
+    std::tuple<coro_t<Ts>...> coros_;
   };
 
-  return awaiter{ctx, std::make_shared<detail::when_any_state<Ts...>>(), std::tuple{std::move(coros)...}};
+  return awaiter{ctx, new detail::when_any_state<Ts...>(), std::tuple{std::move(coros)...}};
 }
 
 /**
@@ -529,17 +564,18 @@ auto when_any(context_t& ctx, coro_t<Ts>... coros) {
 template<typename... Ts>
 auto when_any(context_t& ctx, canceler_t& canceler, coro_t<Ts>... coros) {
   struct awaiter {
-    context_t& ctx_;
-    std::shared_ptr<detail::when_any_state<Ts...>> state_;
-    std::tuple<coro_t<Ts>...> coros_;
+    awaiter(context_t& ctx, detail::when_any_state<Ts...>* s, std::tuple<coro_t<Ts>...> c)
+      : ctx_(ctx), state_(s), coros_(std::move(c)) {}
+    awaiter(const awaiter&) = delete;
+    awaiter& operator=(const awaiter&) = delete;
 
     ~awaiter() {
-      if (state_) {
-        state_->continuation = nullptr;
-      }
+      if (!state_) return;
+      state_->continuation = nullptr;
+      if (--state_->refs == 0) delete state_;
     }
 
-    bool await_ready() { return false; }
+    bool await_ready() const noexcept { return sizeof...(Ts) == 0; }
 
     void await_suspend(std::coroutine_handle<> h) {
       state_->continuation = h;
@@ -549,10 +585,15 @@ auto when_any(context_t& ctx, canceler_t& canceler, coro_t<Ts>... coros) {
     when_any_result<Ts...> await_resume() {
       return {std::move(state_->results), state_->completed_index};
     }
+
+    context_t& ctx_;
+    detail::when_any_state<Ts...>* state_;
+    std::tuple<coro_t<Ts>...> coros_;
   };
 
-  auto state = std::make_shared<detail::when_any_state<Ts...>>(&canceler);
-  return awaiter{ctx, std::move(state), std::tuple{std::move(coros)...}};
+  auto* state = new detail::when_any_state<Ts...>();
+  state->canceler = &canceler;
+  return awaiter{ctx, state, std::tuple{std::move(coros)...}};
 }
 
 } // namespace cornet

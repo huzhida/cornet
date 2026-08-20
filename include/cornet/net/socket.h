@@ -236,10 +236,10 @@ class socket_t {
    * @brief set socket option reuse port
    */
   void port_reuse(bool on) const;
-  inline int getpeername(sockaddr* addr, socklen_t* socklen) {
+  inline int getpeername(sockaddr* addr, socklen_t* socklen) const {
     return ::getpeername(fd, addr, socklen);
   }
-  inline int getsockname(sockaddr* addr, socklen_t* socklen) {
+  inline int getsockname(sockaddr* addr, socklen_t* socklen) const {
     return ::getsockname(fd, addr, socklen);
   }
   /**

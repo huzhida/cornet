@@ -9,7 +9,7 @@ Cornet 是一个基于 C++20 协程和 Linux io_uring 的高性能异步网络�
 - **C++20 协程原生支持** — `co_await` 驱动的异步 IO，代码如同步般清晰
 - **零开销协程分离** — `coro_t<V>` 零额外开销；`cancelable_coro_t<V>`（别名 `ccoro_t<V>`）按需支持自动取消传播
 - **CRTP 代码复用** — 两种协程类型通过 `basic_coro_t` 共享公共实现，维护只需改一处
-- **io_uring 深度集成** — SQE 批量提交、CQE 批量收割、link timeout、multishot 支持
+- **io_uring 深度集成** — SQE 批量提交、CQE 批量收割、link timeout、async cancel（5.19+ 单请求取消）
 - **自适应调度器** — 动态调整 CPU batch 和 IO wait，自动平衡吞吐与延迟
 - **完整 TCP/UDP 抽象** — IPv4、IPv6、Unix Domain Socket 全覆盖
 - **异步 DNS 解析** — 域名解析自动卸载到线程池，IP 地址走快速路径
@@ -21,7 +21,7 @@ Cornet 是一个基于 C++20 协程和 Linux io_uring 的高性能异步网络�
 - **优雅关闭** — drain → timeout → cancel 三阶段关闭流程
 - **HTTP/1.1 Server** — 路由（精确/参数/通配）、同步与异步 handler、filter、keep-alive 与 pipelining、body 聚合或流式、chunked 响应、时间轮超时、优雅 drain
 - **HTTP/1.1 Client** — 连接池、DNS 缓存、超时分层、幂等重试、重定向、流式上传下载
-- **零额外依赖** — 核心仅依赖 liburing，日志/配置可选（HTTP 模块私有链接 llhttp）
+- **依赖精简** — 核心仅依赖 liburing、spdlog、toml++、concurrentqueue（vcpkg 管理）；HTTP 模块私有链接 llhttp，公开头文件不暴露它
 
 ## 快速开始
 
@@ -30,7 +30,7 @@ Cornet 是一个基于 C++20 协程和 Linux io_uring 的高性能异步网络�
 - Linux 5.11+（io_uring 特性支持）
 - GCC 11+ 或 Clang 14+（C++20 协程支持）
 - liburing 2.0+
-- CMake 3.10+
+- CMake 3.16+
 - vcpkg（依赖管理）
 
 ### 构建

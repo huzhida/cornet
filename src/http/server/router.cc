@@ -1,6 +1,9 @@
 #include "cornet/http/server/router.h"
 
 #include <algorithm>
+#include <array>
+#include <cstring>
+#include <optional>
 #include <unordered_map>
 
 #include <spdlog/spdlog.h>
@@ -10,10 +13,66 @@ namespace cornet::http {
 namespace {
 
 /**
+ * @brief transparent hash: lets a map with std::string keys be probed with a
+ * std::string_view directly, so match() never materialises a std::string key
+ * just to look something up. std::hash<string> and std::hash<string_view>
+ * agree on byte content in the supported stdlibs, so stored keys stay findable.
+ */
+struct sv_hash_t {
+  using is_transparent = void;
+  size_t operator()(std::string_view sv) const noexcept {
+    return std::hash<std::string_view>{}(sv);
+  }
+};
+
+/**
+ * @brief tiny small-vector: the first N elements stay inline, growth past N
+ * spills to a heap vector. Router matching only needs push/pop/back/[]/clear.
+ * The inline array is default-initialised (no per-request zeroing); elements
+ * are only read after being written.
+ */
+template <typename T, size_t N>
+struct small_vec_t {
+  void clear() {
+    size_ = 0;
+    if (spill_) spill_->clear();
+  }
+
+  void push_back(const T& v) {
+    if (spill_) {
+      spill_->push_back(v);
+      return;
+    }
+    if (size_ < N) {
+      inline_[size_++] = v;
+      return;
+    }
+    spill_.emplace();
+    spill_->reserve(N * 2);
+    spill_->assign(inline_.begin(), inline_.begin() + size_);
+    spill_->push_back(v);
+  }
+
+  void pop_back() {
+    if (spill_) spill_->pop_back(); else --size_;
+  }
+
+  CORNET_NODISCARD const T& back() const { return spill_ ? spill_->back() : inline_[size_ - 1]; }
+  CORNET_NODISCARD const T& operator[](size_t i) const { return spill_ ? (*spill_)[i] : inline_[i]; }
+  CORNET_NODISCARD size_t size() const { return spill_ ? spill_->size() : size_; }
+  CORNET_NODISCARD bool empty() const { return size() == 0; }
+
+  std::array<T, N> inline_;
+  std::optional<std::vector<T>> spill_;
+  size_t size_ = 0;
+};
+
+/**
  * @brief split a path into segments, skipping empty ones so that "/a//b" and
  * "/a/b" route the same.
  */
-void split_path(std::string_view path, std::vector<std::string_view>& out) {
+template <typename Out>
+void split_path(std::string_view path, Out& out) {
   out.clear();
   size_t i = 0;
   while (i < path.size()) {
@@ -48,6 +107,33 @@ uint32_t method_slot(method_t m) {
   }
 }
 
+/**
+ * @brief write the exact-table key (method char + normalised path) into out.
+ * Single pass, no allocation. Returns the key length, or 0 when the buffer is
+ * too small — 0 can never be a real key length since even the root path keys
+ * as two bytes ("0/").
+ */
+size_t normalise_key_into(method_t m, std::string_view path, char* out, size_t cap) {
+  if (cap < 2) return 0;
+  size_t n = 0;
+  out[n++] = char('0' + method_slot(m));
+  size_t i = 0;
+  while (i < path.size()) {
+    while (i < path.size() && path[i] == '/') ++i;
+    if (i >= path.size()) break;
+    size_t j = path.find('/', i);
+    if (j == std::string_view::npos) j = path.size();
+    const size_t seg = j - i;
+    if (n + 1 + seg > cap) return 0;
+    out[n++] = '/';
+    std::memcpy(out + n, path.data() + i, seg);
+    n += seg;
+    i = j;
+  }
+  if (n == 1) out[n++] = '/';
+  return n;
+}
+
 } // namespace
 
 /**
@@ -60,8 +146,9 @@ uint32_t method_slot(method_t m) {
  */
 struct router_t::impl_t {
   struct node_t {
-    // literal children, keyed by segment text
-    std::unordered_map<std::string, std::unique_ptr<node_t>> literal;
+    // literal children, keyed by segment text. Transparent hash: match()
+    // probes with string_view segments, no std::string construction per hop.
+    std::unordered_map<std::string, std::unique_ptr<node_t>, sv_hash_t, std::equal_to<>> literal;
     // ":name" child, if any
     std::unique_ptr<node_t> param;
     // "*name" child, which swallows the rest of the path
@@ -77,8 +164,9 @@ struct router_t::impl_t {
     }
   };
 
-  // exact-match table: key is method slot plus the normalised path
-  std::unordered_map<std::string, std::unique_ptr<route_t>> exact;
+  // exact-match table: key is method slot plus the normalised path.
+  // Transparent hash: match() probes with a stack-built string_view key.
+  std::unordered_map<std::string, std::unique_ptr<route_t>, sv_hash_t, std::equal_to<>> exact;
   node_t root;
 
   static std::string exact_key(method_t m, std::string_view path) {
@@ -147,10 +235,9 @@ route_t& router_t::add(method_t m, std::string_view path, route_t route) {
       node = node->wildcard.get();
       break;  // a wildcard consumes everything after it
     } else {
-      auto key = std::string(seg);
-      auto it = node->literal.find(key);
+      auto it = node->literal.find(seg);
       if (it == node->literal.end()) {
-        it = node->literal.emplace(std::move(key), std::make_unique<impl_t::node_t>()).first;
+        it = node->literal.emplace(std::string(seg), std::make_unique<impl_t::node_t>()).first;
       }
       node = it->second.get();
     }
@@ -167,16 +254,21 @@ route_t& router_t::add(method_t m, std::string_view path, route_t route) {
 match_t router_t::match(method_t m, std::string_view path, param_slots_t& out) const {
   out.clear();
 
-  // Exact table first: one hash probe answers most requests.
+  // Exact table first: one hash probe answers most requests. The key is built
+  // in a stack buffer — normalising is a single pass with no heap traffic.
   {
-    auto key = impl_t::exact_key(m, impl_t::normalise(path));
-    auto it = impl_->exact.find(key);
+    char keybuf[256];
+    const size_t klen = normalise_key_into(m, path, keybuf, sizeof(keybuf));
+    auto it = (klen != 0)
+        ? impl_->exact.find(std::string_view(keybuf, klen))
+        // path longer than the inline buffer: rare, build the key on the heap
+        : impl_->exact.find(impl_t::exact_key(m, impl_t::normalise(path)));
     if (it != impl_->exact.end()) {
       return match_t{it->second.get(), false};
     }
   }
 
-  std::vector<std::string_view> segs;
+  small_vec_t<std::string_view, 16> segs;
   split_path(path, segs);
 
   // Walk the trie. Literal children win over ':name', which wins over '*rest',
@@ -199,13 +291,13 @@ match_t router_t::match(method_t m, std::string_view path, param_slots_t& out) c
   uint32_t i = 0;
 
   // Small explicit backtracking stack: only ':' and '*' create alternatives, and
-  // real route tables are shallow.
-  std::vector<frame_t> stack;
+  // real route tables are shallow. Inline storage covers the common case.
+  small_vec_t<frame_t, 8> stack;
 
   auto try_descend = [&]() -> bool {
     while (i < segs.size()) {
       auto seg = segs[i];
-      auto lit = node->literal.find(std::string(seg));
+      auto lit = node->literal.find(seg);
       if (lit != node->literal.end()) {
         // remember the alternatives in case this branch dead-ends
         if (node->param) {

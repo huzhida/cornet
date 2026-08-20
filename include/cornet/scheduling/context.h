@@ -3,6 +3,7 @@
 
 #include "cornet/base/defines.h"
 #include <functional>
+#include <memory>
 
 #include <spdlog/spdlog.h>
 
@@ -23,6 +24,8 @@
 #include "cornet/scheduling/task_tracker.h"
 
 namespace cornet {
+
+class timer_wheel_t;
 
 namespace detail {
 /**
@@ -453,6 +456,14 @@ struct context_t {
   }
 
   /**
+   * @brief the context-wide timing wheel backing coroutine-level deadlines
+   * (with_timeout on ccoro_t). Created and started lazily on first use: a
+   * context that never times out a coroutine never pays a tick SQE. Deadlines
+   * are quantized to the wheel's tick — see timer_wheel_t.
+   */
+  CORNET_NODISCARD timer_wheel_t& timeout_wheel();
+
+  /**
    * @brief whether all user tasks are done (only framework io remains).
    * Used to trigger the Canceling state transition.
    * When keep_alive is set, always returns false to prevent auto-exit.
@@ -625,6 +636,9 @@ private:
   alignas(CORNET_CACHE_LINE) std::atomic<state_t> state_{state_t::Terminated};
   // context scheduler (direct member, policy switchable at runtime)
   scheduler_t scheduler_;
+  // shared timing wheel for coroutine-level deadlines; nullptr until first use
+  // (unique_ptr keeps the header free of the wheel definition)
+  std::unique_ptr<timer_wheel_t> timeout_wheel_;
   // per-signal handler callbacks
   std::unordered_map<int, std::function<void(int)>> signal_handlers_;
   // keep-alive flag: prevents auto-exit when user tasks are idle
