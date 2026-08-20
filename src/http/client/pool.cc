@@ -97,18 +97,20 @@ client_pool_t::client_pool_t(context_t& ctx, const client_options_t& opt, buffer
 
 client_pool_t::~client_pool_t() { clear(); }
 
-client_pool_t::bucket_t& client_pool_t::bucket_for(std::string_view host, uint16_t port) {
+client_pool_t::bucket_t& client_pool_t::bucket_for(std::string_view host, uint16_t port,
+                                                   scheme_t scheme) {
   auto it = origins_.find(host);
   if (it == origins_.end()) {
-    it = origins_.emplace(std::string(host), std::map<uint16_t, bucket_t>{}).first;
+    it = origins_.emplace(std::string(host), std::map<uint32_t, bucket_t>{}).first;
   }
   auto& ports = it->second;
-  auto pit = ports.find(port);
+  auto key = bucket_key(port, scheme);
+  auto pit = ports.find(key);
   if (pit == ports.end()) {
     bucket_t bucket;
     bucket.host = it->first;
     bucket.port = port;
-    pit = ports.emplace(port, std::move(bucket)).first;
+    pit = ports.emplace(key, std::move(bucket)).first;
   }
   return pit->second;
 }
@@ -137,7 +139,7 @@ void client_pool_t::on_idle_expired(void* owner) {
 }
 
 void client_pool_t::drop_idle(client_connection_t& conn) {
-  auto& bucket = bucket_for(conn.host(), conn.port());
+  auto& bucket = bucket_for(conn.host(), conn.port(), conn.scheme());
   auto owned = detach(bucket.idle, &conn);
   if (!owned) return;
   CORNET_HTTP_TRACE_LOG("client: fd={} idle timeout, closing", owned->native_fd());
@@ -232,9 +234,10 @@ expected<client_connection_t*> client_pool_t::wait_awaiter::await_resume() {
 }
 
 coro_t<expected<client_connection_t*>> client_pool_t::acquire(std::string_view host,
-                                                              uint16_t port, bool& reused) {
+                                                              uint16_t port, scheme_t scheme,
+                                                              bool& reused) {
   reused = false;
-  auto& bucket = bucket_for(host, port);
+  auto& bucket = bucket_for(host, port, scheme);
 
   for (;;) {
     // ── 1. an idle connection for this origin ──
@@ -269,7 +272,7 @@ coro_t<expected<client_connection_t*>> client_pool_t::acquire(std::string_view h
       auto addr_or = try_resolve_numeric(host, port);
       if (addr_or) {
         auto opened = co_await client_connection_t::open(ctx_, opt_, bufs_, wheel_, metrics_, host,
-                                                         port, &*addr_or);
+                                                         port, scheme, &*addr_or);
         if (!opened) co_return unexpected(opened.error());
 
         (*opened)->set_pool(this);
@@ -285,7 +288,7 @@ coro_t<expected<client_connection_t*>> client_pool_t::acquire(std::string_view h
         co_return unexpected(addr.error());
       }
       auto opened = co_await client_connection_t::open(ctx_, opt_, bufs_, wheel_, metrics_, host,
-                                                       port, &*addr);
+                                                       port, scheme, &*addr);
       if (!opened) co_return unexpected(opened.error());
 
       (*opened)->set_pool(this);
@@ -309,7 +312,7 @@ coro_t<expected<client_connection_t*>> client_pool_t::acquire(std::string_view h
 
 void client_pool_t::release(client_connection_t* conn, bool reusable) {
   if (!conn) return;
-  auto& bucket = bucket_for(conn->host(), conn->port());
+  auto& bucket = bucket_for(conn->host(), conn->port(), conn->scheme());
   auto owned = detach(bucket.busy, conn);
   if (!owned) return;   // never ours, or released twice
 

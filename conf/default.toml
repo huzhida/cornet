@@ -12,6 +12,17 @@ io_wait="1ms"
 level="info"
 pattern="%^%L%$ [%Y-%m-%d %T %t %@] %v"
 
+# cornet.http.server
+#[cornet.http.server]
+#handshake_timeout="10s"   # TLS handshake budget (only with server tls set)
+
+# cornet.http.client
+#[cornet.http.client]
+#handshake_timeout="10s"   # TLS handshake budget
+#tls_verify=true           # keep true outside labs
+#tls_ca_file=""            # empty: system default verify paths
+#tls_ca_dir=""
+#tls_server_name=""        # SNI/verify override; empty: the url host
 # cornet.logging.files
 #[[cornet.logging.files]]
 #path="cornet.log"

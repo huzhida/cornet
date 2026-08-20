@@ -84,7 +84,8 @@ class client_pool_t {
    *        whether a failure may be retried
    */
   CORNET_NODISCARD coro_t<expected<client_connection_t*>> acquire(std::string_view host,
-                                                                  uint16_t port, bool& reused);
+                                                                  uint16_t port, scheme_t scheme,
+                                                                  bool& reused);
 
   /**
    * @brief hand a connection back.
@@ -147,7 +148,7 @@ class client_pool_t {
     CORNET_NODISCARD expected<client_connection_t*> await_resume();
   };
 
-  bucket_t& bucket_for(std::string_view host, uint16_t port);
+  bucket_t& bucket_for(std::string_view host, uint16_t port, scheme_t scheme);
   void      arm_idle(bucket_t& bucket, client_connection_t& conn);
   void      drop_idle(client_connection_t& conn);
   static void on_idle_expired(void* owner);
@@ -162,9 +163,14 @@ class client_pool_t {
   client_metrics_t&       metrics_;
   dns_cache_t&            dns_;
 
-  // origin -> port -> bucket; the outer map takes string_view lookups without
-  // building a key
-  std::map<std::string, std::map<uint16_t, bucket_t>, std::less<>> origins_;
+  // origin(host) -> (port<<1)|https -> bucket; the outer map takes string_view
+  // lookups without building a key. Scheme belongs in the key: a plain and a
+  // TLS connection to the same port are different worlds and must never be
+  // handed out for each other's requests.
+  static constexpr uint32_t bucket_key(uint16_t port, scheme_t scheme) {
+    return (uint32_t(port) << 1) | (scheme == scheme_t::Https ? 1u : 0u);
+  }
+  std::map<std::string, std::map<uint32_t, bucket_t>, std::less<>> origins_;
   uint32_t total_{0};
 };
 
