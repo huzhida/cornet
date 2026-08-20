@@ -5,6 +5,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "cornet/concurrency/combinators.h"
 #include "cornet/http/common/trace.h"
 #include "cornet/io_uring/awaiters.h"
 #include "cornet/scheduling/context.h"
@@ -76,19 +77,21 @@ void server_options_t::load(config_t* config) {
   duration("cornet.http.server.body_timeout", body_timeout);
   duration("cornet.http.server.timer_tick", timer_tick);
   duration("cornet.http.server.drain_timeout", drain_timeout);
+  duration("cornet.http.server.handshake_timeout", handshake_timeout);
 }
 
 // ──────────────────────────── connection_t ────────────────────────────
 
-connection_t::connection_t(context_t& ctx, tcp::socket_t sock, const server_options_t& opt,
+connection_t::connection_t(context_t& ctx, tls::transport_t transport,
+                           const server_options_t& opt,
                            buffer_pool_t& pool, timer_wheel_t& wheel,
                            connection_metrics_t& metrics)
-  : ctx_(ctx), sock_(std::move(sock)), opt_(opt), pool_(pool), wheel_(wheel),
+  : ctx_(ctx), tr_(std::move(transport)), opt_(opt), pool_(pool), wheel_(wheel),
     metrics_(metrics), read_canceler_(ctx), drain_canceler_(ctx),
     parser_(parser_t::type_t::Request), reader_(*this) {
   if (opt_.tcp_nodelay) {
     int on = 1;
-    ::setsockopt(sock_.native_fd(), IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
+    ::setsockopt(tr_.native_fd(), IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
   }
   parser_.bind(in_, spill_, headers_);
   parser_.set_limits(parser_limits_t{
@@ -153,6 +156,11 @@ void connection_t::release_buffers() {
   body_out_.release();
   stream_out_.release();
   body_.release();
+  if (splice_pipe_[0] >= 0) {
+    ::close(splice_pipe_[0]);
+    ::close(splice_pipe_[1]);
+    splice_pipe_[0] = splice_pipe_[1] = -1;
+  }
 }
 
 void connection_t::request_close() {
@@ -170,18 +178,18 @@ coro_t<expected<uint32_t>> connection_t::fill() {
   if (w.empty()) {
     // The header section filled the whole buffer without completing.
     CORNET_HTTP_TRACE_LOG("fd={}: header buffer full ({}B), answering 431",
-                          sock_.native_fd(), in_.capacity());
+                          tr_.native_fd(), in_.capacity());
     co_return http_unexpected(http_error_t::HeaderTooLarge);
   }
-  CORNET_HTTP_TRACE_LOG("fd={}: recv armed, window={}", sock_.native_fd(), w.size());
-  auto n = co_await with_cancel(ctx_, sock_.recv(ctx_, w.data(), w.size()), read_canceler_);
+  CORNET_HTTP_TRACE_LOG("fd={}: recv armed, window={}", tr_.native_fd(), w.size());
+  auto n = co_await with_cancel(ctx_, tr_.recv(ctx_, w.data(), w.size()), read_canceler_);
   if (!n) {
     CORNET_HTTP_TRACE_LOG("fd={}: recv failed ({}), timed_out={}",
-                          sock_.native_fd(), n.error().message(), timed_out_);
+                          tr_.native_fd(), n.error().message(), timed_out_);
     if (timed_out_) co_return unexpected(ETIMEDOUT);
     co_return unexpected(n.error());
   }
-  CORNET_HTTP_TRACE_LOG("fd={}: recv {} bytes", sock_.native_fd(), *n);
+  CORNET_HTTP_TRACE_LOG("fd={}: recv {} bytes", tr_.native_fd(), *n);
   if (*n == 0) co_return uint32_t(0);
   in_.commit(uint32_t(*n));
   co_return uint32_t(*n);
@@ -442,12 +450,12 @@ CORNET_NODISCARD coro_t<expected<void>> connection_t::flush_stream() {
     ++metrics_.writev_calls;
     // no cancellation on the write path: an interrupted writev is a truncated
     // response (see the comment on the cancelers in connection.h)
-    auto n = co_await sock_.writev(ctx_, iov, iov_n);
+    auto n = co_await tr_.writev(ctx_, iov, iov_n);
     if (!n) {
-      CORNET_HTTP_TRACE_LOG("fd={}: writev failed ({})", sock_.native_fd(), n.error().message());
+      CORNET_HTTP_TRACE_LOG("fd={}: writev failed ({})", tr_.native_fd(), n.error().message());
       co_return unexpected(n.error());
     }
-    CORNET_HTTP_TRACE_LOG("fd={}: writev wrote {} bytes", sock_.native_fd(), *n);
+    CORNET_HTTP_TRACE_LOG("fd={}: writev wrote {} bytes", tr_.native_fd(), *n);
     if (*n == 0) co_return unexpected(ECONNRESET);
 
     // Advance through iovecs until we've accounted for *n bytes
@@ -466,6 +474,48 @@ CORNET_NODISCARD coro_t<expected<void>> connection_t::flush_stream() {
   co_return expected<void>{};
 }
 
+coro_t<expected<void>> connection_t::write_direct(std::string_view data) {
+  const char* p = data.data();
+  size_t left = data.size();
+  while (left > 0) {
+    struct iovec iov{const_cast<char*>(p), left};
+    ++metrics_.writev_calls;
+    // no cancellation on the write path, same rationale as flush_stream()
+    auto n = co_await tr_.writev(ctx_, &iov, 1);
+    if (!n) {
+      CORNET_HTTP_TRACE_LOG("fd={}: direct write failed ({})", tr_.native_fd(),
+                            n.error().message());
+      co_return unexpected(n.error());
+    }
+    if (*n == 0) co_return unexpected(ECONNRESET);
+    p += *n;
+    left -= *n;
+  }
+  co_return expected<void>{};
+}
+
+// A streaming response whose route came home early cannot just hang in the
+// connection contract: either it can still be swapped for a 500 (nothing on
+// the wire yet) or it has to be truncated so the peer sees what happened.
+void connection_t::settle_streaming(bool& close_after) {
+  if (headers_staged_) {
+    SPDLOG_DEBUG("http: route ended a streaming response before anything was "
+                 "sent; answering 500");
+    head_out_.clear();
+    hdr_out_.clear();
+    stream_out_.clear();
+    write_error(status_t::InternalServerError);  // counts the protocol error
+    close_after = true;
+    return;
+  }
+  // A 500 would now lie about the status line, and "0\r\n\r\n" would lie about
+  // a complete body. The honest answer is a truncation the client can detect.
+  ++metrics_.protocol_errors;
+  SPDLOG_DEBUG("http: route ended a streaming response mid-body; truncating");
+  closing_ = true;
+  close_after = true;
+}
+
 // ──────────────────────────── framing ────────────────────────────
 
 void connection_t::frame_response(bool close_after) {
@@ -475,7 +525,7 @@ void connection_t::frame_response(bool close_after) {
   if (resp_.body_source() == body_source_t::Streaming) {
     streaming_write_ = true;
     CORNET_HTTP_TRACE_LOG("fd={}: framed streaming response (chunked)",
-                          sock_.native_fd());
+                          tr_.native_fd());
     ++metrics_.responses;
     return;
   }
@@ -498,14 +548,23 @@ void connection_t::frame_response(bool close_after) {
     p.body_len = uint32_t(resp_.body_length());
     if (p.source == body_source_t::Inline) {
       p.body_off = resp_.inline_body_offset();
+    } else if (p.source == body_source_t::File) {
+      // ownership moves to the pending slot: the fd closes after the body leaves
+      p.file_fd = resp_.take_file_fd();
+      p.file_pos = 0;
     } else {
       p.external = resp_.external_body();
       p.owned = resp_.take_owned();
+      p.pinned = resp_.take_pinned();
     }
+  } else if (resp_.file_fd() >= 0) {
+    // bodyless answer on a file response (HEAD, 204/304): the descriptor must
+    // not leak into the next request's arena
+    resp_.close_file();
   }
 
   CORNET_HTTP_TRACE_LOG("fd={}: framed status={} head={}B hdr={}B body={}B close_after={}",
-                        sock_.native_fd(), uint16_t(status), p.head_len, p.hdr_len,
+                        tr_.native_fd(), uint16_t(status), p.head_len, p.hdr_len,
                         p.body_len, close_after);
   if (pending_n_ < std::size(pending_)) {
     pending_[pending_n_++] = std::move(p);
@@ -552,10 +611,15 @@ void connection_t::write_continue() {
 
 // ──────────────────────────── writing ────────────────────────────
 
-uint32_t connection_t::build_iovecs() {
+/**
+ * @brief gather the buffer parts of pendings [begin, end).
+ * File bodies are not here by construction of flush(); skipping them here is
+ * belt and braces, not a second code path.
+ */
+uint32_t connection_t::build_iovecs(uint32_t begin, uint32_t end) {
   iov_n_ = 0;
   iov_head_ = 0;
-  for (uint32_t i = 0; i < pending_n_; ++i) {
+  for (uint32_t i = begin; i < end; ++i) {
     auto& p = pending_[i];
     if (iov_n_ + 3 > kMaxPendingIov) {
       // IOV_MAX and our own array both cap a batch; the rest goes in the next
@@ -572,11 +636,11 @@ uint32_t connection_t::build_iovecs() {
     if (p.body_len) {
       if (p.source == body_source_t::Inline) {
         iov_[iov_n_++] = {body_out_.data() + p.body_off, p.body_len};
-      } else if (p.source != body_source_t::Streaming) {
-        // Streaming bodies are written incrementally by body_writer_t;
-        // the pending entry only carries head+hdr.
+      } else if (p.source == body_source_t::External) {
         iov_[iov_n_++] = {const_cast<char*>(p.external.data()), p.body_len};
       }
+      // Streaming flushes incrementally via body_writer_t; File via the
+      // splice/stream path — neither puts bytes in iovecs.
     }
   }
   return iov_n_;
@@ -597,6 +661,92 @@ void connection_t::advance_iovecs(uint32_t written) {
   }
 }
 
+// Write one assembled iovec span to the socket, handling short writes.
+// Extracted verbatim from the old flush loop so pipelined responses and file
+// bodies share exactly the same write discipline.
+coro_t<expected<void>> connection_t::writev_span(struct iovec* iov, uint32_t n) {
+  uint32_t done = 0;
+  while (done < n) {
+    ++metrics_.writev_calls;
+    // no cancellation on the write path, same rationale as send_stream()
+    auto w = co_await tr_.writev(ctx_, iov + done, n - done);
+    if (!w) {
+      CORNET_HTTP_TRACE_LOG("fd={}: writev failed ({})", tr_.native_fd(), w.error().message());
+      co_return unexpected(w.error());
+    }
+    if (*w == 0) co_return unexpected(ECONNRESET);
+    uint32_t remaining = uint32_t(*w);
+    for (size_t i = done; i < n && remaining > 0; ++i) {
+      uint32_t take = remaining < iov[i].iov_len ? remaining : iov[i].iov_len;
+      iov[i].iov_base = static_cast<char*>(iov[i].iov_base) + take;
+      iov[i].iov_len -= take;
+      remaining -= take;
+    }
+    while (done < n && iov[done].iov_len == 0) ++done;
+    if (done < n) ++metrics_.writev_partial;
+  }
+  co_return expected<void>{};
+}
+
+bool connection_t::ensure_splice_pipe() {
+  if (splice_pipe_[0] >= 0) return true;
+  return ::pipe(splice_pipe_) == 0;
+}
+
+// file body on the plain transport: page-cache → pipe → socket, zero copies of
+// the payload. pos tracks the read offset explicitly so a resumed flush never
+// asks the file for bytes it already sent.
+coro_t<expected<void>> connection_t::splice_file_to_socket(int fd, int64_t& pos,
+                                                           uint64_t len) {
+  if (!ensure_splice_pipe()) co_return unexpected(errno);
+  static constexpr uint64_t kChunk = 64 * 1024;
+  int out_fd = tr_.native_fd();
+  while (len > 0) {
+    uint32_t chunk = uint32_t(std::min<uint64_t>(len, kChunk));
+    auto n = co_await splice_awaiter(ctx_, fd, pos, splice_pipe_[1], -1, chunk,
+                                     SPLICE_F_MOVE);
+    if (!n) co_return unexpected(n.error());
+    if (*n == 0) co_return unexpected(ECONNRESET);  // the file shrank under us
+    pos += int64_t(*n);
+    uint32_t left = uint32_t(*n);
+    len -= left;
+    while (left > 0) {
+      auto w = co_await splice_awaiter(ctx_, splice_pipe_[0], -1, out_fd, -1, left,
+                                       SPLICE_F_MOVE);
+      if (!w) co_return unexpected(w.error());
+      if (*w == 0) co_return unexpected(ECONNRESET);
+      left -= uint32_t(*w);
+    }
+  }
+  co_return {};
+}
+
+// file body under TLS: the record layer is userspace, so the bytes have to
+// come up through a buffer once — a sync pread is the right bufferer. Page-
+// cache reads are microseconds; an executor offload for cold-page workloads
+// is a deliberate future knob, not a default.
+coro_t<expected<void>> connection_t::stream_file_over_tls(int fd, int64_t& pos,
+                                                          uint64_t len) {
+  static constexpr size_t kBuf = 64 * 1024;
+  if (!file_scratch_) file_scratch_ = std::make_unique<char[]>(kBuf);
+  while (len > 0) {
+    size_t want = size_t(std::min<uint64_t>(len, kBuf));
+    ssize_t n = ::pread(fd, file_scratch_.get(), want, off_t(pos));
+    if (n < 0) co_return unexpected(errno);
+    if (n == 0) co_return unexpected(EIO);
+    pos += int64_t(n);
+    len -= uint64_t(n);
+    struct iovec iov{file_scratch_.get(), size_t(n)};
+    while (iov.iov_len > 0) {
+      auto w = co_await tr_.writev(ctx_, &iov, 1);
+      if (!w) co_return unexpected(w.error());
+      if (*w == 0) co_return unexpected(ECONNRESET);
+      iov = {static_cast<char*>(iov.iov_base) + *w, iov.iov_len - *w};
+    }
+  }
+  co_return {};
+}
+
 coro_t<expected<void>> connection_t::flush() {
   if (pending_n_ == 0) co_return expected<void>{};
 
@@ -606,24 +756,52 @@ coro_t<expected<void>> connection_t::flush() {
                                             : body_out_.error());
   }
 
-  build_iovecs();
-  uint32_t total = 0;
-  for (uint32_t i = 0; i < iov_n_; ++i) total += uint32_t(iov_[i].iov_len);
-  CORNET_HTTP_TRACE_LOG("fd={}: flush {} response(s), {} iovec(s), {} bytes",
-                        sock_.native_fd(), pending_n_, iov_n_, total);
-  while (iov_head_ < iov_n_) {
-    ++metrics_.writev_calls;
-    // no cancellation on the write path, same rationale as send_stream()
-    auto n = co_await sock_.writev(ctx_, iov_ + iov_head_, iov_n_ - iov_head_);
-    if (!n) {
-      CORNET_HTTP_TRACE_LOG("fd={}: writev failed ({})", sock_.native_fd(), n.error().message());
-      co_return unexpected(n.error());
+  // fast path: nothing file-backed, one batch for everything
+  uint32_t first_file = 0;
+  while (first_file < pending_n_ && pending_[first_file].source != body_source_t::File) {
+    ++first_file;
+  }
+
+  if (first_file == pending_n_) {
+    build_iovecs(0, pending_n_);
+    if (auto ok = co_await writev_span(iov_, iov_n_); !ok) co_return unexpected(ok.error());
+    co_return {};
+  }
+
+  // slow path: preserve wire order around each File body
+  uint32_t i = 0;
+  while (i < pending_n_) {
+    uint32_t j = i;
+    while (j < pending_n_ && pending_[j].source != body_source_t::File) ++j;
+    if (j > i) {
+      build_iovecs(i, j);
+      if (auto ok = co_await writev_span(iov_, iov_n_); !ok) co_return unexpected(ok.error());
+      i = j;
     }
-    CORNET_HTTP_TRACE_LOG("fd={}: writev wrote {} bytes", sock_.native_fd(), *n);
-    if (*n == 0) co_return unexpected(ECONNRESET);
-    auto before = iov_head_;
-    advance_iovecs(uint32_t(*n));
-    if (iov_head_ == before) ++metrics_.writev_partial;
+    if (i < pending_n_) {
+      auto& p = pending_[i];
+      // this response's head+hdr still come from the staging buffers
+      struct iovec hv[2];
+      uint32_t hn = 0;
+      if (p.head_len) hv[hn++] = {head_out_.data() + p.head_off, p.head_len};
+      if (p.hdr_len) hv[hn++] = {hdr_out_.data() + p.hdr_off, p.hdr_len};
+      if (hn) {
+        auto ok = co_await writev_span(hv, hn);
+        if (!ok) co_return unexpected(ok.error());
+      }
+
+      expected<void> ok;
+      if (tr_.is_tls()) {
+        ok = co_await stream_file_over_tls(p.file_fd, p.file_pos, p.body_len);
+      } else {
+        ok = co_await splice_file_to_socket(p.file_fd, p.file_pos, p.body_len);
+      }
+      ::close(p.file_fd);
+      p.file_fd = -1;
+      p.source = body_source_t::None;
+      if (!ok) co_return unexpected(ok.error());
+      ++i;
+    }
   }
   co_return expected<void>{};
 }
@@ -641,6 +819,10 @@ void connection_t::reset_round() {
   streaming_write_ = false;
   iov_n_ = 0;
   iov_head_ = 0;
+  // A route that bailed mid-stream leaves these set; the next response must
+  // not inherit them (its own first flush would look like a stream's first).
+  headers_staged_ = false;
+  stream_finished_ = false;
 }
 
 // ──────────────────────────── shutdown ────────────────────────────
@@ -648,14 +830,14 @@ void connection_t::reset_round() {
 coro_t<void> connection_t::shutdown_gracefully() {
   // Half-close, then read briefly. Closing outright can make the peer see an RST
   // and discard a response we already wrote.
-  CORNET_HTTP_TRACE_LOG("fd={}: half-close then drain", sock_.native_fd());
-  auto sd = co_await as_system(async_shutdown(ctx_, sock_.native_fd(), SHUT_WR));
+  CORNET_HTTP_TRACE_LOG("fd={}: half-close then drain", tr_.native_fd());
+  auto sd = co_await tr_.shutdown_write(ctx_);
   (void)sd;
 
   char scratch[512];
   wheel_.arm(timer_, std::chrono::milliseconds(200));
   for (int i = 0; i < 4; ++i) {
-    auto n = co_await with_cancel(ctx_, sock_.recv(ctx_, scratch, sizeof(scratch)),
+    auto n = co_await with_cancel(ctx_, tr_.recv(ctx_, scratch, sizeof(scratch)),
                                   drain_canceler_);
     if (!n || *n == 0) break;
   }
@@ -670,11 +852,11 @@ coro_t<void> connection_t::run(const router_t& router) {
 
   if (auto ok = attach_buffers(); !ok) {
     SPDLOG_WARN("http: connection rejected, no buffers: {}", ok.error().message());
-    async_close(ctx_, sock_.release());
+    tr_.abandon(ctx_);
     co_return;
   }
   CORNET_HTTP_TRACE_LOG("fd={}: run start, header buffer {}B",
-                        sock_.native_fd(), in_.capacity());
+                        tr_.native_fd(), in_.capacity());
 
   wheel_.arm(timer_, opt_.idle_timeout);
   bool first_read = true;
@@ -712,7 +894,7 @@ coro_t<void> connection_t::run(const router_t& router) {
         break;
       }
       if (*got == 0) {
-        CORNET_HTTP_TRACE_LOG("fd={}: peer closed", sock_.native_fd());
+        CORNET_HTTP_TRACE_LOG("fd={}: peer closed", tr_.native_fd());
         break;
       }
       first_read = false;
@@ -720,7 +902,7 @@ coro_t<void> connection_t::run(const router_t& router) {
 
       r = parser_.execute(in_.write_pos() - *got, *got);
     }
-    CORNET_HTTP_TRACE_LOG("fd={}: parse -> {}", sock_.native_fd(), parser_t::to_string(r));
+    CORNET_HTTP_TRACE_LOG("fd={}: parse -> {}", tr_.native_fd(), parser_t::to_string(r));
 
     // ── 2. parse and dispatch, draining every complete request in this read
     bool round_done = false;
@@ -748,7 +930,7 @@ coro_t<void> connection_t::run(const router_t& router) {
         case parser_t::result_t::HeadersReady: {
           ++metrics_.requests;
           CORNET_HTTP_TRACE_LOG("fd={}: {} {} (cl={} chunked={} keep_alive={})",
-                                sock_.native_fd(), method_name(parser_.method()),
+                                tr_.native_fd(), method_name(parser_.method()),
                                 parser_.target(), parser_.content_length(),
                                 parser_.chunked(), parser_.keep_alive());
           req_.reset();
@@ -763,7 +945,7 @@ coro_t<void> connection_t::run(const router_t& router) {
 
           auto m = router.match(req_.method(), req_.path(), params_);
           CORNET_HTTP_TRACE_LOG("fd={}: route path='{}' matched={} method_mismatch={}",
-                                sock_.native_fd(), req_.path(), m.route != nullptr,
+                                tr_.native_fd(), req_.path(), m.route != nullptr,
                                 m.method_mismatch);
           route_ = m.route;
           if (!route_) {
@@ -784,7 +966,7 @@ coro_t<void> connection_t::run(const router_t& router) {
           body_window_ = parser_.consumed_offset();
           in_body_ = !body_complete_;
           CORNET_HTTP_TRACE_LOG("fd={}: body mode={} streaming={} window={}",
-                                sock_.native_fd(), int(body_mode_), streaming_,
+                                tr_.native_fd(), int(body_mode_), streaming_,
                                 body_window_);
 
           if (parser_.expects_continue()) {
@@ -832,6 +1014,13 @@ coro_t<void> connection_t::run(const router_t& router) {
               round_done = true;
               break;
             }
+            if (needs_streaming_settlement()) {
+              // settle frames its own 500 on the swap path, so skip frame_response
+              settle_streaming(close_after);
+              close_after_flush_ = true;
+              round_done = true;
+              break;
+            }
             frame_response(close_after);
             if (close_after) {
               close_after_flush_ = true;
@@ -864,7 +1053,7 @@ coro_t<void> connection_t::run(const router_t& router) {
           req_.set_body(body_.view());
           body_complete_ = true;
           in_body_ = false;
-          CORNET_HTTP_TRACE_LOG("fd={}: dispatch (body={}B, {})", sock_.native_fd(),
+          CORNET_HTTP_TRACE_LOG("fd={}: dispatch (body={}B, {})", tr_.native_fd(),
                                 body_.size(),
                                 route_ ? (route_->kind == route_t::kind_t::Sync ? "sync" : "async")
                                        : "no route");
@@ -896,6 +1085,13 @@ coro_t<void> connection_t::run(const router_t& router) {
 
           bool close_after = !parser_.keep_alive() || closing_ ||
                              status_forces_close(resp_.status());
+          if (needs_streaming_settlement()) {
+            // settle frames its own 500 on the swap path, so skip frame_response
+            settle_streaming(close_after);
+            close_after_flush_ = true;
+            round_done = true;
+            break;
+          }
           frame_response(close_after);
           if (close_after) {
             close_after_flush_ = true;
@@ -912,7 +1108,7 @@ coro_t<void> connection_t::run(const router_t& router) {
           // Anything still buffered is the next pipelined request.
           r = parser_.has_pending_input() ? parser_.resume() : parser_t::result_t::NeedMore;
           CORNET_HTTP_TRACE_LOG("fd={}: after response -> {} (pipelined={})",
-                                sock_.native_fd(), parser_t::to_string(r), pipelined);
+                                tr_.native_fd(), parser_t::to_string(r), pipelined);
           break;
         }
       }
@@ -921,14 +1117,14 @@ coro_t<void> connection_t::run(const router_t& router) {
     // ── 3. write everything this round produced in one gather-write
     if (pending_n_ > 1) ++metrics_.pipelined_batches;
     if (auto ok = co_await flush(); !ok) {
-      CORNET_HTTP_TRACE_LOG("fd={}: flush failed ({})", sock_.native_fd(), ok.error().message());
+      CORNET_HTTP_TRACE_LOG("fd={}: flush failed ({})", tr_.native_fd(), ok.error().message());
       SPDLOG_DEBUG("http: write failed: {}", ok.error().message());
       reset_round();
       break;
     }
     reset_round();
     if (close_after_flush_) {
-      CORNET_HTTP_TRACE_LOG("fd={}: closing after flush", sock_.native_fd());
+      CORNET_HTTP_TRACE_LOG("fd={}: closing after flush", tr_.native_fd());
       break;
     }
 
@@ -949,7 +1145,7 @@ coro_t<void> connection_t::run(const router_t& router) {
   if (spill_.used() > 0) ++metrics_.spill_used;
 
   CORNET_HTTP_TRACE_LOG("fd={}: loop exit (closing={} timed_out={} requests={})",
-                        sock_.native_fd(), closing_, timed_out_, metrics_.requests);
+                        tr_.native_fd(), closing_, timed_out_, metrics_.requests);
 
   wheel_.cancel(timer_);
   if (!timed_out_) {
@@ -958,7 +1154,7 @@ coro_t<void> connection_t::run(const router_t& router) {
   release_buffers();
   // release() first: without it the socket destructor would close the same fd a
   // second time, and by then the number may belong to another connection.
-  async_close(ctx_, sock_.release());
+  tr_.abandon(ctx_);
   co_return;
 }
 

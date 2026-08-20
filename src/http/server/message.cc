@@ -1,4 +1,10 @@
 #include "cornet/http/server/message.h"
+
+#include "cornet/io_uring/awaiters.h"
+
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include "cornet/http/server/connection.h"
 
 namespace cornet::http {
@@ -72,14 +78,24 @@ coro_t<expected<void>> body_writer_t::write(std::string_view data) {
   // Encode chunk-size line: write_chunk_size() produces "<hex>\r\n" (at most 16 bytes)
   char tmp[18];
   uint32_t n = http::write_chunk_size(tmp, len);
-  conn_->stream_out_.put(tmp, n);
-  conn_->stream_out_.put(data);
-  conn_->stream_out_.put_crlf();
 
-  // The chunk was staged only if there was room; anything larger than the
-  // stream buffer already failed inside put(), and flush_stream() re-reports
-  // that. Propagating it keeps >buffer writes from silently truncating while
-  // telling the handler everything went out.
+  // The staging buffer's capacity is an implementation choice, not a writer
+  // limit. If the whole chunk fits, stage it for a single syscall; otherwise
+  // stage the size line, write the payload straight from the caller's memory
+  // (its lifetime is ours until every byte is out), then stage the CRLF.
+  if (len + n + 2 <= conn_->stream_out_.remaining()) {
+    conn_->stream_out_.put(tmp, n);
+    conn_->stream_out_.put(data);
+    conn_->stream_out_.put_crlf();
+    auto ok = co_await conn_->flush_stream();
+    if (!ok) co_return unexpected(ok.error());
+    co_return expected<void>{};
+  }
+
+  conn_->stream_out_.put(tmp, n);
+  if (auto ok = co_await conn_->flush_stream(); !ok) co_return unexpected(ok.error());
+  if (auto ok = co_await conn_->write_direct(data); !ok) co_return unexpected(ok.error());
+  conn_->stream_out_.put_crlf();
   auto ok = co_await conn_->flush_stream();
   if (!ok) co_return unexpected(ok.error());
   co_return expected<void>{};
@@ -92,6 +108,9 @@ coro_t<expected<void>> body_writer_t::finish() {
   conn_->stream_out_.put(kTerm, sizeof(kTerm) - 1);
   auto ok = co_await conn_->flush_stream();
   if (!ok) co_return unexpected(ok.error());
+  // Marked only after the terminator is out: an unfinished stream must still
+  // be settled by the connection, never mistaken for a completed one
+  conn_->stream_finished_ = true;
   co_return expected<void>{};
 }
 
@@ -135,6 +154,7 @@ void response_t::begin() {
   body_off_ = body_out_ ? body_out_->size() : 0;
   body_len_ = 0;
   external_ = {};
+  file_size_ = 0;
   saw_content_length_ = false;
   saw_connection_ = false;
   saw_date_ = false;
@@ -209,6 +229,20 @@ response_t& response_t::body(std::string_view data) {
     fail(http_error(http_error_t::InvalidState));
     return *this;
   }
+
+  // Inline staging is the fast path only: data that does not fit is moved
+  // into the response arena and travels as an external reference, like
+  // body_static()/body_owned(). The staging capacity is an implementation
+  // choice, never a body limit — an arbitrary-size direct response should
+  // not have to learn about transfer encodings just to be sent.
+  if (data.size() > body_out_->remaining()) {
+    auto& s = pin(std::string(data));
+    external_ = s;
+    body_len_ = data.size();
+    source_ = body_source_t::External;
+    return *this;
+  }
+
   body_off_ = body_out_->size();
   body_out_->put(data);
   if (body_out_->failed()) {
@@ -246,6 +280,60 @@ response_t& response_t::body_owned(buffer_lease_t lease, uint32_t len) {
   source_ = body_source_t::External;
   return *this;
 }
+coro_t<expected<bool>> response_t::file(std::string_view path) {
+  if (source_ != body_source_t::None) co_return unexpected(http_error(http_error_t::InvalidState));
+  if (!conn_) co_return unexpected(http_error(http_error_t::InvalidState));
+
+  std::string p(path);
+  auto fd = co_await async_open(conn_->ctx_, p.c_str(), O_RDONLY | O_CLOEXEC);
+  if (!fd) {
+    status(status_t::NotFound);
+    text("Not Found");
+    co_return false;
+  }
+
+  struct statx stx{};
+  auto sr = co_await async_statx(conn_->ctx_, p.c_str(), STATX_ALL, &stx);
+  if (!sr || !S_ISREG(stx.stx_mode)) {
+    ::close(*fd);
+    status(status_t::NotFound);
+    text("Not Found");
+    co_return false;
+  }
+
+  file_fd_ = *fd;
+  file_size_ = stx.stx_size;
+  body_len_ = file_size_;
+  source_ = body_source_t::File;
+  co_return true;
+}
+
+bool response_t::local_file(std::string_view path) {
+  if (source_ != body_source_t::None) {
+    fail(http_error(http_error_t::InvalidState));
+    return false;
+  }
+  std::string p(path);
+  int fd = ::open(p.c_str(), O_RDONLY | O_CLOEXEC);
+  if (fd < 0) {
+    status(status_t::NotFound);
+    text("Not Found");
+    return false;
+  }
+  struct stat st {};
+  if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+    ::close(fd);
+    status(status_t::NotFound);
+    text("Not Found");
+    return false;
+  }
+  file_fd_ = fd;
+  file_size_ = uint64_t(st.st_size);
+  body_len_ = file_size_;
+  source_ = body_source_t::File;
+  return true;
+}
+
 
 void response_t::seal_headers() {
   if (!hdr_) return;
@@ -257,12 +345,18 @@ void response_t::seal_headers() {
 }
 
 void response_t::release_owned() {
-  for (auto& p : pinned_) {
-    p.destroy(p.ptr);
-  }
-  pinned_.clear();
+  arena_.clear();
   owned_.release();
   external_ = {};
+  close_file();
+}
+
+void response_t::close_file() {
+  if (file_fd_ >= 0) {
+    ::close(file_fd_);
+    file_fd_ = -1;
+  }
+  file_size_ = 0;
 }
 
 } // namespace cornet::http

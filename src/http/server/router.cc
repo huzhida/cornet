@@ -49,7 +49,10 @@ struct small_vec_t {
     }
     spill_.emplace();
     spill_->reserve(N * 2);
-    spill_->assign(inline_.begin(), inline_.begin() + size_);
+    // element-wise instead of a range copy: GCC can prove size_ <= N here,
+    // while its -Wstringop-overread model of vector::assign cannot see the
+    // same bound and fires a false positive. Nothing beyond size_ is read.
+    for (size_t i = 0; i < size_; ++i) spill_->push_back(inline_[i]);
     spill_->push_back(v);
   }
 
@@ -62,7 +65,8 @@ struct small_vec_t {
   CORNET_NODISCARD size_t size() const { return spill_ ? spill_->size() : size_; }
   CORNET_NODISCARD bool empty() const { return size() == 0; }
 
-  std::array<T, N> inline_;
+  // value-initialised (the comment above only holds because of these braces)
+  std::array<T, N> inline_{};
   std::optional<std::vector<T>> spill_;
   size_t size_ = 0;
 };

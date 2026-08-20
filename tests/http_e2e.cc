@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <filesystem>
+
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
@@ -921,4 +923,528 @@ TEST(http_e2e, streamed_body_larger_than_receive_buffer) {
     });
 
   EXPECT_EQ(response_body, "streamed:" + std::to_string(kBody));
+}
+
+// =========================================================================
+//  TEST: a single streaming write bigger than the staging buffer works
+// =========================================================================
+//
+// The staging capacity is an implementation choice, never a writer limit: the
+// oversized chunk is framed around a direct write of the caller's memory.
+
+TEST(http_e2e, streaming_write_bigger_than_the_stream_buffer) {
+  const std::string big(256u * 1024u, 'b');
+  std::string response_body;
+
+  run_e2e_test(
+    [&big](server_t& server) {
+      server.get("/big-chunk", [&big](request_t&, response_t& resp) -> coro_t<void> {
+        auto w = resp.chunked();
+        if (auto ok = co_await w.write(big); !ok) co_return;
+        co_await w.finish();
+      });
+    },
+    [&response_body](context_t& ctx, uint16_t port) {
+      auto client = [&]() -> coro_t<void> {
+        tcp::v4::socket_t sock;
+        co_await sock.connect(ctx, "127.0.0.1", port);
+
+        std::string request =
+            "GET /big-chunk HTTP/1.1\r\n"
+            "Host: 127.0.0.1\r\n"
+            "Connection: close\r\n"
+            "\r\n";
+        co_await sock.send(ctx, request.data(), request.size());
+
+        char buf[8192];
+        std::string raw;
+        while (true) {
+          auto n = co_await sock.recv(ctx, buf, sizeof(buf));
+          if (!n || *n == 0) break;
+          raw.append(buf, *n);
+        }
+        response_body = extract_body(raw);
+      };
+      ctx.spawn(client());
+      ctx.run();
+    });
+
+  EXPECT_EQ(response_body, big);
+}
+
+// =========================================================================
+//  TEST: a streaming route that returns before anything was sent gets a 500
+// =========================================================================
+//
+// Zero wire bytes means the staged response can still be swapped wholesale —
+// the client never sees a mysterious EOF where a response was promised.
+
+TEST(http_e2e, streaming_route_that_returns_early_gets_a_500) {
+  std::string raw;
+
+  run_e2e_test(
+    [](server_t& server) {
+      server.get("/bail", [](request_t&, response_t& resp) -> coro_t<void> {
+        auto w = resp.chunked();
+        (void)w;  // route forgets to write or finish, then returns
+        co_return;
+      });
+    },
+    [&raw](context_t& ctx, uint16_t port) {
+      auto client = [&]() -> coro_t<void> {
+        tcp::v4::socket_t sock;
+        co_await sock.connect(ctx, "127.0.0.1", port);
+
+        std::string request =
+            "GET /bail HTTP/1.1\r\n"
+            "Host: 127.0.0.1\r\n"
+            "Connection: close\r\n"
+            "\r\n";
+        co_await sock.send(ctx, request.data(), request.size());
+
+        char buf[4096];
+        while (true) {
+          auto n = co_await sock.recv(ctx, buf, sizeof(buf));
+          if (!n || *n == 0) break;
+          raw.append(buf, *n);
+        }
+      };
+      ctx.spawn(client());
+      ctx.run();
+    });
+
+  EXPECT_TRUE(response_contains_status(raw, "500")) << "raw: " << raw.substr(0, 200);
+}
+
+// =========================================================================
+//  TEST: a streaming route that quits mid-body truncates deterministically
+// =========================================================================
+//
+// Headers are already out, so no 500 can be sent — and "0\r\n\r\n" would call
+// a half message complete. The honest answer is to close after what was
+// actually written, and let the peer see the truncation.
+
+TEST(http_e2e, streaming_route_that_quits_mid_body_truncates) {
+  std::string raw;
+
+  run_e2e_test(
+    [](server_t& server) {
+      server.get("/quit", [](request_t&, response_t& resp) -> coro_t<void> {
+        auto w = resp.chunked();
+        co_await w.write("part1");
+        co_await w.write("part2");
+        // never finish(): the route just gives up mid-body
+        co_return;
+      });
+    },
+    [&raw](context_t& ctx, uint16_t port) {
+      auto client = [&]() -> coro_t<void> {
+        tcp::v4::socket_t sock;
+        co_await sock.connect(ctx, "127.0.0.1", port);
+
+        std::string request =
+            "GET /quit HTTP/1.1\r\n"
+            "Host: 127.0.0.1\r\n"
+            "Connection: keep-alive\r\n"
+            "\r\n";
+        co_await sock.send(ctx, request.data(), request.size());
+
+        char buf[4096];
+        while (true) {
+          auto n = co_await sock.recv(ctx, buf, sizeof(buf));
+          if (!n || *n == 0) break;      // must hit EOF, not hang
+          raw.append(buf, *n);
+        }
+      };
+      ctx.spawn(client());
+      ctx.run();
+    });
+
+  EXPECT_NE(raw.find("part1"), std::string::npos) << "raw: " << raw;
+  EXPECT_NE(raw.find("part2"), std::string::npos) << "raw: " << raw;
+  EXPECT_EQ(raw.find("\r\n0\r\n\r\n"), std::string::npos)
+      << "a half message must never be terminated as complete";
+}
+
+// =========================================================================
+//  TEST: a direct response bigger than body_buffer_bytes works
+// =========================================================================
+//
+// body() spills into the response arena and travels as an external reference;
+// nobody should have to pick chunked encoding just to send a big page.
+
+TEST(http_e2e, big_direct_response) {
+  const std::string big(256u * 1024u, 'd');
+  std::string response_body;
+
+  run_e2e_test(
+    [&big](server_t& server) {
+      server.get("/big", [&big](auto&, response_t& resp) { resp.text(big); });
+    },
+    [&response_body](context_t& ctx, uint16_t port) {
+      auto client = [&]() -> coro_t<void> {
+        tcp::v4::socket_t sock;
+        co_await sock.connect(ctx, "127.0.0.1", port);
+
+        std::string request =
+            "GET /big HTTP/1.1\r\n"
+            "Host: 127.0.0.1\r\n"
+            "Connection: close\r\n"
+            "\r\n";
+        co_await sock.send(ctx, request.data(), request.size());
+
+        char buf[8192];
+        std::string raw;
+        while (true) {
+          auto n = co_await sock.recv(ctx, buf, sizeof(buf));
+          if (!n || *n == 0) break;
+          raw.append(buf, *n);
+        }
+        response_body = extract_body(raw);
+      };
+      ctx.spawn(client());
+      ctx.run();
+    });
+
+  EXPECT_EQ(response_body, big);
+}
+
+// =========================================================================
+//  TEST: pin()-referenced bodies survive pipelined responses
+// =========================================================================
+//
+// Regression: the pin arena moves into each response's pending slot when the
+// response is framed; without that move, the reset of the shared response_t
+// for the *next* pipelined request would free the objects while a pending
+// entry still referenced them.
+
+TEST(http_e2e, pinned_bodies_survive_pipelining) {
+  std::string raw;
+
+  run_e2e_test(
+    [](server_t& server) {
+      auto handler = [](request_t& req, response_t& resp) {
+        auto& s = resp.pin(std::string("pinned:") + std::string(req.path()));
+        resp.body_static(s);
+      };
+      server.get("/a", handler);
+      server.get("/b", handler);
+    },
+    [&raw](context_t& ctx, uint16_t port) {
+      auto client = [&]() -> coro_t<void> {
+        tcp::v4::socket_t sock;
+        co_await sock.connect(ctx, "127.0.0.1", port);
+
+        // two responses sharing one writev: the *reason* the arena must move
+        std::string request =
+            "GET /a HTTP/1.1\r\n"
+            "Host: 127.0.0.1\r\n"
+            "\r\n"
+            "GET /b HTTP/1.1\r\n"
+            "Host: 127.0.0.1\r\n"
+            "Connection: close\r\n"
+            "\r\n";
+        co_await sock.send(ctx, request.data(), request.size());
+
+        char buf[4096];
+        while (true) {
+          auto n = co_await sock.recv(ctx, buf, sizeof(buf));
+          if (!n || *n == 0) break;
+          raw.append(buf, *n);
+        }
+      };
+      ctx.spawn(client());
+      ctx.run();
+    });
+
+  EXPECT_NE(raw.find("pinned:/a"), std::string::npos) << "raw: " << raw;
+  EXPECT_NE(raw.find("pinned:/b"), std::string::npos) << "raw: " << raw;
+}
+
+// =========================================================================
+//  TEST: response file body (resp.file) — plain splice path
+// =========================================================================
+
+TEST(http_e2e, file_response_serves_file_bytes_over_http) {
+  const std::string content(96u * 1024u, 'f');
+  namespace fs = std::filesystem;
+  auto path = fs::temp_directory_path() /
+              ("cornet_file_test_" + std::to_string(::getpid()) + ".bin");
+  {
+    FILE* f = std::fopen(path.c_str(), "wb");
+    ASSERT_TRUE(f != nullptr);
+    std::fwrite(content.data(), 1, content.size(), f);
+    std::fclose(f);
+  }
+  std::string raw;
+
+  run_e2e_test(
+    [&path](server_t& server) {
+      server.get("/serve", [&path](auto&, response_t& resp) {
+        EXPECT_TRUE(resp.local_file(path.string()));
+      });
+    },
+    [&raw, &content](context_t& ctx, uint16_t port) {
+      auto client = [&]() -> coro_t<void> {
+        tcp::v4::socket_t sock;
+        co_await sock.connect(ctx, "127.0.0.1", port);
+
+        std::string request =
+            "GET /serve HTTP/1.1\r\n"
+            "Host: 127.0.0.1\r\n"
+            "Connection: close\r\n"
+            "\r\n";
+        co_await sock.send(ctx, request.data(), request.size());
+
+        char buf[8192];
+        while (true) {
+          auto n = co_await sock.recv(ctx, buf, sizeof(buf));
+          if (!n || *n == 0) break;
+          raw.append(buf, *n);
+        }
+      };
+      ctx.spawn(client());
+      ctx.run();
+    });
+
+  auto cl = raw.find("Content-Length: " + std::to_string(content.size()) + "\r\n");
+  EXPECT_NE(cl, std::string::npos) << "missing Content-Length, head: "
+                                   << raw.substr(0, 200);
+
+  auto [head, body] = [&raw] {
+    auto p = raw.find("\r\n\r\n");
+    return std::pair{raw.substr(0, p), raw.substr(p + 4)};
+  }();
+  EXPECT_EQ(body, content);
+  fs::remove(path);
+}
+
+TEST(http_e2e, file_response_missing_path_gets_404) {
+  std::string status_line;
+  std::string raw;
+
+  run_e2e_test(
+    [](server_t& server) {
+      server.get("/missing", [](auto&, response_t& resp) {
+        if (!resp.local_file("/no/such/path/cornet.bin")) return;
+      });
+    },
+    [&status_line, &raw](context_t& ctx, uint16_t port) {
+      auto client = [&]() -> coro_t<void> {
+        tcp::v4::socket_t sock;
+        co_await sock.connect(ctx, "127.0.0.1", port);
+
+        std::string request =
+            "GET /missing HTTP/1.1\r\n"
+            "Host: 127.0.0.1\r\n"
+            "Connection: close\r\n"
+            "\r\n";
+        co_await sock.send(ctx, request.data(), request.size());
+
+        char buf[4096];
+        while (true) {
+          auto n = co_await sock.recv(ctx, buf, sizeof(buf));
+          if (!n || *n == 0) break;
+          raw.append(buf, *n);
+        }
+        status_line = raw.substr(0, raw.find("\r\n"));
+      };
+      ctx.spawn(client());
+      ctx.run();
+    });
+
+  EXPECT_TRUE(response_contains_status(raw, "404")) << status_line;
+}
+
+TEST(http_e2e, file_response_head_has_headers_but_no_body) {
+  const std::string content(1024, 'h');
+  namespace fs = std::filesystem;
+  auto path = fs::temp_directory_path() /
+              ("cornet_file_test_head_" + std::to_string(::getpid()) + ".bin");
+  {
+    FILE* f = std::fopen(path.c_str(), "wb");
+    ASSERT_TRUE(f != nullptr);
+    std::fwrite(content.data(), 1, content.size(), f);
+    std::fclose(f);
+  }
+  std::string raw;
+
+  run_e2e_test(
+    [&path](server_t& server) {
+      server.head("/hf", [&path](auto&, response_t& resp) {
+        EXPECT_TRUE(resp.local_file(path.string()));
+      });
+    },
+    [&raw](context_t& ctx, uint16_t port) {
+      auto client = [&]() -> coro_t<void> {
+        tcp::v4::socket_t sock;
+        co_await sock.connect(ctx, "127.0.0.1", port);
+
+        std::string request =
+            "HEAD /hf HTTP/1.1\r\n"
+            "Host: 127.0.0.1\r\n"
+            "Connection: close\r\n"
+            "\r\n";
+        co_await sock.send(ctx, request.data(), request.size());
+
+        char buf[4096];
+        while (true) {
+          auto n = co_await sock.recv(ctx, buf, sizeof(buf));
+          if (!n || *n == 0) break;
+          raw.append(buf, *n);
+        }
+      };
+      ctx.spawn(client());
+      ctx.run();
+    });
+
+  auto eoh = raw.find("\r\n\r\n");
+  EXPECT_NE(eoh, std::string::npos);
+  EXPECT_TRUE(raw.substr(0, eoh).find("Content-Length: 1024") != std::string::npos) << raw;
+  EXPECT_EQ(raw.size(), eoh + 4) << "a HEAD response must carry no body bytes";
+  fs::remove(path);
+}
+
+TEST(http_e2e, file_response_followed_by_pipelined_response) {
+  const std::string content(8192, 'p');
+  namespace fs = std::filesystem;
+  auto path = fs::temp_directory_path() /
+              ("cornet_file_test_pipe_" + std::to_string(::getpid()) + ".bin");
+  {
+    FILE* f = std::fopen(path.c_str(), "wb");
+    ASSERT_TRUE(f != nullptr);
+    std::fwrite(content.data(), 1, content.size(), f);
+    std::fclose(f);
+  }
+  std::string raw;
+
+  run_e2e_test(
+    [&path](server_t& server) {
+      server.get("/f", [&path](auto&, response_t& resp) {
+        EXPECT_TRUE(resp.local_file(path.string()));
+      });
+      server.get("/t", [](auto&, response_t& resp) { resp.text("tail"); });
+    },
+    [&raw, &content](context_t& ctx, uint16_t port) {
+      auto client = [&]() -> coro_t<void> {
+        tcp::v4::socket_t sock;
+        co_await sock.connect(ctx, "127.0.0.1", port);
+
+        // two requests in one send: wire order must hold across a file body
+        std::string request =
+            "GET /f HTTP/1.1\r\n"
+            "Host: 127.0.0.1\r\n"
+            "\r\n"
+            "GET /t HTTP/1.1\r\n"
+            "Host: 127.0.0.1\r\n"
+            "Connection: close\r\n"
+            "\r\n";
+        co_await sock.send(ctx, request.data(), request.size());
+
+        char buf[8192];
+        while (true) {
+          auto n = co_await sock.recv(ctx, buf, sizeof(buf));
+          if (!n || *n == 0) break;
+          raw.append(buf, *n);
+        }
+      };
+      ctx.spawn(client());
+      ctx.run();
+    });
+
+  EXPECT_TRUE(raw.find(content) != std::string::npos) << "file body missing";
+  EXPECT_TRUE(raw.find("tail") != std::string::npos)
+      << "the pipelined response after the file body is missing";
+  EXPECT_TRUE(raw.find(content) < raw.find("tail"))
+      << "wire order violated across the file body";
+  fs::remove(path);
+}
+
+TEST(http_e2e, file_serves_file_bytes) {
+  const std::string content(64u * 1024u, 'a');
+  namespace fs = std::filesystem;
+  auto path = fs::temp_directory_path() /
+              ("cornet_file_test_async_" + std::to_string(::getpid()) + ".bin");
+  {
+    FILE* f = std::fopen(path.c_str(), "wb");
+    ASSERT_TRUE(f != nullptr);
+    std::fwrite(content.data(), 1, content.size(), f);
+    std::fclose(f);
+  }
+  std::string raw;
+
+  run_e2e_test(
+    [&path](server_t& server) {
+      server.get("/af", [&path](auto&, response_t& resp) -> coro_t<void> {
+        auto ok = co_await resp.file(path.string());
+        EXPECT_TRUE(ok.has_value() && *ok);
+        if (!ok || !*ok) co_return;
+      });
+    },
+    [&raw, &content](context_t& ctx, uint16_t port) {
+      auto client = [&]() -> coro_t<void> {
+        tcp::v4::socket_t sock;
+        co_await sock.connect(ctx, "127.0.0.1", port);
+
+        std::string request =
+            "GET /af HTTP/1.1\r\n"
+            "Host: 127.0.0.1\r\n"
+            "Connection: close\r\n"
+            "\r\n";
+        co_await sock.send(ctx, request.data(), request.size());
+
+        char buf[8192];
+        while (true) {
+          auto n = co_await sock.recv(ctx, buf, sizeof(buf));
+          if (!n || *n == 0) break;
+          raw.append(buf, *n);
+        }
+      };
+      ctx.spawn(client());
+      ctx.run();
+    });
+
+  auto p = raw.find("\r\n\r\n");
+  EXPECT_NE(p, std::string::npos);
+  EXPECT_EQ(raw.substr(p + 4), content);
+  fs::remove(path);
+}
+
+TEST(http_e2e, file_missing_path_gets_404) {
+  std::string status_line;
+  std::string raw;
+
+  run_e2e_test(
+    [](server_t& server) {
+      server.get("/amf", [](auto&, response_t& resp) -> coro_t<void> {
+        auto ok = co_await resp.file("/no/such/path/cornet.bin");
+        EXPECT_TRUE(ok.has_value() && !*ok);
+        co_return;
+      });
+    },
+    [&status_line, &raw](context_t& ctx, uint16_t port) {
+      auto client = [&]() -> coro_t<void> {
+        tcp::v4::socket_t sock;
+        co_await sock.connect(ctx, "127.0.0.1", port);
+
+        std::string request =
+            "GET /amf HTTP/1.1\r\n"
+            "Host: 127.0.0.1\r\n"
+            "Connection: close\r\n"
+            "\r\n";
+        co_await sock.send(ctx, request.data(), request.size());
+
+        char buf[4096];
+        while (true) {
+          auto n = co_await sock.recv(ctx, buf, sizeof(buf));
+          if (!n || *n == 0) break;
+          raw.append(buf, *n);
+        }
+        status_line = raw.substr(0, raw.find("\r\n"));
+      };
+      ctx.spawn(client());
+      ctx.run();
+    });
+
+  EXPECT_TRUE(response_contains_status(raw, "404")) << status_line;
 }

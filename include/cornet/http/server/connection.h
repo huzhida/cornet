@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <sys/uio.h>
 
@@ -16,7 +17,7 @@
 #include "cornet/http/server/router.h"
 #include "cornet/http/common/serializer.h"
 #include "cornet/concurrency/timer_wheel.h"
-#include "cornet/net/socket.h"
+#include "cornet/tls/transport.h"
 
 namespace cornet::http {
 
@@ -55,6 +56,13 @@ struct server_options_t {
   // with_timeout around serve()) until this is wired up.
   std::chrono::milliseconds drain_timeout{10000};
 
+  // TLS: set and every accepted connection handshakes before HTTP speaks a
+  // word. Built programmatically (tls::tls_context_t::make_server) — private
+  // key paths are deliberately not loadable from the config file; secrets do
+  // not belong in TOML. See docs/tls.md.
+  std::shared_ptr<tls::tls_context_t> tls;
+  std::chrono::milliseconds handshake_timeout{10000};
+
   bool tcp_nodelay{true};
   bool reuse_port{true};
   bool serve_date_header{true};
@@ -83,6 +91,7 @@ struct connection_metrics_t {
   uint64_t spill_used{0};
   uint64_t protocol_errors{0};
   uint64_t timeouts{0};
+  uint64_t tls_handshake_errors{0};
 };
 
 /**
@@ -107,7 +116,7 @@ struct connection_metrics_t {
  */
 class connection_t {
  public:
-  connection_t(context_t& ctx, tcp::socket_t sock, const server_options_t& opt,
+  connection_t(context_t& ctx, tls::transport_t transport, const server_options_t& opt,
                buffer_pool_t& pool, timer_wheel_t& wheel, connection_metrics_t& metrics);
   ~connection_t();
 
@@ -127,7 +136,7 @@ class connection_t {
    */
   void request_close();
 
-  CORNET_NODISCARD int native_fd() const { return sock_.native_fd(); }
+  CORNET_NODISCARD int native_fd() const { return tr_.native_fd(); }
 
  private:
   friend class body_reader_t;
@@ -145,6 +154,13 @@ class connection_t {
     uint32_t body_len{0};
     std::string_view external{};
     buffer_lease_t owned{};
+    // pin() objects backing `external` live here until the writev completes;
+    // without the move the shared response_t's reset for the next pipelined
+    // request would free them under our feet
+    pin_arena_t pinned{};
+    // File body: owned until the splice/stream finishes (source == File).
+    int     file_fd{-1};
+    int64_t file_pos{0};
   };
 
   // ── setup / teardown ──
@@ -168,6 +184,14 @@ class connection_t {
    */
   CORNET_NODISCARD coro_t<expected<void>> flush_stream();
 
+  /**
+   * @brief write a run of bytes straight to the socket, bypassing the staging
+   * buffers. Used by body_writer_t for chunks that do not fit stream_out_:
+   * the staging capacity is an implementation choice, not something the
+   * public writer API should ever force a caller to know about.
+   */
+  CORNET_NODISCARD coro_t<expected<void>> write_direct(std::string_view data);
+
   // ── the loop's phases ──
   void frame_head(bool close_after);
   CORNET_NODISCARD coro_t<expected<uint32_t>> fill();
@@ -178,6 +202,16 @@ class connection_t {
   CORNET_NODISCARD coro_t<expected<void>> flush();
   CORNET_NODISCARD coro_t<void> shutdown_gracefully();
 
+  // File-body path: head/hdr leave through the same writev batch as everything
+  // else; the body then goes by double-splice (internal pipe) on the plain
+  // transport, or is streamed through the record layer under TLS. The pipe is
+  // per-connection, opened on first use.
+  CORNET_NODISCARD coro_t<expected<void>> splice_file_to_socket(int fd, int64_t& pos,
+                                                                uint64_t len);
+  CORNET_NODISCARD coro_t<expected<void>> stream_file_over_tls(int fd, int64_t& pos,
+                                                               uint64_t len);
+  CORNET_NODISCARD bool ensure_splice_pipe();
+
   // ── error paths ──
   void write_error(status_t status);
   void write_continue();
@@ -185,12 +219,24 @@ class connection_t {
   // ── streaming body support, driven by body_reader_t ──
   CORNET_NODISCARD coro_t<expected<std::string_view>> read_body_chunk();
 
-  uint32_t build_iovecs();
+  // assemble one iovec span and drain it to the socket (short-write safe);
+  // shared by pipelined batches and the head/hdr of a file response
+  CORNET_NODISCARD coro_t<expected<void>> writev_span(struct iovec* iov, uint32_t n);
+
+  uint32_t build_iovecs(uint32_t begin, uint32_t end);
   void     advance_iovecs(uint32_t written);
   void     reset_round();
 
+  // A streaming response whose route ended without finish(). Either it can
+  // still be replaced by a 500 (zero wire bytes) or it must be truncated.
+  CORNET_NODISCARD bool needs_streaming_settlement() const {
+    return resp_.body_source() == body_source_t::Streaming && !stream_finished_;
+  }
+  // Frames its own 500 on the swap path; settling always plans a close.
+  void settle_streaming(bool& close_after);
+
   context_t&               ctx_;
-  tcp::socket_t            sock_;
+  tls::transport_t         tr_;
   const server_options_t&  opt_;
   buffer_pool_t&           pool_;
   timer_wheel_t&           wheel_;
@@ -205,6 +251,9 @@ class connection_t {
   canceler_t               read_canceler_;
   canceler_t               drain_canceler_;
   timer_node_t             timer_{};
+  // file bodies: per-connection pipe + TLS staging, both lazy
+  int                       splice_pipe_[2]{-1, -1};
+  std::unique_ptr<char[]>   file_scratch_;
 
   head_buffer_t  in_;
   spill_buffer_t spill_;
@@ -258,6 +307,11 @@ class connection_t {
   bool body_complete_{false};
   bool streaming_write_{false};  // body_writer_t is currently streaming
   bool headers_staged_{false};   // head+hdr staged, waiting for first flush_stream
+  // body_writer_t::finish() ran for the response being streamed. A route that
+  // returns without finishing is settled when the response would be framed:
+  // swapped for a 500 if nothing was sent yet, truncated deterministically
+  // otherwise — a client must never wait on bytes that will never come.
+  bool stream_finished_{false};
 };
 
 } // namespace cornet::http

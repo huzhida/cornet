@@ -35,6 +35,7 @@ enum class body_source_t : uint8_t {
   Inline,    // copied into the sender's own body output buffer
   External,  // referenced in place (static storage, or a block we own)
   Streaming, // chunked transfer encoding; chunks are sent incrementally
+  File,      // whole body is a regular file, sent by sendfile/splice where transport allows
 };
 
 /**
