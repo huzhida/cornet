@@ -117,7 +117,10 @@ if(CORNET_WITH_HTTP)
         )
     endif()
     add_library(cornet::http ALIAS cornet_http)
-    target_link_libraries(cornet_http PUBLIC cornet PRIVATE llhttp::llhttp_static)
+        # PUBLIC cornet_tls: connection_t speaks transport_t, so the type must be
+    # reachable through cornet_http's public interface; OpenSSL itself stays
+    # private inside cornet_tls
+    target_link_libraries(cornet_http PUBLIC cornet cornet_tls PRIVATE llhttp::llhttp_static)
     if(CORNET_HTTP_TRACE)
         # PUBLIC: the macro also has to be defined in the translation unit that
         # includes the headers, or traced inline code silently stays disabled
@@ -139,6 +142,11 @@ if(CORNET_WITH_HTTP)
         # of the client's public API, so a regression there breaks the build.
         add_executable(http-client examples/http_client.cc)
         target_link_libraries(http-client PRIVATE cornet_http)
+    endif()
+
+    if(CORNET_WITH_TLS)
+        add_executable(https-hello examples/https_hello.cc)
+        target_link_libraries(https-hello PRIVATE cornet_http)
     endif()
 
 endif()
@@ -218,6 +226,9 @@ if(CORNET_ENABLE_TESTS)
                 tests/http_client_pool.cc
                 tests/http_client_e2e.cc
             )
+            if(CORNET_WITH_TLS)
+                target_sources(unit PRIVATE tests/tls_e2e.cc)
+            endif()
         endif()
         target_link_libraries(unit PRIVATE cornet_http)
     endif()

@@ -142,7 +142,23 @@ coro_t<void> server_t::accept_loop() {
 }
 
 coro_t<void> server_t::serve_connection(tcp::socket_t sock) {
-  connection_t conn(ctx_, std::move(sock), opt_, pool_, wheel_, metrics_);
+  tls::transport_t transport(std::move(sock));
+  if (opt_.tls) {
+    // Handshake before anything HTTP, bounded: a client that stops answering
+    // mid-flight must not hold a connection slot forever.
+    auto hs = co_await with_timeout(ctx_,
+        transport.start_tls(ctx_, opt_.tls, tls::engine_mode_t::Server),
+        opt_.handshake_timeout);
+    if (!hs) {
+      ++metrics_.tls_handshake_errors;
+      SPDLOG_DEBUG("http: tls handshake failed ({}), closing", hs.error().message());
+      transport.abandon(ctx_);
+      co_return;
+    }
+    CORNET_HTTP_TRACE_LOG("conn fd={}: tls {} {}", transport.native_fd(),
+                          transport.tls_version(), transport.tls_cipher());
+  }
+  connection_t conn(ctx_, std::move(transport), opt_, pool_, wheel_, metrics_);
   ++conns_;
   active_.push_back(&conn);
   CORNET_HTTP_TRACE_LOG("conn fd={}: begin", conn.native_fd());

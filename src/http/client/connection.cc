@@ -7,6 +7,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "cornet/concurrency/combinators.h"
 #include "cornet/http/common/trace.h"
 #include "cornet/io_uring/awaiters.h"
 #include "cornet/scheduling/context.h"
@@ -88,20 +89,26 @@ void client_options_t::load(config_t* config) {
   duration("cornet.http.client.total_timeout", total_timeout);
   duration("cornet.http.client.idle_timeout", idle_timeout);
   duration("cornet.http.client.pool_wait_timeout", pool_wait_timeout);
+  duration("cornet.http.client.handshake_timeout", handshake_timeout);
+
+  tls_verify = at("cornet.http.client.tls_verify").value_or(tls_verify);
+  tls_ca_file = at("cornet.http.client.tls_ca_file").value_or(tls_ca_file);
+  tls_ca_dir = at("cornet.http.client.tls_ca_dir").value_or(tls_ca_dir);
+  tls_server_name = at("cornet.http.client.tls_server_name").value_or(tls_server_name);
   duration("cornet.http.client.timer_tick", timer_tick);
 }
 
 // ───────────────────────── construction / teardown ─────────────────────────
 
-client_connection_t::client_connection_t(context_t& ctx, tcp::socket_t sock,
+client_connection_t::client_connection_t(context_t& ctx, tls::transport_t transport,
                                          const client_options_t& opt, buffer_pool_t& pool,
                                          timer_wheel_t& wheel, client_metrics_t& metrics,
                                          std::string host, uint16_t port)
-  : ctx_(ctx), sock_(std::move(sock)), opt_(opt), pool_(pool), wheel_(wheel), metrics_(metrics),
+  : ctx_(ctx), tr_(std::move(transport)), opt_(opt), pool_(pool), wheel_(wheel), metrics_(metrics),
     canceler_(ctx), host_(std::move(host)), port_(port) {
   if (opt_.tcp_nodelay) {
     int on = 1;
-    ::setsockopt(sock_.native_fd(), IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
+    ::setsockopt(tr_.native_fd(), IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
   }
   parser_.set_limits(parser_limits_t{
     .max_headers = opt_.max_headers,
@@ -153,12 +160,12 @@ void client_connection_t::close() {
   }
   head_out_.release();
   chunk_out_.release();
-  int fd = sock_.release();
-  if (fd >= 0) {
+  if (tr_.native_fd() >= 0) {
     ++metrics_.conn_closed;
-    // release() first: the socket destructor would otherwise close the same number
-    // again, and by then it may belong to a different connection
-    async_close(ctx_, fd);
+    // abandon() releases the fd before scheduling the close: the destructor would
+    // otherwise close the same number again, and by then it may belong to a
+    // different connection
+    tr_.abandon(ctx_);
   }
   broken_ = true;
 }
@@ -172,7 +179,7 @@ void client_connection_t::abort() {
 
 coro_t<expected<std::unique_ptr<client_connection_t>>> client_connection_t::open(
     context_t& ctx, const client_options_t& opt, buffer_pool_t& pool, timer_wheel_t& wheel,
-    client_metrics_t& metrics, std::string_view host, uint16_t port,
+    client_metrics_t& metrics, std::string_view host, uint16_t port, scheme_t scheme,
     const resolved_address* pre) {
   resolved_address addr{};
   if (pre && *pre) {
@@ -194,28 +201,48 @@ coro_t<expected<std::unique_ptr<client_connection_t>>> client_connection_t::open
       ++metrics.connect_errors;
       co_return unexpected(errno);
     }
-    conn = std::make_unique<client_connection_t>(ctx, std::move(sock), opt, pool, wheel, metrics,
-                                                 std::string(host), port);
+    conn = std::make_unique<client_connection_t>(ctx, tls::transport_t(std::move(sock)), opt,
+                                                 pool, wheel, metrics, std::string(host), port);
   } else {
     tcp::v4::socket_t sock;
     if (sock.native_fd() < 0) {
       ++metrics.connect_errors;
       co_return unexpected(errno);
     }
-    conn = std::make_unique<client_connection_t>(ctx, std::move(sock), opt, pool, wheel, metrics,
-                                                 std::string(host), port);
+    conn = std::make_unique<client_connection_t>(ctx, tls::transport_t(std::move(sock)), opt,
+                                                 pool, wheel, metrics, std::string(host), port);
   }
+  conn->scheme_ = scheme;
 
   if (auto ok = conn->attach(); !ok) co_return unexpected(ok.error());
 
   conn->arm_phase(opt.connect_timeout);
-  auto c = co_await with_cancel(ctx, conn->sock_.connect(ctx, addr), conn->canceler_);
+  auto c = co_await with_cancel(ctx, conn->tr_.connect(ctx, addr), conn->canceler_);
   wheel.cancel(conn->timer_);
   if (!c) {
     ++metrics.connect_errors;
     CORNET_HTTP_TRACE_LOG("client: connect to {}:{} failed ({})", host, port,
                           c.error().message());
     co_return unexpected(conn->timed_out_ ? error_t{ETIMEDOUT, error_domain::System} : c.error());
+  }
+
+  if (scheme == scheme_t::Https) {
+    conn->arm_phase(opt.handshake_timeout);
+    std::string_view sni =
+        opt.tls_server_name.empty() ? std::string_view(host) : std::string_view(opt.tls_server_name);
+    auto hs = co_await with_cancel(
+        ctx, conn->tr_.start_tls(ctx, opt.tls, tls::engine_mode_t::Client, sni), conn->canceler_);
+    wheel.cancel(conn->timer_);
+    if (!hs) {
+      ++metrics.connect_errors;
+      SPDLOG_DEBUG("http client: tls handshake to {}:{} failed ({})", host, port,
+                   hs.error().message());
+      co_return unexpected(conn->timed_out_ ? error_t{ETIMEDOUT, error_domain::System}
+                                            : hs.error());
+    }
+    CORNET_HTTP_TRACE_LOG("client: connected fd={} to {}:{} ({} {})",
+                          conn->native_fd(), host, port,
+                          conn->tr_.tls_version(), conn->tr_.tls_cipher());
   }
 
   ++metrics.conn_created;
@@ -227,8 +254,8 @@ coro_t<expected<std::unique_ptr<client_connection_t>>> client_connection_t::open
 expected<std::unique_ptr<client_connection_t>> client_connection_t::adopt(
     context_t& ctx, tcp::socket_t sock, const client_options_t& opt, buffer_pool_t& pool,
     timer_wheel_t& wheel, client_metrics_t& metrics, std::string host, uint16_t port) {
-  auto conn = std::make_unique<client_connection_t>(ctx, std::move(sock), opt, pool, wheel,
-                                                    metrics, std::move(host), port);
+  auto conn = std::make_unique<client_connection_t>(ctx, tls::transport_t(std::move(sock)), opt,
+                                                    pool, wheel, metrics, std::move(host), port);
   if (auto ok = conn->attach(); !ok) return unexpected(ok.error());
   ++metrics.conn_created;
   conn->keep_alive_ = true;
@@ -351,7 +378,7 @@ coro_t<expected<void>> client_connection_t::write_staged() {
   while (iov_head_ < iov_n_) {
     ++metrics_.writev_calls;
     auto n = co_await with_cancel(
-        ctx_, sock_.writev(ctx_, iov_ + iov_head_, iov_n_ - iov_head_), canceler_);
+        ctx_, tr_.writev(ctx_, iov_ + iov_head_, iov_n_ - iov_head_), canceler_);
     if (!n) {
       broken_ = true;
       if (timed_out_) co_return unexpected(ETIMEDOUT);
@@ -378,7 +405,7 @@ coro_t<expected<uint32_t>> client_connection_t::fill() {
     // that does not fit.
     co_return http_unexpected(http_error_t::HeaderTooLarge);
   }
-  auto n = co_await with_cancel(ctx_, sock_.recv(ctx_, w.data(), w.size()), canceler_);
+  auto n = co_await with_cancel(ctx_, tr_.recv(ctx_, w.data(), w.size()), canceler_);
   if (!n) {
     if (timed_out_) co_return unexpected(ETIMEDOUT);
     co_return unexpected(n.error());
@@ -867,7 +894,7 @@ const headers_t* client_connection_t::headers() const {
 }
 
 bool client_connection_t::alive_hint() const {
-  int fd = sock_.native_fd();
+  int fd = tr_.native_fd();
   if (fd < 0) return false;
   char probe = 0;
   auto n = ::recv(fd, &probe, 1, MSG_PEEK | MSG_DONTWAIT);

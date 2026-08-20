@@ -15,7 +15,8 @@
 #include "cornet/http/common/protocol.h"
 #include "cornet/http/common/serializer.h"
 #include "cornet/concurrency/timer_wheel.h"
-#include "cornet/net/socket.h"
+#include "cornet/http/common/url.h"
+#include "cornet/tls/transport.h"
 #include "cornet/utils/config.h"
 
 namespace cornet::http {
@@ -56,6 +57,17 @@ struct client_options_t {
   bool lenient_chunked_length{false};
   bool lenient_keep_alive{false};
 
+  // ── tls (https) ──
+  // null until the first https request: a plain-http client must never pay
+  // for context setup it never uses. Made by client_t from the knobs below.
+  std::shared_ptr<tls::tls_context_t> tls;
+  bool tls_verify{true};                 // keep true outside labs
+  std::string tls_ca_file;               // empty: system default verify paths
+  std::string tls_ca_dir;
+  std::string tls_ca_pem;                // in-memory CA bundle; wins over file/dir
+  std::string tls_server_name;           // SNI/verify override; empty: the url host
+  std::chrono::milliseconds handshake_timeout{10000};
+
   // ── dns ──
   uint32_t dns_cache_entries{256};
   std::chrono::milliseconds dns_cache_ttl{30000};
@@ -93,6 +105,8 @@ struct client_metrics_t {
   uint64_t protocol_errors{0};
   uint64_t dns_lookups{0};
   uint64_t dns_cache_hits{0};
+  uint64_t url_cache_hits{0};
+  uint64_t url_cache_misses{0};
   uint64_t writev_calls{0};
   uint64_t writev_partial{0};
   uint64_t pool_waits{0};
@@ -136,7 +150,7 @@ void frame_request_head(out_buffer_t& out, const client_request_t& req,
  */
 class client_connection_t {
  public:
-  client_connection_t(context_t& ctx, tcp::socket_t sock, const client_options_t& opt,
+  client_connection_t(context_t& ctx, tls::transport_t transport, const client_options_t& opt,
                       buffer_pool_t& pool, timer_wheel_t& wheel, client_metrics_t& metrics,
                       std::string host, uint16_t port);
   ~client_connection_t();
@@ -150,7 +164,7 @@ class client_connection_t {
    */
   CORNET_NODISCARD static coro_t<expected<std::unique_ptr<client_connection_t>>> open(
       context_t& ctx, const client_options_t& opt, buffer_pool_t& pool, timer_wheel_t& wheel,
-      client_metrics_t& metrics, std::string_view host, uint16_t port,
+      client_metrics_t& metrics, std::string_view host, uint16_t port, scheme_t scheme,
       const resolved_address* pre = nullptr);
 
   /**
@@ -160,6 +174,11 @@ class client_connection_t {
   CORNET_NODISCARD static expected<std::unique_ptr<client_connection_t>> adopt(
       context_t& ctx, tcp::socket_t sock, const client_options_t& opt, buffer_pool_t& pool,
       timer_wheel_t& wheel, client_metrics_t& metrics, std::string host, uint16_t port);
+
+  /** @brief whether this connection speaks TLS. */
+  CORNET_NODISCARD bool is_tls() const { return scheme_ == scheme_t::Https; }
+  /** @brief the origin scheme the connection was opened for. */
+  CORNET_NODISCARD scheme_t scheme() const { return scheme_; }
 
   // ── the ordinary exchange ──
 
@@ -262,7 +281,7 @@ class client_connection_t {
    */
   void close();
 
-  CORNET_NODISCARD int native_fd() const { return sock_.native_fd(); }
+  CORNET_NODISCARD int native_fd() const { return tr_.native_fd(); }
   CORNET_NODISCARD std::string_view host() const { return host_; }
   CORNET_NODISCARD uint16_t port() const { return port_; }
   CORNET_NODISCARD uint32_t exchanges() const { return exchanges_; }
@@ -327,7 +346,7 @@ class client_connection_t {
   void arm_phase(std::chrono::milliseconds phase);
 
   context_t&               ctx_;
-  tcp::socket_t            sock_;
+  tls::transport_t         tr_;
   const client_options_t&  opt_;
   buffer_pool_t&           pool_;
   timer_wheel_t&           wheel_;
@@ -355,6 +374,9 @@ class client_connection_t {
   std::string host_;
   uint16_t    port_{0};
   client_pool_t* pool_owner_{nullptr};
+  // scheme_t, not bool: a bool in a factory signature silently eats pointer
+  // arguments (the numeric fast path shipped exactly that bug once)
+  scheme_t        scheme_{scheme_t::Http};
 
   // offset in the head buffer where this response's body region starts; the region
   // is rewound and refilled for every read, which is what lets a body be larger
