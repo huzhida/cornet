@@ -31,15 +31,15 @@ info "安装系统依赖..."
 if command -v apt-get &>/dev/null; then
     $SUDO apt-get update
     $SUDO apt-get install -y build-essential gcc g++ cmake ninja-build \
-        git curl zip unzip tar pkg-config
+        git curl zip unzip tar pkg-config libssl-dev
 elif command -v dnf &>/dev/null; then
     $SUDO dnf groupinstall -y "Development Tools"
     $SUDO dnf install -y gcc gcc-c++ cmake ninja-build \
-        git curl zip unzip tar pkgconf-pkg-config
+        git curl zip unzip tar pkgconf-pkg-config openssl-devel
 elif command -v yum &>/dev/null; then
     $SUDO yum groupinstall -y "Development Tools"
     $SUDO yum install -y gcc gcc-c++ cmake ninja-build \
-        git curl zip unzip tar pkgconfig
+        git curl zip unzip tar pkgconfig openssl-devel
 else
     error "不支持的包管理器，请手动安装: gcc 11+, cmake 3.16+, ninja, git, pkg-config"
 fi
