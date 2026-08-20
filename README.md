@@ -21,7 +21,8 @@ Cornet 是一个基于 C++20 协程和 Linux io_uring 的高性能异步网络�
 - **优雅关闭** — drain → timeout → cancel 三阶段关闭流程
 - **HTTP/1.1 Server** — 路由（精确/参数/通配）、同步与异步 handler、filter、keep-alive 与 pipelining、body 聚合或流式、chunked 响应、时间轮超时、优雅 drain
 - **HTTP/1.1 Client** — 连接池、DNS 缓存、超时分层、幂等重试、重定向、流式上传下载
-- **依赖精简** — 核心仅依赖 liburing、spdlog、toml++、concurrentqueue（vcpkg 管理）；HTTP 模块私有链接 llhttp，公开头文件不暴露它
+- **TLS（OpenSSL 3.x，可选）** — 用户态 record layer + 明文/TLS 统一传输抽象；server/client 共用，`CORNET_WITH_TLS` 开关
+- **依赖精简** — 核心仅依赖 liburing、spdlog、toml++、concurrentqueue（vcpkg 管理）；HTTP 模块私有链接 llhttp，TLS 模块私有链接 OpenSSL，公开头文件都不暴露
 
 ## 快速开始
 
@@ -291,6 +292,7 @@ cornet/
 - [多线程 Runtime](docs/runtime.md)
 - [HTTP Server](docs/http_server.md)
 - [HTTP Client](docs/http_client.md)
+- [TLS](docs/tls.md)
 
 ## 性能
 
