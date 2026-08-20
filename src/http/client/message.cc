@@ -1,5 +1,7 @@
 #include "cornet/http/client/message.h"
 
+#include "cornet/http/client/client.h"
+
 #include <cstring>
 #include <new>
 
@@ -88,8 +90,12 @@ bool client_response_t::keep_alive() const { return node_ && node_->keep_alive; 
 // ───────────────────────── client_request_t ─────────────────────────
 
 expected<client_request_t> client_request_t::make(buffer_pool_t& pool, method_t m,
-                                                 std::string_view url, uint32_t hdr_bytes) {
+                                                 std::string_view url, uint32_t hdr_bytes,
+                                                 client_t* owner) {
   client_request_t req;
+  // owner must be set before init(): retarget() below asks the owner's parse
+  // cache when one exists; wiring it up afterwards leaves the cache unused
+  req.owner_ = owner;
   if (auto ok = req.init(pool, m, url, hdr_bytes); !ok) return unexpected(ok.error());
   return req;
 }
@@ -118,9 +124,18 @@ expected<void> client_request_t::retarget(std::string_view url) {
   std::memcpy(url_lease_.data(), url.data(), url.size());
   url_len_ = uint32_t(url.size());
 
-  auto parsed = url_t::parse(std::string_view(url_lease_.data(), url_len_));
-  if (!parsed) return unexpected(parsed.error());
-  url_ = *parsed;
+  std::string_view owned(url_lease_.data(), url_len_);
+  if (owner_) {
+    // hit the client's parse cache: the view still anchors onto this request's
+    // own lease, only the scan itself is skipped
+    auto cached = owner_->parse_cached(url);
+    if (!cached) return unexpected(cached.error());
+    url_ = (*cached)->rebase(owned);
+  } else {
+    auto parsed = url_t::parse(owned);
+    if (!parsed) return unexpected(parsed.error());
+    url_ = *parsed;
+  }
   return {};
 }
 

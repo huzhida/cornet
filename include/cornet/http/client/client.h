@@ -153,6 +153,26 @@ class client_t {
    */
   CORNET_NODISCARD coro_t<expected<client_response_t>> send(client_request_t& req);
 
+private:
+  /**
+   * @brief small parse cache: repeated requests to the same url skip the scan.
+   *
+   * Direct-mapped on a string hash. A hit hands out a url_t whose views target
+   * the slot's own string; the request pipeline re-anchors those views onto its
+   * own pooled lease synchronously (client_request_t::retarget), so eviction
+   * by overwrite cannot dangle any view the client has issued. Single-threaded
+   * by the shared-nothing rule, like everything else on a client_t.
+   */
+  struct url_cache_slot_t {
+    std::string raw;
+    url_t       parsed;
+  };
+
+  CORNET_NODISCARD expected<const url_t*> parse_cached(std::string_view url);
+
+  std::array<url_cache_slot_t, 128> url_cache_;
+
+ public:
   // ── one-liners ──
 
   CORNET_NODISCARD coro_t<expected<client_response_t>> get(std::string_view url);

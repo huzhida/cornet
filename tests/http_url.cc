@@ -203,6 +203,32 @@ TEST(http_url, redirect_root_relative_location) {
   EXPECT_EQ(resolve("http://a.com:8080/x/y?q=1", "/z"), "http://a.com:8080/z");
 }
 
+// The parse cache works by scanning once and rebasing views onto each request's
+// own pooled copy — verify the rebase keeps every field identical while actually
+// living in the new storage.
+TEST(http_url, rebase_keeps_every_field_identical) {
+  std::string src = "https://user@example.com:8443/a/b?q=1#frag";
+  auto parsed = url_t::parse(src);
+  ASSERT_TRUE(parsed.has_value());
+
+  std::string owned = src;
+  auto rebased = parsed->rebase(owned);
+
+  EXPECT_EQ(rebased.scheme(), parsed->scheme());
+  EXPECT_EQ(rebased.host(), parsed->host());
+  EXPECT_EQ(rebased.authority(), parsed->authority());
+  EXPECT_EQ(rebased.userinfo(), parsed->userinfo());
+  EXPECT_EQ(rebased.path(), parsed->path());
+  EXPECT_EQ(rebased.query(), parsed->query());
+  EXPECT_EQ(rebased.port(), parsed->port());
+  EXPECT_EQ(rebased.explicit_port(), parsed->explicit_port());
+  EXPECT_EQ(rebased.ipv6_literal(), parsed->ipv6_literal());
+
+  // and the new views point at the new storage, not the old one
+  EXPECT_EQ(rebased.raw().data(), owned.data());
+  EXPECT_EQ(rebased.host().data(), owned.data() + (parsed->host().data() - src.data()));
+}
+
 TEST(http_url, redirect_relative_location_merges_against_the_base_directory) {
   EXPECT_EQ(resolve("http://a.com/x/y", "z"), "http://a.com/x/z");
   EXPECT_EQ(resolve("http://a.com/x/", "z"), "http://a.com/x/z");

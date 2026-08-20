@@ -187,7 +187,8 @@ class client_request_t {
    */
   CORNET_NODISCARD static expected<client_request_t> make(buffer_pool_t& pool, method_t m,
                                                           std::string_view url,
-                                                          uint32_t hdr_bytes = 4u << 10);
+                                                          uint32_t hdr_bytes = 4u << 10,
+                                                          client_t* owner = nullptr);
 
   // ── headers ──
 

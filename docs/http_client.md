@@ -451,3 +451,13 @@ cmake --build --preset debug --target unit
 - `client_response_t` / `client_stream_t` / `client_upload_t` 都只可移动。`client_stream_t` 与 `client_upload_t` 持有连接期间会占用池里一个名额。
 - 时间轮在第一次用到 client 时才 spawn，一个 client 一个 tick SQE。server 与 client 同进程时各有一个，暂不合并（合并会让核心依赖 http 模块的类型）。
 - 窗口回绕在 server 侧也已用上（`src/http/server/connection.cc`），两端的 body 读取路径行为一致。
+
+## URL 解析缓存（parse cache）
+
+`client_t` 内置一个 128 槽直映射解析缓存：同一 URL 字符串的 `url_t::parse` 只做一次，
+第二次直接命中（视图重锚到请求自己的池化租约上，生命周期与逐条 Scan 完全等价，
+互斥/悬空不存在）。指标在 `client_metrics_t::url_cache_hits/_misses`。
+
+命中 = 同一客户端、URL 字符串**逐字符相等**；不同 URL 即插入 miss+覆盖，
+保持 O(1) 无锁，代价只在首次 miss。线上命中一旦形成稳态就是单次 memcpy + 一次哈希。
+
