@@ -6,7 +6,7 @@
 #include "cornet/concurrency/scope.h"
 #include "cornet/http/server/connection.h"
 #include "cornet/http/server/router.h"
-#include "cornet/http/common/timer_wheel.h"
+#include "cornet/concurrency/timer_wheel.h"
 #include "cornet/net/socket.h"
 
 namespace cornet {

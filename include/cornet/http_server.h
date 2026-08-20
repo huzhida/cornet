@@ -14,7 +14,7 @@
 #include "cornet/http/common/parser.h"
 #include "cornet/http/common/protocol.h"
 #include "cornet/http/common/serializer.h"
-#include "cornet/http/common/timer_wheel.h"
+#include "cornet/concurrency/timer_wheel.h"
 #include "cornet/http/common/trace.h"
 #include "cornet/http/common/url.h"
 

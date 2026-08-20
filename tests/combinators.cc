@@ -3,6 +3,8 @@
 
 #include <gtest/gtest.h>
 
+#include "ephemeral_port.h"
+
 using namespace cornet;
 
 class combinators : public ::testing::Test {
@@ -50,11 +52,12 @@ TEST_F(combinators, with_timeout_completes_before_timeout) {
   auto test = [](context_t& ctx) -> coro_t<void> {
     tcp::v4::socket_t server_sock;
     server_sock.address_reuse(true);
-    EXPECT_TRUE(server_sock.listen("127.0.0.1", 23456).has_value());
+    uint16_t port = listen_ephemeral(server_sock);
+    EXPECT_TRUE(port != 0);
 
-    auto client_task = [](context_t& ctx) -> coro_t<void> {
+    auto client_task = [port](context_t& ctx) -> coro_t<void> {
       tcp::v4::socket_t sock;
-      co_await sock.connect(ctx, "127.0.0.1", 23456);
+      co_await sock.connect(ctx, "127.0.0.1", port);
       co_await sock.send(ctx, "hello", 5);
     };
     ctx.spawn(client_task(ctx));
@@ -76,11 +79,12 @@ TEST_F(combinators, with_timeout_expires) {
   auto test = [](context_t& ctx) -> coro_t<void> {
     tcp::v4::socket_t server_sock;
     server_sock.address_reuse(true);
-    EXPECT_TRUE(server_sock.listen("127.0.0.1", 23457).has_value());
+    uint16_t port = listen_ephemeral(server_sock);
+    EXPECT_TRUE(port != 0);
 
-    auto client_task = [](context_t& ctx) -> coro_t<void> {
+    auto client_task = [port](context_t& ctx) -> coro_t<void> {
       tcp::v4::socket_t sock;
-      co_await sock.connect(ctx, "127.0.0.1", 23457);
+      co_await sock.connect(ctx, "127.0.0.1", port);
       co_await sleep(ctx, std::chrono::milliseconds(10));
     };
     ctx.spawn(client_task(ctx));
@@ -151,7 +155,7 @@ TEST_F(combinators, canceler_before_io) {
 
     tcp::v4::socket_t server_sock;
     server_sock.address_reuse(true);
-    EXPECT_TRUE(server_sock.listen("127.0.0.1", 23460).has_value());
+    EXPECT_TRUE(listen_ephemeral(server_sock) != 0);
 
     // should return ECANCELED immediately without submitting IO
     auto result = co_await with_cancel(ctx, server_sock.accept(ctx, nullptr, nullptr, 0), canceler);
@@ -169,7 +173,7 @@ TEST_F(combinators, canceler_during_io) {
 
     tcp::v4::socket_t server_sock;
     server_sock.address_reuse(true);
-    EXPECT_TRUE(server_sock.listen("127.0.0.1", 23461).has_value());
+    EXPECT_TRUE(listen_ephemeral(server_sock) != 0);
 
     // spawn a coroutine that cancels after a short delay
     auto cancel_task = [&canceler, &ctx]() -> coro_t<void> {
@@ -195,7 +199,7 @@ TEST_F(combinators, canceler_hierarchical) {
 
     tcp::v4::socket_t server_sock;
     server_sock.address_reuse(true);
-    EXPECT_TRUE(server_sock.listen("127.0.0.1", 23462).has_value());
+    EXPECT_TRUE(listen_ephemeral(server_sock) != 0);
 
     // cancel parent after delay, should propagate to child
     auto cancel_task = [&parent, &ctx]() -> coro_t<void> {
@@ -424,7 +428,7 @@ TEST_F(combinators, await_transform_propagates_cancel) {
     auto io_task = [](context_t& ctx) -> cancelable_coro_t<expected<void>> {
       tcp::v4::socket_t server_sock;
       server_sock.address_reuse(true);
-      EXPECT_TRUE(server_sock.listen("127.0.0.1", 23470).has_value());
+      EXPECT_TRUE(listen_ephemeral(server_sock) != 0);
       // accept blocks — will be cancelled via await_transform propagation
       auto result = co_await server_sock.accept(ctx, nullptr, nullptr, 0);
       if (!result) {
@@ -475,7 +479,7 @@ TEST_F(combinators, coro_with_cancel_basic) {
     auto long_task = [](context_t& ctx) -> cancelable_coro_t<expected<int>> {
       tcp::v4::socket_t server_sock;
       server_sock.address_reuse(true);
-      EXPECT_TRUE(server_sock.listen("127.0.0.1", 23471).has_value());
+      EXPECT_TRUE(listen_ephemeral(server_sock) != 0);
       auto result = co_await server_sock.accept(ctx, nullptr, nullptr, 0);
       co_return result;
     };
@@ -502,7 +506,7 @@ TEST_F(combinators, coro_with_timeout_expires) {
     auto long_task = [](context_t& ctx) -> cancelable_coro_t<expected<int>> {
       tcp::v4::socket_t server_sock;
       server_sock.address_reuse(true);
-      EXPECT_TRUE(server_sock.listen("127.0.0.1", 23472).has_value());
+      EXPECT_TRUE(listen_ephemeral(server_sock) != 0);
       auto result = co_await server_sock.accept(ctx, nullptr, nullptr, 0);
       co_return result;
     };
@@ -537,20 +541,49 @@ TEST_F(combinators, coro_with_timeout_void_expires) {
     auto long_task = [](context_t& ctx) -> cancelable_coro_t<void> {
       tcp::v4::socket_t server_sock;
       server_sock.address_reuse(true);
-      EXPECT_TRUE(server_sock.listen("127.0.0.1", 23473).has_value());
+      EXPECT_TRUE(listen_ephemeral(server_sock) != 0);
       co_await server_sock.accept(ctx, nullptr, nullptr, 0);
     };
 
-    // void coroutine with timeout — throws on timeout
-    bool threw = false;
-    try {
-      co_await with_timeout(ctx, long_task(ctx), std::chrono::milliseconds(2));
-    } catch (...) {
-      threw = true;
-    }
-    // void coro timeout may throw or silently complete depending on impl
-    // the key guarantee is it returns within the timeout window
-    (void)threw;
+    // A void coroutine's timeout yields expected<void> so the expiry is
+    // observable instead of vanishing as a silent "success".
+    auto result = co_await with_timeout(ctx, long_task(ctx), std::chrono::milliseconds(2));
+    EXPECT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ETIMEDOUT);
+    co_return;
+  };
+  ctx->spawn(test(*ctx));
+  ctx->run();
+}
+
+TEST_F(combinators, coro_with_timeout_void_completes) {
+  auto test = [](context_t& ctx) -> coro_t<void> {
+    auto short_task = [](context_t& ctx) -> cancelable_coro_t<void> {
+      co_await sleep(ctx, std::chrono::milliseconds(1));
+    };
+    auto result = co_await with_timeout(ctx, short_task(ctx), std::chrono::milliseconds(50));
+    EXPECT_TRUE(result.has_value());
+    co_return;
+  };
+  ctx->spawn(test(*ctx));
+  ctx->run();
+}
+
+TEST_F(combinators, when_all_empty_pack_completes_inline) {
+  auto test = [](context_t& ctx) -> coro_t<void> {
+    // Zero tasks: must not hang waiting for a completion that cannot happen.
+    auto r = co_await when_all(ctx);
+    (void)r;
+    co_return;
+  };
+  ctx->spawn(test(*ctx));
+  ctx->run();
+}
+
+TEST_F(combinators, when_any_empty_pack_completes_inline) {
+  auto test = [](context_t& ctx) -> coro_t<void> {
+    auto r = co_await when_any(ctx);
+    (void)r;
     co_return;
   };
   ctx->spawn(test(*ctx));

@@ -232,11 +232,11 @@ private:
     try {
       out = co_await task;
     } catch (const std::exception& e) {
-      SPDLOG_ERROR("task_scope: child task threw exception: {}", e.what());
       out = unexpected(EFAULT, error_domain::Exception);
-      s.record_failure(nullptr);
+      // record_failure is the single place that logs; hand it the detail or
+      // one exception would print twice, the second line crying "unknown".
+      s.record_failure(e.what());
     } catch (...) {
-      SPDLOG_ERROR("task_scope: child task threw unknown exception");
       out = unexpected(EFAULT, error_domain::Exception);
       s.record_failure(nullptr);
     }

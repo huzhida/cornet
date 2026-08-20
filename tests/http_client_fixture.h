@@ -212,7 +212,7 @@ struct conn_env_t {
   cornet::http::client_options_t opt{};
   cornet::http::client_metrics_t metrics{};
   cornet::http::buffer_pool_t&   pool{cornet::http::buffer_pool_t::local()};
-  cornet::http::timer_wheel_t    wheel{ctx, 20ms};
+  cornet::timer_wheel_t    wheel{ctx, 20ms};
 
   conn_env_t() {
     // a short tick, so the timeout tests do not wait half a second
