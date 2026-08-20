@@ -178,6 +178,11 @@ if(CORNET_ENABLE_BENCH)
     if(CORNET_WITH_HTTP)
         target_link_libraries(bench PRIVATE cornet_http)
         target_compile_definitions(bench PRIVATE CORNET_BENCH_HTTP)
+        if(CORNET_WITH_TLS)
+            target_compile_definitions(bench PRIVATE CORNET_BENCH_TLS)
+            # bench 复用测试的内嵌 PKI（tests/tls_certs.h）
+            target_include_directories(bench PRIVATE tests)
+        endif()
     endif()
 endif()
 

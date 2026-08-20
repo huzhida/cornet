@@ -43,6 +43,11 @@
 #include "cornet/net/socket.h"
 #include "cornet/scheduling/context.h"
 
+#ifdef CORNET_BENCH_TLS
+#include "cornet/tls/transport.h"
+#include "tls_certs.h"
+#endif
+
 namespace bench {
 
 namespace http_echo {
@@ -50,6 +55,29 @@ namespace http_echo {
 constexpr uint16_t    kPort = 9877;
 constexpr const char* kPath = "/echo";
 constexpr const char* kUrl  = "http://127.0.0.1:9877/echo";
+
+#ifdef CORNET_BENCH_TLS
+constexpr const char* kHttpsUrl = "https://127.0.0.1:9877/echo";
+
+/**
+ * @brief TLS material for the bench rows.
+ *
+ * The server's cert comes from the test PKI (regenerate there if it ever
+ * expires; a bench never faces the public internet). The client's context
+ * disables verification deliberately: it changes nothing in steady state
+ * (verification happens once per connection, and the bench reuses each), and
+ * it keeps the measurement from depending on a CA bundle lying around.
+ */
+inline std::shared_ptr<cornet::tls::tls_context_t> server_tls_ctx() {
+  auto cx = cornet::tls::tls_context_t::make_server(cornet::tls::tls_server_options_t{
+      .cert_pem = std::string(cornet::test::tls::kServerCert),
+      .key_pem = std::string(cornet::test::tls::kServerKey),
+  });
+  if (!cx) return nullptr;
+  return *cx;
+}
+
+#endif
 
 /**
  * @brief header bytes each exchange adds on top of the payload, per scenario.
@@ -96,9 +124,20 @@ inline cornet::http::server_options_t server_options(const scenario_t& s) {
  */
 class server_thread_t {
  public:
-  server_thread_t(cornet::config_t& config, const scenario_t& scenario) : ctx_(&config) {
+  server_thread_t(cornet::config_t& config, const scenario_t& scenario, bool use_tls = false)
+    : ctx_(&config) {
     auto opt = server_options(scenario);
-    thread_ = std::thread([this, opt] {
+    thread_ = std::thread([this, opt, use_tls]() mutable {
+#ifdef CORNET_BENCH_TLS
+      if (use_tls) {
+        // built on the server thread: a tls_context_t is per-worker shared-nothing
+        auto cx = server_tls_ctx();
+        CORNET_ASSERT(cx != nullptr, "bench tls context must build");
+        opt.tls = cx;
+      }
+#else
+      (void)use_tls;
+#endif
       cornet::http::server_t server(ctx_, opt);
 
       // A synchronous handler: no coroutine frame, no trip through the scheduler.
@@ -250,6 +289,7 @@ inline size_t probe_response_len(cornet::config_t& config, const std::string& re
   return total;
 }
 
+
 } // namespace http_echo
 
 /**
@@ -349,6 +389,102 @@ inline result_t run_cornet_http_server(const scenario_t& scenario, cornet::confi
   collector.fill_profile(r, profiler);
   return r;
 }
+
+#ifdef CORNET_BENCH_TLS
+/**
+ * @brief https::server_t plus http::client_t over TLS: the full https stack.
+ */
+inline result_t run_cornet_https(const scenario_t& scenario, cornet::config_t& config) {
+  using namespace cornet;
+  using namespace bench::http_echo;
+
+  rss_profiler_t profiler;
+  profiler.start();
+
+  server_thread_t server(config, scenario, true);
+  if (!server.ok()) {
+    fprintf(stderr, "https bench: server not up, skipping row\n");
+    server.shutdown();
+    return http_skipped_row("Cornet/HTTPS", scenario, profiler);
+  }
+
+  latency_collector_t collector;
+  collector.reserve(scenario.total_messages);
+  auto remaining = std::make_shared<std::atomic<int>>(scenario.total_messages);
+
+  std::string payload(size_t(scenario.message_size), 'A');
+
+  context_t client_ctx(&config);
+
+  http::client_options_t copt;
+  auto conns = uint16_t(std::min(scenario.connections, 65000));
+  copt.max_conns_per_host = conns;
+  copt.max_idle_per_host = conns;
+  copt.max_total_conns = uint32_t(scenario.connections) + 8;
+  copt.max_retries = 0;
+  copt.total_timeout = std::chrono::seconds(30);
+  copt.response_timeout = std::chrono::seconds(30);
+  copt.body_timeout = std::chrono::seconds(30);
+  // verification adds nothing measurable in steady state (handshakes are pooled)
+  // and must not depend on a CA bundle on the box
+  copt.tls_verify = false;
+  http::client_t cli(client_ctx, copt);
+
+  // Prime every connection before the clock: a TLS handshake is connection
+  // setup, not exchange cost, and at 2048 connections lazily built pools start
+  // every row with a seconds-long ECDSA blast that queues the first exchanges.
+  // Plain rows pay this too (TCP connect), it is just a hundred times cheaper.
+  {
+    std::atomic<int> primed{0};
+    for (int i = 0; i < scenario.connections; ++i) {
+      client_ctx.spawn([&]() -> coro_t<void> {
+        auto resp = co_await cli.get(kHttpsUrl);
+        if (resp) ++primed;
+      }());
+    }
+    client_ctx.run();
+    if (primed.load() < scenario.connections) {
+      fprintf(stderr, "https bench: primer reached %d/%d connections\n",
+              primed.load(), scenario.connections);
+    }
+  }
+
+  auto client_session = [&](context_t&) -> coro_t<void> {
+    while (true) {
+      if ((*remaining)-- <= 0) break;
+
+      auto t0 = std::chrono::steady_clock::now();
+      auto req = cli.request(http::method_t::Post, kHttpsUrl);
+      req.header(http::field_t::ContentType, "application/octet-stream").body_static(payload);
+      auto resp = co_await req.send();
+      if (!resp || resp->body().size() != payload.size()) {
+        collector.record_failure();
+        continue;
+      }
+
+      auto latency = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - t0).count();
+      collector.record(uint64_t(latency), int(payload.size() * 2));
+    }
+  };
+
+  size_t hwm_before = get_vmmhwm_kb();
+  auto   start = std::chrono::steady_clock::now();
+  for (int i = 0; i < scenario.connections; ++i) {
+    client_ctx.spawn(client_session(client_ctx));
+  }
+  client_ctx.run();
+  auto elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+
+  cli.close();
+  server.shutdown();
+  profiler.stop();
+
+  result_t r = collector.compute("Cornet/HTTPS", scenario.name, elapsed, hwm_before);
+  collector.fill_profile(r, profiler);
+  return r;
+}
+#endif
 
 /**
  * @brief http::server_t plus http::client_t: what a user of the module pays end to end.
@@ -511,6 +647,66 @@ inline void print_http_overhead_summary(const std::vector<result_t>& all_results
     }
   }
 }
+
+#ifdef CORNET_BENCH_TLS
+/**
+ * @brief what TLS costs against plain HTTP, per scenario.
+ *
+ * Pairs the rows that share a client (server-isolated vs full-stack), so the
+ * delta is transport-only: record-layer crypto + the copies TLS cannot avoid.
+ */
+inline void print_tls_overhead_summary(const std::vector<result_t>& all_results) {
+  auto find = [&](const std::string& scenario, const char* framework) -> const result_t* {
+    for (auto& r : all_results) {
+      if (r.scenario == scenario && r.framework == framework) return &r;
+    }
+    return nullptr;
+  };
+
+  std::vector<std::string> scenarios;
+  for (auto& r : all_results) {
+    if (std::find(scenarios.begin(), scenarios.end(), r.scenario) == scenarios.end()) {
+      scenarios.push_back(r.scenario);
+    }
+  }
+
+  printf("\n");
+  printf("╔══════════════════════════════════════════════════════════════╗\n");
+  printf("║            TLS 相对明文 HTTP 的开销                          ║\n");
+  printf("╚══════════════════════════════════════════════════════════════╝\n");
+  printf("\n  保留率 = HTTPS 行 RPS / 对应 HTTP 行 RPS；delta 是纯传输层差异\n");
+  printf("  （record layer 加解密 + 一次拷贝；writev 合批在 TLS 下按 record 走）\n\n");
+
+  printf("  %-22s %10s %10s %8s\n", "场景", "HTTP RPS", "HTTPS RPS", "保留率");
+  printf("  %-22s %10s %10s %8s\n", "──────────", "────────", "────────", "──────");
+
+  for (auto& scenario : scenarios) {
+    const auto* full = find(scenario, "Cornet/HTTP");
+    const auto* fulls = find(scenario, "Cornet/HTTPS");
+    printf("  %-22s", scenario.substr(0, 22).c_str());
+    if (full && fulls && full->rps > 0) {
+      printf(" %10.0f %10.0f %7.1f%%", full->rps, fulls->rps, fulls->rps / full->rps * 100.0);
+    } else {
+      printf(" %10s %10s %8s", "-", "-", "-");
+    }
+    printf("\n");
+  }
+
+  printf("\n  %-22s %10s %10s\n", "场景", "HTTP P99", "HTTPS P99");
+  printf("  %-22s %10s %10s\n", "──────────", "────────", "────────");
+  for (auto& scenario : scenarios) {
+    const auto* full = find(scenario, "Cornet/HTTP");
+    const auto* fulls = find(scenario, "Cornet/HTTPS");
+    printf("  %-22s", scenario.substr(0, 22).c_str());
+    if (full) printf(" %10.0f", full->p99_latency_us); else printf(" %10s", "-");
+    if (fulls) printf(" %10.0f", fulls->p99_latency_us); else printf(" %10s", "-");
+    printf("\n");
+  }
+
+  printf("\n  注: 吞吐列按 payload 计（与明文行同口径）；TLS record 头部开销按记录计\n");
+  printf("      (40MB/body 行里 64KB 每 record 约 +0.05%%)，可忽略。\n");
+}
+#endif
 
 } // namespace bench
 
