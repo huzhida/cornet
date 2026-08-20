@@ -248,6 +248,48 @@ class request_t {
 };
 
 /**
+ * @brief movable owner of pinned response objects.
+ *
+ * response_t's pin() arena: objects a handler computed and referenced from the
+ * response must live until that response is written. Pipelined responses flush
+ * only after *all* of them are framed — and the shared response_t gets reset
+ * for the next request before that — so the arena is moved into each response's
+ * pending slot when the response is framed. That move is what makes it correct
+ * to pin in one handler while a previous pipelined response is still in flight.
+ */
+class pin_arena_t {
+ public:
+  pin_arena_t() = default;
+  ~pin_arena_t() { clear(); }
+
+  pin_arena_t(const pin_arena_t&) = delete;
+  pin_arena_t& operator=(const pin_arena_t&) = delete;
+  pin_arena_t(pin_arena_t&& o) noexcept : slots_(std::move(o.slots_)) { o.slots_.clear(); }
+  pin_arena_t& operator=(pin_arena_t&& o) noexcept {
+    if (this != &o) {
+      clear();
+      slots_ = std::move(o.slots_);
+      o.slots_.clear();
+    }
+    return *this;
+  }
+
+  void clear() {
+    for (auto& s : slots_) s.destroy(s.ptr);
+    slots_.clear();
+  }
+
+  void hold(void* ptr, void (*destroy)(void*)) { slots_.push_back({ptr, destroy}); }
+
+ private:
+  struct slot_t {
+    void* ptr;
+    void (*destroy)(void*);
+  };
+  std::vector<slot_t> slots_;
+};
+
+/**
  * @brief the response being built for one request.
  *
  * Body writes come in four flavours because "who owns these bytes until the write
@@ -256,7 +298,10 @@ class request_t {
  * handler local is already dangling when the kernel reads it, and nothing at the
  * call site hints at that. So the API makes the choice explicit:
  *
- *   body()        copies into the output buffer. Always safe; the default.
+ *   body()        copies into the inline staging buffer, the fast path. Data
+ *                   too big for it is moved into the response arena instead
+ *                   and travels as an external reference — the staging
+ *                   capacity is an implementation choice, never a body limit.
  *   body_static() references bytes of static storage duration. Zero copy.
  *   body_owned()  takes a pooled block, released once the response is written.
  *   pin()         moves an object into the response arena, so a value computed
@@ -340,6 +385,34 @@ class response_t {
   response_t& body_owned(buffer_lease_t lease, uint32_t len);
 
   /**
+   * @brief serve a regular file's bytes as the body.
+   *
+   * The plain transport sends it via sendfile/splice — zero copies, the write
+   * path never sees the bytes. Under TLS it is streamed through the record
+   * layer in 64KiB chunks (still no staging cap; the encryption is what
+   * copies). A response interleaved in a pipelined batch keeps wire order.
+   *
+   * @return false with a framed 404 if path does not open as a readable
+   *         regular file; the handler can simply `co_return` then.
+   */
+  CORNET_NODISCARD bool local_file(std::string_view path);
+
+  /**
+   * @brief io-safe variant of file() for coroutine handlers: asynchronous
+   * openat + statx on the io_uring ring, never a syscall on the event loop.
+   *
+   * pick this over file() whenever the handler is `-> coro_t<void>` and the
+   * path is not known-hot in the page cache (cold metadata, slow disks, or
+   * NFS). Synchronous file() remains the handler-fast-path for tons of
+   * known-hot small files (same discipline as the project's fs io: sync
+   * exists, but it's the flagged variant).
+   *
+   * @return false with a framed 404 when path does not open as a readable
+   *         regular file; the handler can simply `co_return` then.
+   */
+  CORNET_NODISCARD coro_t<expected<bool>> file(std::string_view path);
+
+  /**
    * @brief move an object into the response arena and get a stable reference.
    *
    * Lets a handler build a value and reference it without copying:
@@ -351,7 +424,7 @@ class response_t {
   T& pin(T&& value) {
     using U = std::decay_t<T>;
     auto* slot = new U(std::forward<T>(value));
-    pinned_.push_back(pinned_t{slot, [](void* p) { delete static_cast<U*>(p); }});
+    arena_.hold(slot, [](void* p) { delete static_cast<U*>(p); });
     return *slot;
   }
 
@@ -393,6 +466,15 @@ class response_t {
   CORNET_NODISCARD body_source_t body_source() const { return source_; }
   CORNET_NODISCARD uint64_t body_length() const { return body_len_; }
   CORNET_NODISCARD std::string_view external_body() const { return external_; }
+
+  // file body plumbing, used only by connection_t while framing
+  CORNET_NODISCARD int file_fd() const { return file_fd_; }
+  CORNET_NODISCARD int take_file_fd() {
+    int fd = file_fd_;
+    file_fd_ = -1;
+    return fd;
+  }
+  void close_file();
   CORNET_NODISCARD uint32_t inline_body_offset() const { return body_off_; }
   CORNET_NODISCARD uint32_t hdr_offset() const { return hdr_off_; }
   CORNET_NODISCARD uint32_t hdr_length() const;
@@ -419,15 +501,18 @@ class response_t {
   buffer_lease_t take_owned() { return std::move(owned_); }
 
   /**
+   * @brief move the pin arena out, to be held by the flush path until the
+   * bytes it backs have actually been written.
+   */
+  pin_arena_t take_pinned() { return std::move(arena_); }
+
+  /**
    * @brief drop pinned objects and any owned block.
    */
   void release_owned();
 
  private:
-  struct pinned_t {
-    void* ptr;
-    void (*destroy)(void*);
-  };
+
 
   void note_framing_header(field_t f);
 
@@ -445,13 +530,15 @@ class response_t {
 
   std::string_view external_{};
   buffer_lease_t   owned_{};
+  int              file_fd_{-1};   // owned until framed or the round resets
+  uint64_t         file_size_{0};
 
   bool saw_content_length_{false};
   bool saw_connection_{false};
   bool saw_date_{false};
   bool saw_transfer_encoding_{false};
 
-  std::vector<pinned_t> pinned_{};
+  pin_arena_t      arena_{};
   error_t err_{};
 };
 

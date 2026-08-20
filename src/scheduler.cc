@@ -224,7 +224,14 @@ void scheduler_t::adapt() {
    *      快速缩短wait降低latency
    */
 
-  bool idle = stats.tasks_resumed == 0 && stats.cqes_ready == 0 && ready_cnt == 0;
+  // "Idle" must mean *nothing is happening at all*: with io_uring ops in
+  // flight, completions arrive on their own and cut any wait short — backing
+  // off then only manufactures latency (submit_and_wait wakes on the first
+  // completion either way; the timeout is a cap, never the expected value).
+  // Ground truth experiment: sparse-but-active workloads (e.g. TLS record
+  // pacing) were being throttled to adaptive-max wait per exchange.
+  bool idle = stats.tasks_resumed == 0 && stats.cqes_ready == 0 && ready_cnt == 0 &&
+              stats.inflight == 0;
 
   if (idle) {
     /*

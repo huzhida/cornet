@@ -192,10 +192,34 @@ resp.status(http::status_t::Created)
 
 | 方法 | 语义 |
 |---|---|
-| `body(sv)` | 拷进输出缓冲。任何生命期都安全，默认选择 |
+| `body(sv)` | 拷进内联暂存缓冲，任何生命期都安全，默认选择。放不下时自动搬进 arena 走 external 引用（见下），**没有大小上限** |
 | `body_static(sv)` | 引用静态存储 / 映射文件 / 字符串字面量，零拷贝 |
 | `body_owned(lease, len)` | 交出一块池化 block，响应写完后释放 |
 | `pin(T&&)` | 把对象搬进响应 arena，返回稳定引用 |
+| `local_file(path)` / `file(path)` | 响应体是一个普通文件，两个形态（见下）；明文下零拷贝 splice，TLS 下按 record 走 |
+
+### `resp.local_file()` / `resp.file()`：真正的零拷贝大响应
+
+**事件循环安全的选择**：`resp.local_file(path)` 是**同步** `open+fstat`（本路径在事件循环
+线程上执行 syscall）——适用**热页缓存内**的文件服务（本地 fs、inode 热、元数据
+命中 ≈ 1-3μs）。**任何"元数据可能冷"的情形**（磁盘冷、慢盘、**NFS**）都该换成
+`co_await resp.file(path)`（异步 `io_uring_prep_openat` + `statx`，syscall
+完全绕开事件循环）。两个的 404 行为、传输路径、TLS 回落完全相同——
+（与项目 fs io 的纪律一致：sync 是快路径变体，不是默认。）
+
+
+`resp.local_file(path)` 把整个响应体交给一个文件描述符：状态行 + 头部走正常的 writev，
+body 在明文 `transport` 下用**双 splice**（file → pipe → socket，io_uring 零拷贝，
+复用 `splice_awaiter` 通道、pipe 每连接一把惰性创建）；`p.file_pos` 显式追踪偏移，
+断点续写可恢复。TLS 下退化为 64KB pread → record 写出（预读为页缓存微秒级语义，
+冷页卸载到 executor 是刻意留的后续旋钮）。
+
+行为边界（有意为之）：404 由 `file()` 直出（返回 false，handler `co_return` 即可）；
+HEAD 只发头部（fd 立刻释放）；file 响应参与 pipelining 时保留线序（不与其他响应挤进
+同一个 writev，保序第一）；>4GB 文件不在当前支持形状内（`body_len` 为 uint32）。
+404 与 HEAD 的岔用例在 `tests/http_e2e.cc` 有覆盖。
+
+也就是说 `body_buffer_bytes`（默认 16K）只是一次"内联暂存"的容量：小 body 走它最快，大 body 自动降级为 arena 托管 + iovec 直引（多一次堆分配，语义完全不变）。`resp.text(big)` 随便写，不用为此改走 chunked。
 
 `pin()` 是「handler 现算出来的值也想零拷贝引用」的解法：
 
@@ -203,6 +227,8 @@ resp.status(http::status_t::Created)
 auto& s = resp.pin(render_json(user));   // 值搬进 arena，活到响应写完
 resp.body_static(s);
 ```
+
+arena 在响应成帧时**移入该响应的 pending 槽位**、直到 writev 完成——所以一个 handler 里 pin，即使前面还有没发完的 pipelined 响应也安全。
 
 指向 handler 局部变量的 `body_static()` 是悬垂引用——内核读到它的时候局部变量已经没了。
 
@@ -266,7 +292,14 @@ server.get("/events", [](auto&, http::response_t& resp) -> coro_t<void> {
 });
 ```
 
-`chunked()` 会暂存状态行与头部，**第一次 `write()` 把 head + 头部 + 第一块 chunk 合成一次 writev** 发出，之后每次 `write()` 只发 chunk。`Transfer-Encoding: chunked` 自动补齐（除非 handler 自己写过）。忘记 `finish()` 就等于给了对端一个不完整的消息。
+`chunked()` 会暂存状态行与头部，**第一次 `write()` 把 head + 头部 + 第一块 chunk 合成一次 writev** 发出，之后每次 `write()` 只发 chunk。`Transfer-Encoding: chunked` 自动补齐（除非 handler 自己写过）。
+
+`write()` 对**任意大小的单块**都成立：能装进流式暂存（`body_buffer_bytes`，默认 16K）就暂存合批；装不下就把 size-line 暂存、payload 从调用方内存直接 writev 绕过去。暂存容量是实现选择，不是 writer 的上限——你不需要知道它多大。
+
+忘记 `finish()` 也不再是"甩给对端一个不完整消息然后干等"——连接在成帧响应时兜底：
+
+- **一个字节都没发出去**（连 `write()` 都没调）：整个响应被换成干净的 500
+- **已经发过若干 chunk**：不能再回 500（状态行早在对端了），也绝不发收尾的 `0\r\n\r\n`（那会把半截消息说成完整）——已暂存内容发出后直接关连接，让对端收到一个明确可检测的截断
 
 ## keep-alive 与 pipelining
 
