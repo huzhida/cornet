@@ -63,7 +63,7 @@ usage() {
     awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"
     cat <<'EOF'
 选项:
-  -o, --output DIR     报告输出目录 (默认 profile-results/<时间戳>-<命令名>)
+  -o, --output DIR     报告输出目录 (默认 profile_results/<时间戳>-<命令名>)
   -d, --duration SEC   只采样前 N 秒 (适合长驻进程; 结束后自动终止被测命令)
       --pid PID        attach 到已有进程 (需配合 --duration)
   -f, --freq HZ        采样频率 (默认 99)
@@ -114,7 +114,7 @@ else
     usage
 fi
 
-[[ -n "$OUTPUT_DIR" ]] || OUTPUT_DIR="profile-results/$(date +%Y%m%d-%H%M%S)-${TARGET_NAME}"
+[[ -n "$OUTPUT_DIR" ]] || OUTPUT_DIR="profile_results/$(date +%Y%m%d-%H%M%S)-${TARGET_NAME}"
 mkdir -p "$OUTPUT_DIR"
 OUTPUT_DIR=$(cd "$OUTPUT_DIR" && pwd)
 PERF_DATA="$OUTPUT_DIR/perf.data"
