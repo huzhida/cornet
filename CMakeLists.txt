@@ -73,6 +73,9 @@ if(CORNET_WITH_TLS)
     # PRIVATE: callers never call OpenSSL themselves, and this target is the
     # only thing that should
     target_link_libraries(cornet_tls PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+    # PUBLIC: like CORNET_HTTP_TRACE, the flag decides what headers declare,
+    # so every TU that includes them must agree on it
+    target_compile_definitions(cornet_tls PUBLIC CORNET_WITH_TLS)
 endif()
 target_compile_options(
     cornet_tls PRIVATE
