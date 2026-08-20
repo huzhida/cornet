@@ -129,6 +129,23 @@ bool url_t::same_origin(const url_t& other) const {
   return scheme_ == other.scheme_ && port_ == other.port_ && iequals(host_, other.host_);
 }
 
+url_t url_t::rebase(std::string_view storage) const {
+  CORNET_ASSERT(storage.size() == raw_.size(), "rebase onto a different length");
+  auto shift = [&](std::string_view v) -> std::string_view {
+    if (v.empty()) return {};
+    auto off = size_t(v.data() - raw_.data());
+    return storage.substr(off, v.size());
+  };
+  url_t out = *this;
+  out.raw_ = storage;
+  out.authority_ = shift(authority_);
+  out.host_ = shift(host_);
+  out.userinfo_ = shift(userinfo_);
+  out.path_ = shift(path_);
+  out.query_ = shift(query_);
+  return out;
+}
+
 expected<uint32_t> write_absolute_url(const url_t& base, std::string_view location,
                                      char* out, uint32_t cap) {
   if (location.empty()) return http_unexpected(http_error_t::BadUrl);

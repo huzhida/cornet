@@ -83,6 +83,17 @@ class url_t {
   CORNET_NODISCARD bool ipv6_literal() const { return ipv6_; }
 
   /**
+   * @brief the same url, with every view rebased onto different storage holding
+   * exactly the same bytes.
+   *
+   * Exists for the parse cache: the cache holds the one parse per url string,
+   * and each request anchors its own pooled copy instead of re-scanning. The
+   * caller must ensure storage holds bytes identical to raw() (that is what a
+   * memcpy into a pooled lease guarantees).
+   */
+  CORNET_NODISCARD url_t rebase(std::string_view storage) const;
+
+  /**
    * @brief same scheme, host and effective port — the granularity a connection
    * pool keys on, and the boundary a redirect must not carry credentials across.
    */

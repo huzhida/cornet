@@ -59,8 +59,28 @@ std::chrono::milliseconds client_t::remaining(uint64_t deadline_ns) const {
   return std::chrono::milliseconds((deadline_ns - now) / 1'000'000ull + 1);
 }
 
+expected<const url_t*> client_t::parse_cached(std::string_view url) {
+  if (url.empty()) return http_unexpected(http_error_t::BadUrl);
+  uint64_t h = 14695981039346656037ull;
+  for (char c : url) {
+    h ^= uint8_t(c);
+    h *= 1099511628211ull;
+  }
+  auto& slot = url_cache_[h % url_cache_.size()];
+  if (slot.raw == url) {
+    ++metrics_.url_cache_hits;
+    return &slot.parsed;
+  }
+  auto parsed = url_t::parse(url);
+  if (!parsed) return unexpected(parsed.error());
+  slot.raw = url;
+  slot.parsed = *parsed;
+  ++metrics_.url_cache_misses;
+  return &slot.parsed;
+}
+
 client_request_t client_t::request(method_t m, std::string_view url) {
-  auto built = client_request_t::make(bufs_, m, url, opt_.hdr_buffer_bytes);
+  auto built = client_request_t::make(bufs_, m, url, opt_.hdr_buffer_bytes, this);
   if (!built) {
     // A bad url is reported by send(), not by a check here: it keeps the builder
     // chainable, which is the whole point of the shape.
@@ -74,13 +94,32 @@ client_request_t client_t::request(method_t m, std::string_view url) {
 }
 
 coro_t<expected<client_t::lease_t>> client_t::borrow(const url_t& url) {
-  if (url.scheme() == scheme_t::Https) {
+  bool https = url.scheme() == scheme_t::Https;
+#ifdef CORNET_WITH_TLS
+  if (https && !opt_.tls) {
+    // Lazily built on the first https request: a plain-http client must never
+    // pay verify path loading for a context it never uses.
+    auto cx = tls::tls_context_t::make_client(tls::tls_client_options_t{
+        .verify_peer = opt_.tls_verify,
+        .ca_file = opt_.tls_ca_file,
+        .ca_dir = opt_.tls_ca_dir,
+        .ca_pem = opt_.tls_ca_pem,
+    });
+    if (!cx) {
+      SPDLOG_DEBUG("http client: tls context setup failed ({})", cx.error().message());
+      co_return unexpected(cx.error());
+    }
+    opt_.tls = std::move(*cx);
+  }
+#else
+  if (https) {
     // No TLS in this build. Saying so precisely beats a connect to port 443 that
     // then fails to parse whatever comes back.
     co_return http_unexpected(http_error_t::UnsupportedScheme);
   }
+#endif
   lease_t lease;
-  auto conn = co_await pool_.acquire(url.host(), url.port(), lease.reused);
+  auto conn = co_await pool_.acquire(url.host(), url.port(), url.scheme(), lease.reused);
   if (!conn) co_return unexpected(conn.error());
   lease.conn = *conn;
   co_return lease;

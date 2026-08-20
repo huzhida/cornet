@@ -377,9 +377,32 @@ TEST(http_client_pool, nothing_listening_is_a_connect_error) {
   EXPECT_EQ(env.client().pool().total_count(), 0u);
 }
 
+// Two requests to the same url string parse once; the second comes from the
+// client-side parse cache (metrics distinguish them).
+TEST(http_client_pool, url_parse_cache_hits_on_repeated_urls) {
+  origin_t origin(answer("hi", 2));
+  pool_env_t env;
+
+  env.run([&]() -> coro_t<void> {
+    auto url = origin.url("/cached");
+    auto a = co_await env.client().get(url);
+    auto b = co_await env.client().get(url);
+    EXPECT_TRUE(a);
+    EXPECT_TRUE(b);
+  }());
+
+  EXPECT_EQ(env.client().metrics().url_cache_misses, 1u);
+  EXPECT_EQ(env.client().metrics().url_cache_hits, 1u);
+}
+
 // A url this build cannot speak is reported as such, rather than by connecting to 443
-// and failing to parse whatever comes back.
+// and failing to parse whatever comes back. With TLS enabled https is speakable, so
+// the same interaction takes the scheme-rejection branch only in a --without-tls
+// build and the full e2e coverage lives in tests/tls_e2e.cc otherwise.
 TEST(http_client_pool, https_is_reported_as_unsupported) {
+#ifdef CORNET_WITH_TLS
+  GTEST_SKIP() << "https is supported in this build; see tests/tls_e2e.cc";
+#else
   pool_env_t env;
   cornet::error_t err{};
 
@@ -390,6 +413,7 @@ TEST(http_client_pool, https_is_reported_as_unsupported) {
   }());
 
   EXPECT_EQ(err.code, int(http_error_t::UnsupportedScheme));
+#endif
 }
 
 TEST(http_client_pool, a_malformed_url_fails_the_send_not_the_builder) {
