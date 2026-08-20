@@ -171,10 +171,6 @@ if(CORNET_ENABLE_BENCH)
 
     # The HTTP echo rows only exist when the http module is built; without them the
     # bench still runs, it just has nothing to price the protocol against.
-    target_sources(unit PRIVATE tests/tls_engine.cc)
-    target_include_directories(unit PRIVATE tests)
-    target_link_libraries(unit PRIVATE cornet_tls)
-
     if(CORNET_WITH_HTTP)
         target_link_libraries(bench PRIVATE cornet_http)
         target_compile_definitions(bench PRIVATE CORNET_BENCH_HTTP)
@@ -212,6 +208,10 @@ if(CORNET_ENABLE_TESTS)
     )
     # engine pair tests run without io_uring (pure BIO shuffle); with TLS off
     # they still verify the Disabled error stays precise
+    target_sources(unit PRIVATE tests/tls_engine.cc)
+    target_include_directories(unit PRIVATE tests)
+    target_link_libraries(unit PRIVATE cornet_tls)
+
     if(CORNET_WITH_HTTP)
         target_sources(unit PRIVATE
             tests/http_common.cc
