@@ -51,31 +51,22 @@ uint32_t setup_flag_from_name(std::string_view name) {
 /**
  * @brief preference-ordered auto flag combinations.
  *
- * When the user does not pin flags in TOML, probe from most aggressive to
- * least and keep the first the kernel accepts (EINVAL = "unknown flag, drop
- * it"). TASKRUN_FLAG requires COOP_TASKRUN, and DEFER_TASKRUN is only useful
- * with COOP_TASKRUN, so each tier is a strict subset of the previous.
+ * Auto-enablement is limited to flags whose kernel-side semantics do not
+ * change — SINGLE_ISSUER merely skips SQ locking the framework already
+ * guarantees single-threaded. On a kernel that predates it (6.0-), probing
+ * falls through to flags=0, which is the pre-optimization behavior.
  *
- * Kernel floors: 5.19 for COOP_TASKRUN/TASKRUN_FLAG, 6.0 for SINGLE_ISSUER,
- * 6.1 for DEFER_TASKRUN. Project minimum is 5.11, so probing is mandatory.
+ * The COOP_TASKRUN / TASKRUN_FLAG / DEFER_TASKRUN family is intentionally
+ * absent: io_uring_enter can then return -EEXIST as a *hint* ("task work
+ * pending") rather than a strict success/failure, which requires handling
+ * the taskwork-pump dance in uring_t::submit / submit_and_wait_cqes.
+ * Support can land once a CI bench on a modern kernel verifies the pump
+ * logic is correct. Until then the family stays opt-in via TOML flags.
  */
 struct auto_flags_t { uint32_t flags; const char* desc; };
 constexpr auto_flags_t kAutoFlags[] = {
-#if defined(IORING_SETUP_DEFER_TASKRUN) && defined(IORING_SETUP_SINGLE_ISSUER) && \
-    defined(IORING_SETUP_COOP_TASKRUN) && defined(IORING_SETUP_TASKRUN_FLAG)
-  {IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_COOP_TASKRUN |
-   IORING_SETUP_TASKRUN_FLAG | IORING_SETUP_DEFER_TASKRUN,
-   "SINGLE_ISSUER|COOP_TASKRUN|TASKRUN_FLAG|DEFER_TASKRUN"},
-#endif
-#if defined(IORING_SETUP_SINGLE_ISSUER) && defined(IORING_SETUP_COOP_TASKRUN) && \
-    defined(IORING_SETUP_TASKRUN_FLAG)
-  {IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_COOP_TASKRUN |
-   IORING_SETUP_TASKRUN_FLAG,
-   "SINGLE_ISSUER|COOP_TASKRUN|TASKRUN_FLAG"},
-#endif
-#if defined(IORING_SETUP_COOP_TASKRUN) && defined(IORING_SETUP_TASKRUN_FLAG)
-  {IORING_SETUP_COOP_TASKRUN | IORING_SETUP_TASKRUN_FLAG,
-   "COOP_TASKRUN|TASKRUN_FLAG"},
+#ifdef IORING_SETUP_SINGLE_ISSUER
+  {IORING_SETUP_SINGLE_ISSUER, "SINGLE_ISSUER"},
 #endif
   {0u, "none"},
 };
