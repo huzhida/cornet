@@ -51,23 +51,17 @@ uint32_t setup_flag_from_name(std::string_view name) {
 /**
  * @brief preference-ordered auto flag combinations.
  *
- * Auto-enablement is limited to flags whose kernel-side semantics do not
- * change — SINGLE_ISSUER merely skips SQ locking the framework already
- * guarantees single-threaded. On a kernel that predates it (6.0-), probing
- * falls through to flags=0, which is the pre-optimization behavior.
- *
- * The COOP_TASKRUN / TASKRUN_FLAG / DEFER_TASKRUN family is intentionally
- * absent: io_uring_enter can then return -EEXIST as a *hint* ("task work
- * pending") rather than a strict success/failure, which requires handling
- * the taskwork-pump dance in uring_t::submit / submit_and_wait_cqes.
- * Support can land once a CI bench on a modern kernel verifies the pump
- * logic is correct. Until then the family stays opt-in via TOML flags.
+ * Currently empty by design: every non-default IORING_SETUP_* flag we have
+ * examined has either scheduling semantics (TASKRUN family) or thread
+ * affinity constraints (SINGLE_ISSUER) that the framework does not
+ * universally satisfy — runtime_t creates all contexts on the spawn thread
+ * and lets worker threads run their rings, so SINGLE_ISSUER would EEXIST on
+ * the first cross-thread submit. Auto-enabling nothing keeps the
+ * pre-optimization behavior; flags remain available via TOML for callers
+ * whose topology is provably single-issuer.
  */
 struct auto_flags_t { uint32_t flags; const char* desc; };
 constexpr auto_flags_t kAutoFlags[] = {
-#ifdef IORING_SETUP_SINGLE_ISSUER
-  {IORING_SETUP_SINGLE_ISSUER, "SINGLE_ISSUER"},
-#endif
   {0u, "none"},
 };
 
@@ -135,6 +129,8 @@ uring_t::uring_t(task_tracker_t& tracker, config_t* config)
     if (ret == 0) {
       if (tier.flags != 0) {
         SPDLOG_INFO("io_uring: auto-selected setup flags {}", tier.desc);
+      } else {
+        SPDLOG_DEBUG("io_uring: initialized with default flags");
       }
       return;
     }
