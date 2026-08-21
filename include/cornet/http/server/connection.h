@@ -18,6 +18,7 @@
 #include "cornet/http/common/serializer.h"
 #include "cornet/concurrency/timer_wheel.h"
 #include "cornet/tls/transport.h"
+#include "cornet/websocket/session.h"
 
 namespace cornet::http {
 
@@ -71,6 +72,9 @@ struct server_options_t {
   bool lenient_headers{false};
   bool lenient_chunked_length{false};
   bool lenient_keep_alive{false};
+
+  // websocket sessions on upgraded connections ([cornet.http.server.ws])
+  websocket::session_options_t ws{};
 
   /**
    * @brief load overrides from [cornet.http.server].
@@ -216,6 +220,16 @@ class connection_t {
   void write_error(status_t status);
   void write_continue();
 
+  // ── protocol upgrade ──
+  /**
+   * @brief flush anything already answered, write the 101, then hand the
+   * transport over to a websocket session driven by the route's handler.
+   * Returns with the transport gone; run() must only abandon bookkeeping.
+   */
+  CORNET_NODISCARD coro_t<void> run_websocket(const route_t& route,
+                                              std::string_view key,
+                                              std::string_view subprotocol);
+
   // ── streaming body support, driven by body_reader_t ──
   CORNET_NODISCARD coro_t<expected<std::string_view>> read_body_chunk();
 
@@ -303,6 +317,12 @@ class connection_t {
   bool close_after_flush_{false};
   bool closing_{false};
   bool timed_out_{false};
+  // set once run_websocket() took the transport: run()'s tail skips the
+  // graceful shutdown and the abandon — the session owns both now
+  bool upgraded_{false};
+  // the live session while run_websocket() is inside it, so request_close()
+  // (drain) reaches a connection parked in a websocket recv
+  websocket::session_t* ws_active_{nullptr};
   bool streaming_{false};
   bool body_complete_{false};
   bool streaming_write_{false};  // body_writer_t is currently streaming

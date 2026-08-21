@@ -12,6 +12,7 @@
 #include "cornet/coroutine/coro.h"
 #include "cornet/http/common/protocol.h"
 #include "cornet/http/server/message.h"
+#include "cornet/websocket/server.h"
 
 namespace cornet::http {
 
@@ -59,18 +60,35 @@ enum class body_policy_t : uint8_t {
  * trivial handler.
  */
 struct route_t {
-  enum class kind_t : uint8_t { Sync, Async };
+  enum class kind_t : uint8_t { Sync, Async, WebSocket };
 
   kind_t          kind{kind_t::Sync};
   body_policy_t   body{body_policy_t::Auto};
   sync_handler_t  sync_fn{};
   async_handler_t async_fn{};
+  // set only for a websocket route (kind WebSocket); empty for plain ones
+  websocket::ws_handler_t ws_fn{};
+  websocket::ws_accept_t  ws_accept{};
 
   // parameter names for this route, in the order the path declares them
   std::vector<std::string> param_names{};
 
   CORNET_NODISCARD bool valid() const {
-    return kind == kind_t::Sync ? bool(sync_fn) : bool(async_fn);
+    switch (kind) {
+      case kind_t::Sync:      return bool(sync_fn);
+      case kind_t::Async:     return bool(async_fn);
+      case kind_t::WebSocket: return bool(ws_fn);
+    }
+    return false;
+  }
+
+  /**
+   * @brief attach the pre-handshake guard for a websocket route. Chained:
+   *   server.websocket("/chat", handler).accept(guard);
+   */
+  route_t& accept(websocket::ws_accept_t fn) {
+    ws_accept = std::move(fn);
+    return *this;
   }
 };
 
@@ -155,6 +173,29 @@ class router_t {
   }
   template <typename F> route_t& options(std::string_view p, F&& fn) {
     return route(method_t::Options, p, std::forward<F>(fn));
+  }
+
+  /**
+   * @brief register a websocket endpoint (RFC 6455).
+   *
+   * The path matches GET upgrade requests exactly like a get() route; when the
+   * handshake validates, the connection answers 101, hands the transport to a
+   * websocket::session_t and runs this handler as the session's driver. A
+   * handler always suspends (receiving is IO), so there is no sync flavour —
+   * the sync/async split exists to keep frame-free handlers cheap, and a
+   * frame-free websocket handler would be no handler at all.
+   *
+   * Chain .accept() to gate the handshake (Origin, subprotocol, tokens).
+   */
+  template <typename F>
+  route_t& websocket(std::string_view path, F&& fn) {
+    using R = std::invoke_result_t<F&, cornet::websocket::session_t&>;
+    static_assert(std::is_same_v<R, coro_t<void>>,
+                  "a websocket handler returns coro_t<void>");
+    route_t r;
+    r.kind = route_t::kind_t::WebSocket;
+    r.ws_fn = std::forward<F>(fn);
+    return add(method_t::Get, path, std::move(r));
   }
 
   /**

@@ -18,6 +18,13 @@ format="human"
 #[cornet.http.server]
 #handshake_timeout="10s"   # TLS handshake budget (only with server tls set)
 
+# cornet.http.server.ws（websocket 会话预算）
+#[cornet.http.server.ws]
+#max_message_bytes=16777216  # 聚合消息上限；超出以 1009 关闭
+#idle_timeout="0"            # 无帧流量多久后断开；"0"/"0s" 关闭
+#close_timeout="2s"          # finish() 等对端 Close 的预算
+#recv_buffer_bytes=65536     # 接收窗口；更大的帧跨窗口聚合
+
 # cornet.http.client
 #[cornet.http.client]
 #handshake_timeout="10s"   # TLS handshake budget

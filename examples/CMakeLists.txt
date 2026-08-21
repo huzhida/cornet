@@ -4,6 +4,10 @@
 add_executable(http-hello http_hello.cc)
 target_link_libraries(http-hello PRIVATE cornet_http)
 
+# Same "regression in the public API breaks the build" discipline as http-hello
+add_executable(websocket-echo websocket_echo.cc)
+target_link_libraries(websocket-echo PRIVATE cornet_http)
+
 if(CORNET_HTTP_CLIENT)
     # Built by default for the same reason as http-hello: it is the executable
     # form of the client's public API, so a regression there breaks the build.
