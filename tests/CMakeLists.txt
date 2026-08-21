@@ -13,6 +13,8 @@ add_executable(unit EXCLUDE_FROM_ALL
     runtime.cc
     fs_io.cc
     frame_pool.cc
+    semaphore.cc
+    singleflight.cc
 )
 target_link_libraries(unit PRIVATE
     cornet

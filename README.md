@@ -13,7 +13,7 @@ Cornet 是一个基于 C++20 协程和 Linux io_uring 的高性能异步网络�
 - **自适应调度器** — 动态调整 CPU batch 和 IO wait，自动平衡吞吐与延迟
 - **完整 TCP/UDP 抽象** — IPv4、IPv6、Unix Domain Socket 全覆盖
 - **异步 DNS 解析** — 域名解析自动卸载到线程池，IP 地址走快速路径
-- **并发组合器** — `when_all`、`when_any`、`sleep`、`with_timeout`、`with_cancel`
+- **并发组合器** — `when_all`、`when_any`、`sleep`、`with_timeout`、`with_cancel`、`semaphore_t`（计数信号量/协程互斥锁）、`singleflight`（并发去重）
 - **任务级取消** — `canceler_t` 支持单任务取消和层级取消传播
 - **协程级取消与超时** — `with_cancel(ccoro_t)`、`with_timeout(ccoro_t)` 自动传播到内部所有 IO
 - **线程池 Executor** — `ctx.async()` 将阻塞操作卸载到工作线程
@@ -272,7 +272,9 @@ cornet/
 │   │   └── runtime.h      # 多线程 runtime
 │   ├── concurrency/
 │   │   ├── combinators.h  # when_all/when_any/sleep/timeout/协程级cancel
-│   │   └── scope.h        # 结构化并发 scope
+│   │   ├── scope.h        # 结构化并发 scope
+│   │   ├── semaphore.h    # 计数信号量（协程互斥锁）
+│   │   └── singleflight.h # 并发去重（防惊群）
 │   ├── net/
 │   │   └── socket.h       # TCP/UDP Socket 抽象
 │   ├── http/

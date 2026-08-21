@@ -11,6 +11,7 @@ add_library(cornet STATIC
     socket.cc
     runtime.cc
     timer_wheel.cc
+    semaphore.cc
 )
 add_library(cornet::cornet ALIAS cornet)
 target_include_directories(
