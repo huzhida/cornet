@@ -48,6 +48,38 @@ uint32_t setup_flag_from_name(std::string_view name) {
   return 0;
 }
 
+/**
+ * @brief preference-ordered auto flag combinations.
+ *
+ * When the user does not pin flags in TOML, probe from most aggressive to
+ * least and keep the first the kernel accepts (EINVAL = "unknown flag, drop
+ * it"). TASKRUN_FLAG requires COOP_TASKRUN, and DEFER_TASKRUN is only useful
+ * with COOP_TASKRUN, so each tier is a strict subset of the previous.
+ *
+ * Kernel floors: 5.19 for COOP_TASKRUN/TASKRUN_FLAG, 6.0 for SINGLE_ISSUER,
+ * 6.1 for DEFER_TASKRUN. Project minimum is 5.11, so probing is mandatory.
+ */
+struct auto_flags_t { uint32_t flags; const char* desc; };
+constexpr auto_flags_t kAutoFlags[] = {
+#if defined(IORING_SETUP_DEFER_TASKRUN) && defined(IORING_SETUP_SINGLE_ISSUER) && \
+    defined(IORING_SETUP_COOP_TASKRUN) && defined(IORING_SETUP_TASKRUN_FLAG)
+  {IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_COOP_TASKRUN |
+   IORING_SETUP_TASKRUN_FLAG | IORING_SETUP_DEFER_TASKRUN,
+   "SINGLE_ISSUER|COOP_TASKRUN|TASKRUN_FLAG|DEFER_TASKRUN"},
+#endif
+#if defined(IORING_SETUP_SINGLE_ISSUER) && defined(IORING_SETUP_COOP_TASKRUN) && \
+    defined(IORING_SETUP_TASKRUN_FLAG)
+  {IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_COOP_TASKRUN |
+   IORING_SETUP_TASKRUN_FLAG,
+   "SINGLE_ISSUER|COOP_TASKRUN|TASKRUN_FLAG"},
+#endif
+#if defined(IORING_SETUP_COOP_TASKRUN) && defined(IORING_SETUP_TASKRUN_FLAG)
+  {IORING_SETUP_COOP_TASKRUN | IORING_SETUP_TASKRUN_FLAG,
+   "COOP_TASKRUN|TASKRUN_FLAG"},
+#endif
+  {0u, "none"},
+};
+
 } // namespace
 
 uring_t::uring_t(task_tracker_t& tracker, config_t* config)
@@ -55,14 +87,26 @@ uring_t::uring_t(task_tracker_t& tracker, config_t* config)
     config_(config),
     uring(std::make_unique<io_uring>()) {
 
-  uint32_t entries_nr = 128, flags = 0, cq_entries = 0;
+  // Default SQ depth: was 128, which forced a mid-loop io_uring_submit when a
+  // burst of arm-accept plus N connection recvs landed in the same sched
+  // cycle. 1K gives the scheduler room to batch without dropping into the
+  // ENOBUFS back-pressure path during ramp-up; CQ is sized independently via
+  // corn.uring.cq_size when a workload needs it.
+  constexpr uint32_t kDefaultCapacity = 1024;
+  uint32_t entries_nr = kDefaultCapacity, cq_entries = 0;
+  uint32_t flags = 0;
+  bool user_set_flags = false;
 
   if (config) {
-    entries_nr = config->at_path("cornet.context.uring.capacity").value_or(128u);
+    entries_nr = config->at_path("cornet.context.uring.capacity").value_or(kDefaultCapacity);
     // integer form kept for compatibility; the named array is the documented way
-    flags = config->at_path("cornet.context.uring.flags").value_or(0u);
+    if (auto raw = config->at_path("cornet.context.uring.flags").value<uint32_t>()) {
+      flags = *raw;
+      user_set_flags = true;
+    }
     if (auto* arr = config->at_path("cornet.context.uring.flags").as_array()) {
       flags = 0;
+      user_set_flags = true;
       for (const auto& node : *arr) {
         if (auto name = node.value<std::string_view>()) {
           flags |= setup_flag_from_name(*name);
@@ -72,22 +116,51 @@ uring_t::uring_t(task_tracker_t& tracker, config_t* config)
     cq_entries = config->at_path("cornet.context.uring.cq_size").value_or(0u);
   }
 
-  io_uring_params params{};
-  params.flags = flags;
-  if (cq_entries > 0) {
-    // A CQ smaller than the peak number of concurrent completions pushes CQEs
-    // into the kernel's overflow list, where they cost far more to reap. Sizing
-    // it independently of the SQ matters for connection counts well above the
-    // SQ depth: each connection holds one recv, but completions arrive in
-    // bursts. Kernel requires a power of two and >= SQ entries.
-    params.flags |= IORING_SETUP_CQSIZE;
+  // A CQ smaller than the peak number of concurrent completions pushes CQEs
+  // into the kernel's overflow list, where they cost far more to reap. Sizing
+  // it independently of the SQ matters for connection counts well above the
+  // SQ depth: each connection holds one recv, but completions arrive in
+  // bursts. Kernel requires a power of two and >= SQ entries.
+  const uint32_t cq_extra = (cq_entries > 0) ? IORING_SETUP_CQSIZE : 0u;
+
+  if (user_set_flags) {
+    // Explicit config wins or fails loudly — silently dropping user-picked
+    // flags would let a misconfigured deployment drift unnoticed.
+    io_uring_params params{};
+    params.flags = flags | cq_extra;
     params.cq_entries = cq_entries;
+    if (int ret = io_uring_queue_init_params(entries_nr, uring.get(), &params); ret < 0) {
+      SPDLOG_ERROR("failed to init io_uring queue with error: {}", strerror(-ret));
+      throw std::runtime_error("failed to init io_uring queue");
+    }
+    return;
   }
 
-  if (int ret = io_uring_queue_init_params(entries_nr, uring.get(), &params); ret < 0) {
+  for (const auto& tier : kAutoFlags) {
+    io_uring_params params{};
+    params.flags = tier.flags | cq_extra;
+    params.cq_entries = cq_entries;
+    int ret = io_uring_queue_init_params(entries_nr, uring.get(), &params);
+    if (ret == 0) {
+      if (tier.flags != 0) {
+        SPDLOG_INFO("io_uring: auto-selected setup flags {}", tier.desc);
+      }
+      return;
+    }
+    if (ret == -EINVAL || ret == -EOPNOTSUPP) {
+      // The kernel rejected a flag it does not know. EINVAL surfaces before
+      // the kernel allocates anything, but liburing's userland struct may
+      // hold partial state — zero it instead of queue_exit, which expects a
+      // successfully-initialized ring.
+      *uring = io_uring{};
+      continue;
+    }
     SPDLOG_ERROR("failed to init io_uring queue with error: {}", strerror(-ret));
     throw std::runtime_error("failed to init io_uring queue");
   }
+  // Unreachable: kAutoFlags always has a {0u, ...} sentinel that any
+  // io_uring-capable kernel accepts.
+  throw std::runtime_error("failed to init io_uring queue with any flag combination");
 }
 
 uring_t::~uring_t() {

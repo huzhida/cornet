@@ -26,11 +26,11 @@ namespace detail {
  * @brief Extract the return value type V from a coro_t<V>.
  * Used to deduce the return type of coroutine factories passed to submit().
  */
-template<typename T> struct coro_return_type { using type = void; };
+template<typename T> struct coro_return { using type = void; };
 template<typename V>
-struct coro_return_type<coro_t<V>> { using type = V; };
+struct coro_return<coro_t<V>> { using type = V; };
 template<typename T>
-using coro_return_type_t = typename coro_return_type<T>::type;
+using coro_return_t = typename coro_return<T>::type;
 
 /**
  * @brief Shared state for task_future_t — thread-safe result/exception storage.
@@ -353,8 +353,8 @@ public:
    * @return task_future_t<V> with the coroutine's return value
    */
   template<typename F>
-  auto submit(F&& f) -> task_future_t<detail::coro_return_type_t<std::decay_t<decltype(f(std::declval<context_t&>()))>>> {
-    using V = detail::coro_return_type_t<std::decay_t<decltype(f(std::declval<context_t&>()))>>;
+  auto submit(F&& f) -> task_future_t<detail::coro_return_t<std::decay_t<decltype(f(std::declval<context_t&>()))>>> {
+    using V = detail::coro_return_t<std::decay_t<decltype(f(std::declval<context_t&>()))>>;
 
     auto& ctx = select_context();
     auto state = std::make_shared<detail::task_state_t<V>>();

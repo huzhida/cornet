@@ -7,6 +7,33 @@
 
 namespace cornet::logging {
 
+namespace {
+
+// Human-facing layout: the historical default, good for interactive/dev use.
+constexpr const char* kHumanPattern = "%^%L%$ [%Y-%m-%d %T %t %@] %v";
+// Machine-facing layout: key=value fields, single line per event. Pairs with
+// log collectors (loki / elasticsearch) that can tokenize k=v with a single
+// regex. The message at %v is itself expected to use k=v pairs (the HTTP
+// TRACE logger already does), so field extraction works end-to-end.
+constexpr const char* kKvPattern =
+    "ts=%Y-%m-%dT%H:%M:%S.%e%z level=%l tid=%t src=%@ msg=\"%v\"";
+
+// Resolve which pattern to apply to a sink node. Priority: explicit
+// `pattern` override > `format` keyword > per-sink default.
+std::string resolve_pattern(toml::node_view<const toml::node> t, std::string_view default_format) {
+  if (auto override_pat = t["pattern"].value<std::string_view>()) {
+    return std::string(*override_pat);
+  }
+  auto fmt = t["format"].value_or(default_format);
+  if (fmt == "kv") return kKvPattern;
+  if (fmt == "human") return kHumanPattern;
+  // Anything unknown still produces output; silently picking the structured
+  // form here is what a confused user would prefer over unreadable bytes.
+  return kKvPattern;
+}
+
+} // namespace
+
 std::once_flag init_flag;
 
 static void logging_init(const config_t& config) {
@@ -17,11 +44,11 @@ static void logging_init(const config_t& config) {
 
   if (auto stdout_conf = logging_conf["stdout"]) {
     auto level = spdlog::level::from_str(stdout_conf["level"].value_or("info"));
-    auto pattern = stdout_conf["pattern"].value_or("%^%L%$ [%Y-%m-%d %T %t %@] %v");
     auto stdout_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
     stdout_sink->set_level(level);
-    stdout_sink->set_pattern(pattern);
-
+    // stdout is what a developer stares at: stay human by default, let the
+    // config switch to kv when piping into a collector.
+    stdout_sink->set_pattern(resolve_pattern(stdout_conf, "human"));
     sinks.push_back(stdout_sink);
   }
 
@@ -37,10 +64,12 @@ static void logging_init(const config_t& config) {
         continue;
       }
       auto level = spdlog::level::from_str(file["level"].value_or("info"));
-      auto pattern = file["pattern"].value_or("%L [%Y-%m-%d %T %t %@] %v");
       auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(std::string(path), true);
       file_sink->set_level(level);
-      file_sink->set_pattern(pattern);
+      // Files go to collectors: default kv, let format="human" opt out.
+      // Array iteration hands us a `const toml::node&`; wrap to node_view so
+      // resolve_pattern speaks one interface regardless of source shape.
+      file_sink->set_pattern(resolve_pattern(toml::node_view<const toml::node>(file_node), "kv"));
       sinks.push_back(file_sink);
     }
   }

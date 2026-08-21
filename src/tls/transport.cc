@@ -45,6 +45,15 @@ ccoro_t<expected<size_t>> transport_t::writev(context_t& ctx, const struct iovec
   co_return *n;
 }
 
+socket_t::recv_awaiter transport_t::plain_recv(context_t& ctx, void* buf, size_t len) const {
+  return std::get<tcp::socket_t>(io_).recv(ctx, buf, len);
+}
+
+socket_t::writev_awaiter transport_t::plain_writev(context_t& ctx, const struct iovec* iov,
+                                                   size_t iov_len) const {
+  return std::get<tcp::socket_t>(io_).writev(ctx, iov, iov_len);
+}
+
 ccoro_t<expected<void>> transport_t::start_tls(context_t& ctx,
                                                std::shared_ptr<tls_context_t> cx,
                                                engine_mode_t mode,

@@ -20,7 +20,7 @@ cornet::config_t::load("conf/default.toml");
 [cornet.context.uring]
 # SQ/CQ ring 容量（entry 数量，必须为 2 的幂）
 # 越大越能容纳更多并发 IO 操作，减少 forced submit
-# 默认: 32
+# 默认: 1024
 capacity = 1024
 
 # ─────────────────────────────────────────
@@ -52,15 +52,29 @@ max_task_nr = 16384
 [cornet.logging.stdout]
 # 日志级别: trace | debug | info | warn | error | critical | off
 level = "info"
-# spdlog 格式化 pattern
-pattern = "%^%L%$ [%Y-%m-%d %T %t %@] %v"
+# 输出格式: human(带颜色,人读,默认)| kv(k=v 结构化,便于采集)
+format = "human"
+# 显式给出时优先于 format;一般不设置
+#pattern = "%^%L%$ [%Y-%m-%d %T %t %@] %v"
 
-# 文件日志（可选，可配置多个）
+# 文件日志（可选，可配置多个;默认 format="kv"）
 # [[cornet.logging.files]]
 # path = "cornet.log"
 # level = "debug"
-# pattern = "%L [%Y-%m-%d %T %t %@] %v"
+# format = "kv"
+# pattern = "ts=%Y-%m-%dT%H:%M:%S.%e%z level=%l tid=%t src=%@ msg=\"%v\""
 ```
+
+### 日志格式
+
+| `format` | 输出形态 | 适用 |
+|---|---|---|
+| `human` | `I [2026-08-21 15:01:03 12345 server.cc:110] accept fd=42 ...` | 终端/开发 |
+| `kv` | `ts=2026-08-21T15:01:03.123+0800 level=info tid=12345 src=server.cc:110 msg="accept fd=42 ..."` | 日志采集（loki/elk) |
+
+- 默认 `stdout=human`、`files=kv`
+- 三条优先级：`pattern` 显式 > `format` > 按 sink 类型的默认
+- 框架所有 `SPDLOG_INFO/WARN/ERROR` 均已在消息体内使用 `k=v` 字段（与 `kv` 格式配套）
 
 ## 配置说明
 

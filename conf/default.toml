@@ -8,9 +8,11 @@ cpu_batch=1024
 io_wait="1ms"
 
 # cornet.logging.stdout
+# format ∈ {"human", "kv"}; pattern 显式给出时优先于 format
 [cornet.logging.stdout]
 level="info"
-pattern="%^%L%$ [%Y-%m-%d %T %t %@] %v"
+format="human"
+#pattern="%^%L%$ [%Y-%m-%d %T %t %@] %v"
 
 # cornet.http.server
 #[cornet.http.server]
@@ -23,8 +25,9 @@ pattern="%^%L%$ [%Y-%m-%d %T %t %@] %v"
 #tls_ca_file=""            # empty: system default verify paths
 #tls_ca_dir=""
 #tls_server_name=""        # SNI/verify override; empty: the url host
-# cornet.logging.files
+# cornet.logging.files(默认 format="kv",输出 k=v 结构化,便于采集)
 #[[cornet.logging.files]]
 #path="cornet.log"
 #level="info"
-#pattern="%L [%Y-%m-%d %T %t %@] %v"
+#format="kv"
+#pattern="ts=%Y-%m-%dT%H:%M:%S.%e%z level=%l tid=%t src=%@ msg=\"%v\""

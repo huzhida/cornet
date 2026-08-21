@@ -51,6 +51,20 @@ class transport_t {
                                                     size_t iov_len);
 
   /**
+   * @brief plain-mode fast paths: return the socket's leaf awaiter without
+   * wrapping it in a ccoro_t, so the caller pays zero frame allocation.
+   *
+   * Only valid when !is_tls(); use the recv()/writev() forms when the
+   * transport mode is not known statically. TLS forces a coroutine because
+   * the record layer's read/write is a pump of several socket ops.
+   */
+  CORNET_NODISCARD socket_t::recv_awaiter plain_recv(context_t& ctx, void* buf,
+                                                     size_t len) const;
+  CORNET_NODISCARD socket_t::writev_awaiter plain_writev(context_t& ctx,
+                                                         const struct iovec* iov,
+                                                         size_t iov_len) const;
+
+  /**
    * @brief upgrade the connection to TLS and run the handshake.
    *
    * On failure the transport stays plain (a stale fd is never lost: the caller
