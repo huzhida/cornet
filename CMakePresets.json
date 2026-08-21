@@ -3,7 +3,7 @@
   "cmakeMinimumRequired": { "major": 3, "minor": 16, "patch": 0 },
   "configurePresets": [
     {
-      "name": "default",
+      "name": "base",
       "hidden": true,
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/cmake-build-${presetName}",
@@ -14,8 +14,9 @@
     },
     {
       "name": "debug",
-      "inherits": "default",
+      "inherits": "base",
       "displayName": "Debug",
+      "description": "ASan + 单测 + bench，日常开发用",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "CORNET_ENABLE_BENCH": "ON",
@@ -24,16 +25,18 @@
     },
     {
       "name": "release",
-      "inherits": "default",
+      "inherits": "base",
       "displayName": "Release",
+      "description": "发布构建；配合 -DCORNET_ENABLE_BENCH=ON 出 bench",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release"
       }
     },
     {
       "name": "profile",
-      "inherits": "default",
-      "displayName": "Profile (保留帧指针+调试符号, 供 tools/profile.sh 使用)",
+      "inherits": "base",
+      "displayName": "Profile",
+      "description": "保留帧指针+调试符号, 供 tools/profile.sh 使用",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "CORNET_ENABLE_BENCH": "ON",
@@ -54,6 +57,13 @@
     {
       "name": "profile",
       "configurePreset": "profile"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "debug",
+      "configurePreset": "debug",
+      "output": { "outputOnFailure": true }
     }
   ]
 }

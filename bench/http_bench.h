@@ -45,7 +45,7 @@
 
 #ifdef CORNET_BENCH_TLS
 #include "cornet/tls/transport.h"
-#include "tls_certs.h"
+#include "certs.h"
 #endif
 
 namespace bench {

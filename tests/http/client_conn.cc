@@ -3,7 +3,7 @@
 #include <string>
 #include <thread>
 
-#include "http_client_fixture.h"
+#include "client_fixture.h"
 
 using namespace cornet;
 using namespace cornet::http;

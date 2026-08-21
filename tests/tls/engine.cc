@@ -18,7 +18,7 @@
 
 #include "cornet/tls/context.h"
 
-#include "tls_certs.h"
+#include "certs.h"
 
 namespace cornet::tls {
 namespace {

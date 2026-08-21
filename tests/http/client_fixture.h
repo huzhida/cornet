@@ -22,7 +22,7 @@
 #include "cornet/scheduling/context.h"
 
 /**
- * @file http_client_fixture.h
+ * @file client_fixture.h
  * @brief a scripted origin server, plus the client-side scaffolding around it.
  *
  * The origin is plain blocking sockets on a thread rather than a cornet server: these
