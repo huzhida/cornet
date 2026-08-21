@@ -45,4 +45,6 @@
 #include "cornet/http/client/message.h"
 #include "cornet/http/client/pool.h"
 
+#include "cornet/websocket.h"
+
 #endif // CORNET_HTTP_H

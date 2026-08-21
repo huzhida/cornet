@@ -438,7 +438,7 @@ handler 之外的失败由连接直接回绝，回绝一律关闭连接：
 | 路径匹配上但方法没注册 | 405 |
 | 路径没匹配上且没有 fallback | 404（不关连接） |
 | 输出缓冲溢出 / `resp.failed()` | 500 |
-| `Upgrade` 请求 | 501（未实现升级） |
+| 非 `websocket()` 路由的 `Upgrade` 请求 | 501 |
 
 错误体是状态码的 reason phrase 纯文本。HTTP 域错误码（`http_error_t`，`error_domain::Http`）到状态码的映射在 `status_for_error()`。
 
@@ -534,7 +534,7 @@ cmake --build --preset debug --target unit
 ## 限制与未实现
 
 - **TLS**：没有。要 https 就放在反向代理后面。
-- **HTTP/2、WebSocket、协议升级**：`Upgrade` 请求一律 501——宁可回绝，也不留一个两边理解不一致的连接状态。
+- **HTTP/2**：没有。WebSocket（RFC 6455）已实现，见 [WebSocket](websocket.md)；没有对应 `websocket()` 路由的 `Upgrade` 请求一律 501——宁可回绝，也不留一个两边理解不一致的连接状态。
 - **`Expect: 100-continue` 不是真的握手**：`100 Continue` 会在读 body 之前排进输出队列，但输出是一轮结束才 flush 的，所以严格等待 100 的客户端会等到自己的超时再发 body。有 body 的请求本来就能正常处理，只是省不掉那次等待。
 - **流式响应总是宣称 keep-alive**：`chunked()` 暂存头部时 body 长度还未知、也还不知道要不要关，所以写的是 `Connection: keep-alive`；请求要求 close 时连接仍然会关，只是那一行头对不上。
 - **`drain_timeout` 已解析但当前未使用**：`drain()` 会一直等到所有连接自己结束。需要硬上限就自己在外面套 `with_timeout` 或改调 `stop()`。

@@ -23,4 +23,9 @@
 #include "cornet/http/server/router.h"
 #include "cornet/http/server/server.h"
 
+// websocket routes are registered through this header too, so the session
+// type must be complete for router_t::websocket()'s signature deduction
+#include "cornet/websocket/session.h"
+#include "cornet/websocket/server.h"
+
 #endif // CORNET_HTTP_SERVER_UMBRELLA_H

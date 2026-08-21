@@ -18,6 +18,7 @@ enum class error_domain : uint8_t {
   Exception,  // unexpected exception thrown from coroutine
   Http,       // HTTP protocol errors (llhttp errno), rendered via the resolver below
   Tls,        // tls module errors (tls_error_t), rendered via the resolver below
+  Websocket,  // websocket module errors (websocket_error_t), rendered via the resolver below
 };
 
 /**
@@ -50,6 +51,15 @@ inline domain_message_fn& tls_message_resolver() {
 }
 
 /**
+ * @brief renderer slot for error_domain::Websocket. Same pattern again:
+ * the websocket module owns its code table and registers it at load time.
+ */
+inline domain_message_fn& websocket_message_resolver() {
+  static domain_message_fn fn = nullptr;
+  return fn;
+}
+
+/**
  * @brief unified error type supporting multiple error domains
  */
 struct error_t {
@@ -74,6 +84,10 @@ struct error_t {
       case error_domain::Tls: {
         auto fn = tls_message_resolver();
         return fn ? fn(code) : "tls error";
+      }
+      case error_domain::Websocket: {
+        auto fn = websocket_message_resolver();
+        return fn ? fn(code) : "websocket error";
       }
       default: return "no error";
     }

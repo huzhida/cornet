@@ -21,6 +21,7 @@ Cornet 是一个基于 C++20 协程和 Linux io_uring 的高性能异步网络�
 - **优雅关闭** — drain → timeout → cancel 三阶段关闭流程
 - **HTTP/1.1 Server** — 路由（精确/参数/通配）、同步与异步 handler、filter、keep-alive 与 pipelining、body 聚合或流式、chunked 响应、时间轮超时、优雅 drain
 - **HTTP/1.1 Client** — 连接池、DNS 缓存、超时分层、幂等重试、重定向、流式上传下载
+- **WebSocket（RFC 6455）** — 与 HTTP 同端口复用、路由级注册与守门员、零拷贝消息视图、自动 Ping/Pong 与 Close 握手、分片重组、ws/wss 统一，握手失败按 RFC 精确回绝
 - **TLS（OpenSSL 3.x，可选）** — 用户态 record layer + 明文/TLS 统一传输抽象；server/client 共用，`CORNET_WITH_TLS` 开关
 - **依赖精简** — 核心仅依赖 liburing、spdlog、toml++、concurrentqueue（vcpkg 管理）；HTTP 模块私有链接 llhttp，TLS 模块私有链接 OpenSSL，公开头文件都不暴露
 
@@ -116,6 +117,19 @@ int main() {
 ```
 
 详见 [HTTP Server](docs/http_server.md)、[HTTP Client](docs/http_client.md)。
+
+### WebSocket Echo
+
+```cpp
+server.websocket("/echo", [](websocket::session_t& ws) -> coro_t<void> {
+    while (auto msg = co_await ws.recv()) {
+        if (msg->opcode == websocket::opcode_t::Close) break;
+        if (auto ok = co_await ws.send(msg->payload, msg->opcode); !ok) break;
+    }
+});
+```
+
+WebSocket 路由与普通路由同端口、同匹配规则，可链 `.accept()` 做握手前守门（Origin/子协议）；客户端用 `co_await websocket::connect(ctx, "ws://...")` 一步到位。详见 [WebSocket](docs/websocket.md)。
 
 ### 异步 DNS + 超时连接
 
@@ -265,9 +279,11 @@ cornet/
 │   │   ├── common/        # 协议常量、缓冲池、头表、解析器、序列化、时间轮、URL
 │   │   ├── server/        # message.h router.h connection.h server.h
 │   │   └── client/        # message.h connection.h pool.h client.h
-│   ├── http.h             # HTTP 全部（server + client）
-│   ├── http_server.h      # 只要 server
+│   ├── http.h             # HTTP 全部（server + client + websocket）
+│   ├── http_server.h      # 只要 server（含 websocket 路由）
 │   ├── http_client.h      # 只要 client
+│   ├── websocket/         # WebSocket：common（帧编解码/握手）、session、client
+│   ├── websocket.h        # WebSocket 全部
 │   └── utils/
 │       ├── config.h       # TOML 配置
 │       └── logging.h      # 日志初始化
@@ -292,6 +308,7 @@ cornet/
 - [多线程 Runtime](docs/runtime.md)
 - [HTTP Server](docs/http_server.md)
 - [HTTP Client](docs/http_client.md)
+- [WebSocket](docs/websocket.md)
 - [TLS](docs/tls.md)
 
 ## 性能

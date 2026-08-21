@@ -31,4 +31,5 @@ add_subdirectory(tls)
 
 if(CORNET_WITH_HTTP)
     add_subdirectory(http)
+    add_subdirectory(websocket)
 endif()

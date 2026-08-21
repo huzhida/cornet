@@ -9,6 +9,8 @@
 #include "cornet/http/common/trace.h"
 #include "cornet/io_uring/awaiters.h"
 #include "cornet/scheduling/context.h"
+#include "cornet/websocket/common/handshake.h"
+#include "cornet/websocket/server.h"
 
 namespace cornet::http {
 
@@ -88,6 +90,8 @@ void server_options_t::load(config_t* config) {
   duration("cornet.http.server.timer_tick", timer_tick);
   duration("cornet.http.server.drain_timeout", drain_timeout);
   duration("cornet.http.server.handshake_timeout", handshake_timeout);
+
+  ws.load(config, "cornet.http.server.ws");
 }
 
 // ──────────────────────────── connection_t ────────────────────────────
@@ -179,6 +183,9 @@ void connection_t::request_close() {
   // goes out, which is what keeps a graceful drain from truncating responses.
   // drain_canceler_ is left alone so shutdown_gracefully() keeps its window.
   read_canceler_.cancel();
+  // An upgraded connection parks in the session's recv, not ours: the drain
+  // reaches it the same way, and the session winds down with GoingAway.
+  if (ws_active_) ws_active_->request_close();
 }
 
 // ─────────────────────────────── reading ───────────────────────────────
@@ -612,6 +619,56 @@ void connection_t::frame_response(bool close_after) {
   ++metrics_.responses;
 }
 
+// ──────────────────────────── protocol upgrade ────────────────────────────
+
+coro_t<void> connection_t::run_websocket(const route_t& route, std::string_view key,
+                                         std::string_view subprotocol) {
+  // Responses to requests pipelined ahead of the upgrade were framed but not
+  // written: they go out first — a peer that answered earlier requests must
+  // not lose them because a later one happened to switch protocols.
+  if (auto flushed = co_await flush(); !flushed) {
+    // the main loop's failed-flush cleanup; pending slots can hold file fds
+    reset_round();
+    co_return;
+  }
+  reset_round();
+
+  // The 101 travels in one gather-write, straight from staging. It bypasses
+  // frame_head() deliberately: a 101 forbids Content-Length and every other
+  // framing header that function would add (RFC 9110 §8.6).
+  websocket::frame_handshake_response(head_out_, key, subprotocol);
+  ++metrics_.responses;
+  if (head_out_.failed()) co_return;
+  struct iovec iov{head_out_.data(), head_out_.size()};
+  auto sent = co_await writev_span(&iov, 1);
+  head_out_.clear();
+  if (!sent) co_return;
+
+  // llhttp stopped at the end of the header section; anything already read
+  // past it belongs to the websocket stream (RFC 6455 allows the client to
+  // send frames immediately after its opening request).
+  std::string_view leftover =
+      in_.view(parser_.consumed_offset(), in_.write_pos() - parser_.consumed_offset());
+
+  // The http buffers (header window, staging areas) are released before the
+  // session starts: an upgrade can last hours, and a long-lived session must
+  // not pin five pooled leases it will never parse another request with.
+  websocket::session_t ws(ctx_, std::move(tr_), websocket::role_t::Server, pool_,
+                          wheel_, opt_.ws, leftover, &metrics_);
+  if (!subprotocol.empty()) ws.set_subprotocol(subprotocol);
+  ws_active_ = &ws;
+  CORNET_HTTP_TRACE_LOG("fd={}: upgraded to websocket (subprotocol='{}')",
+                        ws.native_fd(), subprotocol);
+
+  co_await route.ws_fn(ws);
+
+  ws_active_ = nullptr;
+  // Whatever close state the handler left: settle it, then the session
+  // shuts down and abandons the transport itself.
+  co_await ws.finish();
+  release_buffers();
+}
+
 void connection_t::write_error(status_t status) {
   // The request in flight is being abandoned, so the receive buffer no longer holds a
   // message anybody will look at. Every error here closes the connection anyway, but
@@ -972,12 +1029,57 @@ coro_t<void> connection_t::run(const router_t& router) {
           break;
         }
 
-        case parser_t::result_t::Upgrade:
-          // No upgrade protocol is wired up yet; refuse rather than leave the
-          // connection in a state neither side agrees on.
-          write_error(status_t::NotImplemented);
+        case parser_t::result_t::Upgrade: {
+          if (!route_ || route_->kind != route_t::kind_t::WebSocket) {
+            // No upgrade protocol is wired up for this route; refuse rather
+            // than leave the connection in a state neither side agrees on.
+            write_error(status_t::NotImplemented);
+            round_done = true;
+            break;
+          }
+
+          // RFC 6455 §4.2.1, gate by gate. The route matched at HeadersReady,
+          // so req_ is populated; llhttp has vetted the HTTP half already.
+          auto key = websocket::validate_request(req_);
+          if (!key) {
+            ++metrics_.protocol_errors;
+            write_error(status_t::BadRequest);
+            round_done = true;
+            break;
+          }
+
+          if (router.has_filters()) {
+            bool proceed = router.has_async_filters()
+                               ? co_await run_filters(router)
+                               : run_sync_filters(router, req_, resp_);
+            if (!proceed) {
+              frame_response(true);
+              close_after_flush_ = true;
+              round_done = true;
+              break;
+            }
+          }
+
+          std::string_view subprotocol;
+          if (route_->ws_accept) {
+            websocket::accept_info_t accept{};
+            if (!route_->ws_accept(req_, accept)) {
+              write_error(accept.refuse_with);
+              round_done = true;
+              break;
+            }
+            subprotocol = accept.subprotocol;
+          }
+
+          // The session takes over the whole connection; run()'s tail only
+          // has bookkeeping left to do. close_after_flush_ merely exits the
+          // keep-alive loop — the flush under it finds nothing staged.
+          co_await run_websocket(*route_, *key, subprotocol);
+          upgraded_ = true;
+          close_after_flush_ = true;
           round_done = true;
           break;
+        }
 
         case parser_t::result_t::HeadersReady: {
           ++metrics_.requests;
@@ -1007,6 +1109,17 @@ coro_t<void> connection_t::run(const router_t& router) {
               break;
             }
             route_ = router.fallback_route();
+          }
+
+          // A plain request on a websocket endpoint: it had its chance to ask
+          // for the upgrade. Without this branch, a non-upgrade GET would
+          // reach the dispatch sites as kind WebSocket — which holds no http
+          // handler — and call an empty std::function.
+          if (route_ && route_->kind == route_t::kind_t::WebSocket &&
+              !parser_.upgrade()) {
+            write_error(status_t::UpgradeRequired);
+            round_done = true;
+            break;
           }
 
           if (auto ok = prepare_body(route_); !ok) {
@@ -1200,13 +1313,17 @@ coro_t<void> connection_t::run(const router_t& router) {
                         tr_.native_fd(), closing_, timed_out_, metrics_.requests);
 
   wheel_.cancel(timer_);
-  if (!timed_out_) {
+  if (!timed_out_ && !upgraded_) {
+    // An upgraded connection had its close ceremony inside the session
+    // already; a second half-close would be protocol noise.
     co_await shutdown_gracefully();
   }
-  release_buffers();
-  // release() first: without it the socket destructor would close the same fd a
-  // second time, and by then the number may belong to another connection.
-  tr_.abandon(ctx_);
+  if (!upgraded_) {
+    release_buffers();
+    // release() first: without it the socket destructor would close the same fd a
+    // second time, and by then the number may belong to another connection.
+    tr_.abandon(ctx_);
+  }
   co_return;
 }
 

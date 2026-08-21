@@ -70,6 +70,13 @@ class server_t {
   template <typename F> void fallback(F&& fn) { router_.fallback(std::forward<F>(fn)); }
   template <typename F> void filter(F&& fn) { router_.filter(std::forward<F>(fn)); }
 
+  /**
+   * @brief register a websocket endpoint; see router_t::websocket().
+   */
+  template <typename F> route_t& websocket(std::string_view p, F&& fn) {
+    return router_.websocket(p, std::forward<F>(fn));
+  }
+
   CORNET_NODISCARD router_t& router() { return router_; }
   CORNET_NODISCARD const router_t& router() const { return router_; }
   CORNET_NODISCARD const server_options_t& options() const { return opt_; }

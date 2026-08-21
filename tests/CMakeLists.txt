@@ -48,6 +48,11 @@ if(CORNET_WITH_HTTP)
             target_sources(unit PRIVATE tls/e2e.cc)
         endif()
     endif()
+    target_sources(unit PRIVATE
+        websocket/handshake.cc
+        websocket/frame.cc
+        websocket/e2e.cc
+    )
     target_link_libraries(unit PRIVATE cornet_http)
 endif()
 gtest_discover_tests(unit)
