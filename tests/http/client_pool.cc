@@ -6,7 +6,7 @@
 
 #include "cornet/concurrency/combinators.h"
 
-#include "http_client_fixture.h"
+#include "client_fixture.h"
 
 using namespace cornet;
 using namespace cornet::http;

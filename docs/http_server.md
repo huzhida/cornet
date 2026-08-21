@@ -217,7 +217,7 @@ body 在明文 `transport` 下用**双 splice**（file → pipe → socket，io_
 行为边界（有意为之）：404 由 `file()` 直出（返回 false，handler `co_return` 即可）；
 HEAD 只发头部（fd 立刻释放）；file 响应参与 pipelining 时保留线序（不与其他响应挤进
 同一个 writev，保序第一）；>4GB 文件不在当前支持形状内（`body_len` 为 uint32）。
-404 与 HEAD 的岔用例在 `tests/http_e2e.cc` 有覆盖。
+404 与 HEAD 的岔用例在 `tests/http/e2e.cc` 有覆盖。
 
 也就是说 `body_buffer_bytes`（默认 16K）只是一次"内联暂存"的容量：小 body 走它最快，大 body 自动降级为 arena 托管 + iovec 直引（多一次堆分配，语义完全不变）。`resp.text(big)` 随便写，不用为此改走 chunked。
 
@@ -521,15 +521,15 @@ cmake --build --preset debug --target unit
 
 | 文件 | 覆盖 |
 |---|---|
-| `tests/http_common.cc` | SWAR 头名识别、reason phrase、状态/方法表、`status_for_error()` 映射 |
-| `tests/http_buffer.cc` | 缓冲池分级与复用、lease 移动、head 偏移量在写入后依然有效、compact/reserve 约束、spill 溢出 |
-| `tests/http_parser.cc` | 请求端解析：两阶段状态、零拷贝头视图、逐字节喂与整块等价、chunked、pipelined 切分、keep-alive 判定、超限、走私变体、trailer 的记录/丢弃/配额/回绕存活 |
-| `tests/http_serializer.cc` | 字节级输出（状态行、头名预渲染、数值、chunk-size、Date）与 `response_t`：三种 body 所有权、`pin()`、两个 body 被拒、框架头识别、`query_t` |
-| `tests/http_router.cc` | 精确匹配、规范化、参数与通配、优先级与回溯、405 与 fallback、handler 形态推导、参数槽上限 |
-| `tests/http_connection.cc` | framing：框架头顺序、不重复写 Content-Length / Transfer-Encoding、无 body 状态、流式 body source |
-| `tests/http_e2e.cc` | 打真 socket：GET/POST/404/405/HEAD、路径参数、query、pipelining、流式读写、超接收缓冲的聚合与流式 body、跨读边界的头部完整性 |
+| `tests/http/common.cc` | SWAR 头名识别、reason phrase、状态/方法表、`status_for_error()` 映射 |
+| `tests/http/buffer.cc` | 缓冲池分级与复用、lease 移动、head 偏移量在写入后依然有效、compact/reserve 约束、spill 溢出 |
+| `tests/http/parser.cc` | 请求端解析：两阶段状态、零拷贝头视图、逐字节喂与整块等价、chunked、pipelined 切分、keep-alive 判定、超限、走私变体、trailer 的记录/丢弃/配额/回绕存活 |
+| `tests/http/serializer.cc` | 字节级输出（状态行、头名预渲染、数值、chunk-size、Date）与 `response_t`：三种 body 所有权、`pin()`、两个 body 被拒、框架头识别、`query_t` |
+| `tests/http/router.cc` | 精确匹配、规范化、参数与通配、优先级与回溯、405 与 fallback、handler 形态推导、参数槽上限 |
+| `tests/http/connection.cc` | framing：框架头顺序、不重复写 Content-Length / Transfer-Encoding、无 body 状态、流式 body source |
+| `tests/http/e2e.cc` | 打真 socket：GET/POST/404/405/HEAD、路径参数、query、pipelining、流式读写、超接收缓冲的聚合与流式 body、跨读边界的头部完整性 |
 
-除 `tests/http_e2e.cc` 外都不依赖 io_uring，任何机器都能跑（`http_connection.cc` 是把 framing 那段流水线单独搭出来验证字节输出，不需要 socket）。
+除 `tests/http/e2e.cc` 外都不依赖 io_uring，任何机器都能跑（`http_connection.cc` 是把 framing 那段流水线单独搭出来验证字节输出，不需要 socket）。
 
 ## 限制与未实现
 

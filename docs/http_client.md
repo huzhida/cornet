@@ -424,14 +424,14 @@ cmake --build --preset debug --target unit
 
 | 文件 | 覆盖 |
 |---|---|
-| `tests/http_url.cc` | URL 解析边界：无 scheme、IPv6 字面量、空 path、只有 query、非法端口、`same_origin`、Location 解析 |
-| `tests/http_client_parser.cc` | 响应端解析：1xx、对 HEAD 的响应、204/304、chunked、读到关闭为止、非法状态行、超限 |
-| `tests/http_client_message.cc` | URL 拷贝与移动、三种 body 所有权、框架头不重复、`inbound_t` 归池 |
-| `tests/http_client_conn.cc` | 单连接闭环：分片到达、200K body、HEAD、100-continue、截断、多余字节、超时、流式收发 |
-| `tests/http_client_pool.cc` | 复用、DNS 缓存、陈旧连接丢弃、重试恰好一次、非幂等不重试、排队与等待超时、空闲回收 |
-| `tests/http_client_e2e.cc` | 打自家 `http::server_t`（同一个 context）：GET/POST/HEAD/404/chunked 上传/流式下载/并发/大 body/重定向 |
+| `tests/http/url.cc` | URL 解析边界：无 scheme、IPv6 字面量、空 path、只有 query、非法端口、`same_origin`、Location 解析 |
+| `tests/http/client_parser.cc` | 响应端解析：1xx、对 HEAD 的响应、204/304、chunked、读到关闭为止、非法状态行、超限 |
+| `tests/http/client_message.cc` | URL 拷贝与移动、三种 body 所有权、框架头不重复、`inbound_t` 归池 |
+| `tests/http/client_conn.cc` | 单连接闭环：分片到达、200K body、HEAD、100-continue、截断、多余字节、超时、流式收发 |
+| `tests/http/client_pool.cc` | 复用、DNS 缓存、陈旧连接丢弃、重试恰好一次、非幂等不重试、排队与等待超时、空闲回收 |
+| `tests/http/client_e2e.cc` | 打自家 `http::server_t`（同一个 context）：GET/POST/HEAD/404/chunked 上传/流式下载/并发/大 body/重定向 |
 
-`tests/http_client_fixture.h` 是三个 io 用例共用的脚手架：跑在线程上的脚本化 origin（阻塞 socket，可按连接序号分别应答，所有 socket 带超时，客户端有 bug 时是测试失败而不是测试挂住），外加 `conn_env_t` 与 `dial()`。
+`tests/http/client_fixture.h` 是三个 io 用例共用的脚手架：跑在线程上的脚本化 origin（阻塞 socket，可按连接序号分别应答，所有 socket 带超时，客户端有 bug 时是测试失败而不是测试挂住），外加 `conn_env_t` 与 `dial()`。
 
 前三个文件不依赖 io_uring，任何机器都能跑；后三个需要内核支持 io_uring。
 

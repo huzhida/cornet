@@ -33,7 +33,7 @@ OpenSSL 私有链接进 `cornet_tls`，公开头文件不出现任何 OpenSSL �
 | `transport_t` | `tls/transport.h` | 明文/TLS 统一的 `ccoro_t<expected<size_t>>` 接口 |
 
 `tls_engine_t` 与 socket 的分离是故意的：引擎可以在两个引擎对象之间手工交换
-密文完成握手/数据/shutdown 的全量测试（`tests/tls_engine.cc`），不需要 io_uring、
+密文完成握手/数据/shutdown 的全量测试（`tests/tls/engine.cc`），不需要 io_uring、
 不需要 socket、甚至不需要支持 io_uring 的内核。
 
 ## 关键语义

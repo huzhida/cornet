@@ -25,7 +25,7 @@
 #include "cornet/net/socket.h"
 #include "cornet/scheduling/context.h"
 
-#include "tls_certs.h"
+#include "certs.h"
 
 #ifdef CORNET_WITH_TLS
 
