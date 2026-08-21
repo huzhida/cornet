@@ -155,8 +155,10 @@ private:
   sched_stats stats;
   // schedule cycles count
   size_t cycles{0};
-  // scheduler cpu batch size
-  size_t cpu_batch_{128};
+  // scheduler cpu batch size. Single source of truth for the default: the
+  // value_or() fallback in scheduler.cc reads cpu_batch_ directly, and the
+  // number in docs/configuration.md is meant to match this initializer.
+  size_t cpu_batch_{64};
   // scheduler io wait budget
   std::chrono::nanoseconds io_wait_{std::chrono::milliseconds(1)};
   // io saturation
@@ -165,6 +167,12 @@ private:
   double io_sat_fast_{0.0};
   // cpu pressure fast
   double cpu_pressure_fast_{0.0};
+  // adapt() cadence: 1 in kAdaptInterval cycles. EWMA alphas were tuned at
+  // every-cycle cadence, so skipping 7/8 calls stretches the time constant
+  // ~8x; that is fine (cycles run at 10K+/sec under load) and saves the 4
+  // steady_clock reads + EWMA divides on the skipped cycles.
+  static constexpr uint32_t kAdaptInterval = 8;
+  uint32_t adapt_phase_{0};
   // min batch
   static constexpr size_t min_batch_ = 32;
   // max batch

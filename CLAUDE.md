@@ -4,7 +4,7 @@
 
 ```bash
 # 配置项目（首次或 CMakeLists.txt 变更后需要执行）
-cmake --preset release
+cmake --preset release -DCORNET_ENABLE_BENCH=ON
 
 # 构建项目
 cmake --build --preset release
@@ -14,6 +14,14 @@ cmake --build --preset release --target bench
 
 # 构建unit
 cmake --build --preset release --target unit
+```
+
+## 单元测试
+```bash
+# 配置项目
+cmake --preset debug
+# 构建
+cmake --build --preset debug --target unit
 ```
 
 ## 性能分析

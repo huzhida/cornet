@@ -377,8 +377,18 @@ void client_connection_t::advance_iovecs(uint32_t written) {
 coro_t<expected<void>> client_connection_t::write_staged() {
   while (iov_head_ < iov_n_) {
     ++metrics_.writev_calls;
-    auto n = co_await with_cancel(
-        ctx_, tr_.writev(ctx_, iov_ + iov_head_, iov_n_ - iov_head_), canceler_);
+    // Plain TCP takes the socket's leaf awaiter directly (no extra coroutine
+    // frame per write); TLS keeps its pump through transport_t::writev.
+    // is_tls() is settled at connection setup, so the branch predicts.
+    expected<size_t> n;
+    if (!tr_.is_tls()) {
+      auto r = co_await with_cancel(
+          ctx_, tr_.plain_writev(ctx_, iov_ + iov_head_, iov_n_ - iov_head_), canceler_);
+      n = r ? expected<size_t>(static_cast<size_t>(*r)) : unexpected(r.error());
+    } else {
+      n = co_await with_cancel(
+          ctx_, tr_.writev(ctx_, iov_ + iov_head_, iov_n_ - iov_head_), canceler_);
+    }
     if (!n) {
       broken_ = true;
       if (timed_out_) co_return unexpected(ETIMEDOUT);
@@ -405,7 +415,13 @@ coro_t<expected<uint32_t>> client_connection_t::fill() {
     // that does not fit.
     co_return http_unexpected(http_error_t::HeaderTooLarge);
   }
-  auto n = co_await with_cancel(ctx_, tr_.recv(ctx_, w.data(), w.size()), canceler_);
+  expected<size_t> n;
+  if (!tr_.is_tls()) {
+    auto r = co_await with_cancel(ctx_, tr_.plain_recv(ctx_, w.data(), w.size()), canceler_);
+    n = r ? expected<size_t>(static_cast<size_t>(*r)) : unexpected(r.error());
+  } else {
+    n = co_await with_cancel(ctx_, tr_.recv(ctx_, w.data(), w.size()), canceler_);
+  }
   if (!n) {
     if (timed_out_) co_return unexpected(ETIMEDOUT);
     co_return unexpected(n.error());

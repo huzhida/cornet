@@ -15,7 +15,10 @@ scheduler_t::scheduler_t(task_tracker_t& tracker, config_t* config)
 config_(config), executor_(tracker_, config) {
   if(config) {
     auto conf = (*config)["cornet"]["context"]["scheduler"];
-    cpu_batch_ = conf["cpu_batch"].value_or(64);
+    // value_or(cpu_batch_) rather than a literal so scheduler.h stays the
+    // single source of truth for the default (was hard-coded 64 here while
+    // the header initializer drifted to 128).
+    cpu_batch_ = conf["cpu_batch"].value_or(cpu_batch_);
     io_wait_ = parse_time_str(conf["io_wait"].value_or("1ms"));
   }
 }
@@ -118,7 +121,13 @@ void scheduler_t::sched(context_t& ctx) {
   stats.inflight = uring.running_task_nr();
   stats.loop_runtime_ns +=
     std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
-  adapt();
+  // Sample-and-hold: adapt() reads only the current cycle's stats, so calling
+  // it every cycle buys nothing a slower EWMA can't absorb — throttle to one
+  // in kAdaptInterval and skip the control work on the rest.
+  if (++adapt_phase_ >= kAdaptInterval) {
+    adapt_phase_ = 0;
+    adapt();
+  }
 }
 
 void scheduler_t::adapt() {

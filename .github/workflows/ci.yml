@@ -1,0 +1,90 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  VCPKG_ROOT: ${{ github.workspace }}/.vcpkg
+  VCPKG_DEFAULT_TRIPLET: x64-linux
+
+jobs:
+  build:
+    name: ${{ matrix.preset }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # Debug 带 ASan,Release 走 bench 回归
+        preset: [debug, release]
+
+    steps:
+      - name: kernel / toolchain info
+        run: |
+          uname -a
+          gcc --version | head -1
+          cmake --version | head -1
+
+      - uses: actions/checkout@v4
+
+      - name: install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build pkg-config \
+            git curl zip unzip tar libssl-dev
+
+      - name: cache vcpkg
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.VCPKG_ROOT }}
+            ${{ github.workspace }}/vcpkg_installed
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-
+
+      - name: bootstrap vcpkg
+        run: |
+          if [ ! -x "$VCPKG_ROOT/vcpkg" ]; then
+            git clone --depth 1 https://github.com/microsoft/vcpkg.git "$VCPKG_ROOT"
+            "$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics
+          fi
+
+      - name: configure (debug)
+        if: matrix.preset == 'debug'
+        # Debug preset already sets ENABLE_TESTS/BENCH ON; ASan comes from CMakeLists
+        run: cmake --preset debug
+
+      - name: configure (release)
+        if: matrix.preset == 'release'
+        run: cmake --preset release -DCORNET_ENABLE_TESTS=ON -DCORNET_ENABLE_BENCH=ON
+
+      - name: build
+        run: cmake --build --preset ${{ matrix.preset }} --parallel
+
+      - name: build unit target
+        run: cmake --build --preset ${{ matrix.preset }} --target unit --parallel
+
+      - name: test
+        timeout-minutes: 5
+        run: |
+          # 完整测试套件;io_uring 依赖在 Ubuntu 24.04 默认 6.x 内核上都能跑
+          ./cmake-build-${{ matrix.preset }}/unit --gtest_brief=1
+
+      - name: build bench target
+        if: matrix.preset == 'release'
+        run: cmake --build --preset release --target bench --parallel
+
+      # 不验证性能阈值(不同 runner 差异太大),只验证 bench 二进制本身可运行、
+      # 不在启动早期崩溃。用最小场景快速完成一轮。
+      - name: bench smoke
+        if: matrix.preset == 'release'
+        timeout-minutes: 3
+        run: |
+          ./cmake-build-release/bench --scenario small_msg_high_conc --only Cornet 2>&1 | tail -20

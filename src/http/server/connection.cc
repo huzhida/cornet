@@ -14,9 +14,19 @@ namespace cornet::http {
 
 namespace {
 
-constexpr std::string_view kConnClose = "close";
-constexpr std::string_view kConnKeepAlive = "keep-alive";
-constexpr std::string_view kServerName = "cornet";
+// Pre-composed constant header lines: framework-originated values contain no
+// CR/LF by construction, so the scan serializer_t::header() runs on every
+// emission is provably dead work here. Emitting them as one literal shortens
+// the per-request hot path to single put() calls.
+constexpr std::string_view kHdrServer = "Server: cornet\r\n";
+constexpr std::string_view kHdrConnKeepAlive = "Connection: keep-alive\r\n";
+constexpr std::string_view kHdrConnClose = "Connection: close\r\n";
+// Common-case bundle: both Server and Connection headers in one put. Placed
+// adjacent in the literal so a single memcpy emits both lines.
+constexpr std::string_view kHdrServerKeepAlive =
+    "Server: cornet\r\nConnection: keep-alive\r\n";
+constexpr std::string_view kHdrServerClose =
+    "Server: cornet\r\nConnection: close\r\n";
 
 /**
  * @brief a status a keep-alive connection cannot survive: the framing is either
@@ -182,7 +192,17 @@ coro_t<expected<uint32_t>> connection_t::fill() {
     co_return http_unexpected(http_error_t::HeaderTooLarge);
   }
   CORNET_HTTP_TRACE_LOG("fd={}: recv armed, window={}", tr_.native_fd(), w.size());
-  auto n = co_await with_cancel(ctx_, tr_.recv(ctx_, w.data(), w.size()), read_canceler_);
+  // Plain TCP takes the socket's leaf awaiter directly — no transport
+  // coroutine frame per read. TLS goes through transport_t::recv (the record
+  // layer's pump genuinely needs a coroutine). is_tls() is stable after
+  // connection setup, so this branch predicts perfectly.
+  expected<size_t> n;
+  if (!tr_.is_tls()) {
+    auto r = co_await with_cancel(ctx_, tr_.plain_recv(ctx_, w.data(), w.size()), read_canceler_);
+    n = r ? expected<size_t>(static_cast<size_t>(*r)) : unexpected(r.error());
+  } else {
+    n = co_await with_cancel(ctx_, tr_.recv(ctx_, w.data(), w.size()), read_canceler_);
+  }
   if (!n) {
     CORNET_HTTP_TRACE_LOG("fd={}: recv failed ({}), timed_out={}",
                           tr_.native_fd(), n.error().message(), timed_out_);
@@ -379,12 +399,17 @@ void connection_t::frame_head(bool close_after) {
   if (opt_.serve_date_header && !resp_.saw_date()) {
     serializer_t::date_header(head_out_, ctx_.http_date(), ctx_.http_date_len());
   }
-  if (opt_.serve_server_header) {
-    serializer_t::header(head_out_, field_t::Server, kServerName);
-  }
-  if (!resp_.saw_connection()) {
-    serializer_t::header(head_out_, field_t::Connection,
-                         close_after ? kConnClose : kConnKeepAlive);
+  // Static-block fast path: Server and Connection are framework constants, so
+  // emit them as pre-composed literals — no per-value CR/LF scan, and when
+  // both are present a single put() copies the two lines together.
+  const bool emit_server = opt_.serve_server_header;
+  const bool emit_conn = !resp_.saw_connection();
+  if (emit_server && emit_conn) {
+    head_out_.put(close_after ? kHdrServerClose : kHdrServerKeepAlive);
+  } else if (emit_server) {
+    head_out_.put(kHdrServer);
+  } else if (emit_conn) {
+    head_out_.put(close_after ? kHdrConnClose : kHdrConnKeepAlive);
   }
   // RFC 9110 §8.6: Content-Length in a 1xx/204/304 response is a malformed
   // message — the peer would wait for a body that never comes and the next
@@ -449,8 +474,15 @@ CORNET_NODISCARD coro_t<expected<void>> connection_t::flush_stream() {
   while (written_total < total_len) {
     ++metrics_.writev_calls;
     // no cancellation on the write path: an interrupted writev is a truncated
-    // response (see the comment on the cancelers in connection.h)
-    auto n = co_await tr_.writev(ctx_, iov, iov_n);
+    // response (see the comment on the cancelers in connection.h). Plain TCP
+    // skips the transport coroutine frame; TLS keeps it (record layer pump).
+    expected<size_t> n;
+    if (!tr_.is_tls()) {
+      auto r = co_await tr_.plain_writev(ctx_, iov, iov_n);
+      n = r ? expected<size_t>(static_cast<size_t>(*r)) : unexpected(r.error());
+    } else {
+      n = co_await tr_.writev(ctx_, iov, iov_n);
+    }
     if (!n) {
       CORNET_HTTP_TRACE_LOG("fd={}: writev failed ({})", tr_.native_fd(), n.error().message());
       co_return unexpected(n.error());
@@ -481,7 +513,13 @@ coro_t<expected<void>> connection_t::write_direct(std::string_view data) {
     struct iovec iov{const_cast<char*>(p), left};
     ++metrics_.writev_calls;
     // no cancellation on the write path, same rationale as flush_stream()
-    auto n = co_await tr_.writev(ctx_, &iov, 1);
+    expected<size_t> n;
+    if (!tr_.is_tls()) {
+      auto r = co_await tr_.plain_writev(ctx_, &iov, 1);
+      n = r ? expected<size_t>(static_cast<size_t>(*r)) : unexpected(r.error());
+    } else {
+      n = co_await tr_.writev(ctx_, &iov, 1);
+    }
     if (!n) {
       CORNET_HTTP_TRACE_LOG("fd={}: direct write failed ({})", tr_.native_fd(),
                             n.error().message());
@@ -668,8 +706,15 @@ coro_t<expected<void>> connection_t::writev_span(struct iovec* iov, uint32_t n) 
   uint32_t done = 0;
   while (done < n) {
     ++metrics_.writev_calls;
-    // no cancellation on the write path, same rationale as send_stream()
-    auto w = co_await tr_.writev(ctx_, iov + done, n - done);
+    // no cancellation on the write path, same rationale as send_stream().
+    // Plain TCP takes the frame-free socket awaiter; TLS keeps its pump.
+    expected<size_t> w;
+    if (!tr_.is_tls()) {
+      auto r = co_await tr_.plain_writev(ctx_, iov + done, n - done);
+      w = r ? expected<size_t>(static_cast<size_t>(*r)) : unexpected(r.error());
+    } else {
+      w = co_await tr_.writev(ctx_, iov + done, n - done);
+    }
     if (!w) {
       CORNET_HTTP_TRACE_LOG("fd={}: writev failed ({})", tr_.native_fd(), w.error().message());
       co_return unexpected(w.error());
@@ -837,8 +882,15 @@ coro_t<void> connection_t::shutdown_gracefully() {
   char scratch[512];
   wheel_.arm(timer_, std::chrono::milliseconds(200));
   for (int i = 0; i < 4; ++i) {
-    auto n = co_await with_cancel(ctx_, tr_.recv(ctx_, scratch, sizeof(scratch)),
-                                  drain_canceler_);
+    expected<size_t> n;
+    if (!tr_.is_tls()) {
+      auto r = co_await with_cancel(ctx_, tr_.plain_recv(ctx_, scratch, sizeof(scratch)),
+                                    drain_canceler_);
+      n = r ? expected<size_t>(static_cast<size_t>(*r)) : unexpected(r.error());
+    } else {
+      n = co_await with_cancel(ctx_, tr_.recv(ctx_, scratch, sizeof(scratch)),
+                               drain_canceler_);
+    }
     if (!n || *n == 0) break;
   }
   wheel_.cancel(timer_);
