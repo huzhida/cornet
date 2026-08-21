@@ -64,9 +64,21 @@ coro_t<expected<resolved_address>> resolve(context_t& ctx, std::string_view host
     if (!res) {
       return unexpected(EAI_NONAME, error_domain::Resolve);
     }
+    // Walk the addrinfo list and prefer the first IPv4 entry. Modern gai.conf
+    // prefers IPv6 for "localhost", which breaks any dual-stack-aware client
+    // connecting to a listener that only bound 127.0.0.1 — the peer answers
+    // ECONNREFUSED on ::1 and we never try the IPv4 fallback. Iterating to
+    // prefer v4 keeps the existing single-address API working on both
+    // single- and dual-stack hosts. (True happy-eyeballs iteration across
+    // address families is a larger resolve() API change worth its own commit.)
+    struct addrinfo* pick = res;
+    for (auto* it = res; it; it = it->ai_next) {
+      if (it->ai_family == AF_INET) { pick = it; break; }
+      if (pick == res && it->ai_family == AF_INET6) pick = it;
+    }
     resolved_address r;
-    r.socklen = res->ai_addrlen;
-    std::memcpy(&r.addr, res->ai_addr, res->ai_addrlen);
+    r.socklen = pick->ai_addrlen;
+    std::memcpy(&r.addr, pick->ai_addr, pick->ai_addrlen);
     freeaddrinfo(res);
     return r;
   };
