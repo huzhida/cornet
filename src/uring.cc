@@ -127,8 +127,11 @@ uring_t::uring_t(task_tracker_t& tracker, config_t* config)
     params.cq_entries = cq_entries;
     int ret = io_uring_queue_init_params(entries_nr, uring.get(), &params);
     if (ret == 0) {
+      // Init result stays at DEBUG: this log fires once per context_t, which
+      // in a runtime = once per worker thread per test. INFO spam from
+      // framework plumbing made the first CI run unreadable.
       if (tier.flags != 0) {
-        SPDLOG_INFO("io_uring: auto-selected setup flags {}", tier.desc);
+        SPDLOG_DEBUG("io_uring: auto-selected setup flags {}", tier.desc);
       } else {
         SPDLOG_DEBUG("io_uring: initialized with default flags");
       }
