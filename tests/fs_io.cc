@@ -46,7 +46,7 @@ TEST_F(fs_io, openat_read_close) {
     const char* path = "/tmp/cornet_test_openat.txt";
     int fd = ::open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     EXPECT_GE(fd, 0);
-    ::write(fd, "hello", 5);
+    EXPECT_EQ(::write(fd, "hello", 5), 5);
     ::close(fd);
 
     auto result = co_await openat_awaiter(ctx, AT_FDCWD, path, O_RDONLY);
@@ -76,7 +76,7 @@ TEST_F(fs_io, splice_pipe) {
     EXPECT_EQ(pipe(pipe1), 0);
     EXPECT_EQ(pipe(pipe2), 0);
 
-    ::write(pipe1[1], "splice", 6);
+    EXPECT_EQ(::write(pipe1[1], "splice", 6), 6);
     auto n = co_await splice_awaiter(ctx, pipe1[0], -1, pipe2[1], -1, 6, 0);
     EXPECT_TRUE(n.has_value());
     EXPECT_EQ(*n, 6);
@@ -97,7 +97,7 @@ TEST_F(fs_io, poll_add_readable) {
   auto test = [](context_t& ctx) -> coro_t<void> {
     int pipefd[2];
     EXPECT_EQ(pipe(pipefd), 0);
-    ::write(pipefd[1], "x", 1);
+    EXPECT_EQ(::write(pipefd[1], "x", 1), 1);
 
     auto mask = co_await poll_add_awaiter(ctx, pipefd[0], POLLIN);
     EXPECT_TRUE(mask.has_value());
@@ -115,7 +115,7 @@ TEST_F(fs_io, statx_file) {
   auto test = [](context_t& ctx) -> coro_t<void> {
     const char* path = "/tmp/cornet_test_statx.txt";
     int fd = ::open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    ::write(fd, "abcdef", 6);
+    EXPECT_EQ(::write(fd, "abcdef", 6), 6);
     ::close(fd);
 
     struct statx stx{};
@@ -157,7 +157,7 @@ TEST_F(fs_io, renameat_file) {
     const char* new_path = "/tmp/cornet_test_rename_new.txt";
 
     int fd = ::open(old_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    ::write(fd, "data", 4);
+    EXPECT_EQ(::write(fd, "data", 4), 4);
     ::close(fd);
 
     auto ret = co_await renameat_awaiter(ctx, AT_FDCWD, old_path, AT_FDCWD, new_path, 0);
@@ -180,7 +180,7 @@ TEST_F(fs_io, fsync_file) {
     int fd = ::open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     EXPECT_GE(fd, 0);
     if (fd < 0) co_return;
-    ::write(fd, "sync", 4);
+    EXPECT_EQ(::write(fd, "sync", 4), 4);
 
     auto ret = co_await fsync_awaiter(ctx, fd);
     EXPECT_TRUE(ret.has_value());

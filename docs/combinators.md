@@ -559,3 +559,59 @@ join 之后不要再 spawn。
 - scope body 本身也是协程，需要 `co_return`
 - `scope.spawn` 只能在 body 内调用（scope 退出后不可再 spawn）
 - task_scope 内部使用 `unique_ptr<scope_t>` 管理 scope 生命周期
+
+## semaphore_t（计数信号量 / 协程互斥锁）
+
+`#include "cornet/concurrency/semaphore.h"`
+
+协程里需要锁的唯一真实场景：临界区必须**跨过 `co_await`**——否则同线程的协程调度天然串行，根本不需要锁。semaphore_t 是计数信号量；`semaphore_t{1}` 就是协程互斥锁，不另设类型。
+
+```cpp
+semaphore_t sem(ctx, 32);                 // 最多 32 个并发
+
+// RAII（推荐）：许可在作用域结束时自动归还
+auto g = co_await sem.guard();
+if (!g) co_return g.error();
+... g 活过这一段的每个 co_await ...
+
+// 或手动
+auto ok = co_await sem.acquire(4);        // 加权：一次取 4 个许可
+if (ok) { ...; sem.release(4); }
+sem.try_acquire();                        // 不挂起的快路径
+```
+
+**队列纪律**:acquire 严格 FIFO——大队首会挡住后面的小请求（公平性契约，头阻塞是代价）。唤醒永远走调度器 ready 队列，绝不在 `release()` 调用方帧里就地 resume，因此 timer 回调里 release 也安全。
+
+**取消语义**（重要，与 IO 不同）：信号量挂起不是内核操作，`canceler_t` **无法**提前唤醒它。取消通道有两个：
+- **协程帧销毁**：挂起帧被销毁时（如 scope/stop 路径），等待节点自动脱链；已发放但未消费的许可**归还**而不蒸发；
+- **`sem.abort()`**：黏性的 teardown——排队者全部以 `ECANCELED`（或指定错误）唤醒，此后的 acquire 直接失败。
+
+**限制**：单 context 线程内使用；不支持跨 context；不提供带超时的 acquire（需要就拿 timer + abort 组合，或先 try_acquire 失败再 sleep 重试）。
+
+## singleflight（并发去重 / 防惊群）
+
+`#include "cornet/concurrency/singleflight.h"`
+
+N 个协程同时要同一件慢东西（DNS 答案、上游 schema、证书、聚合结果）时，**第一个执行，其余共享这一次的结果**，而不是踩踏下游：
+
+```cpp
+singleflight_t<std::string, nlohmann::json> sf(ctx);
+
+auto fn = [&]() -> coro_t<expected<std::shared_ptr<json>>> {
+  auto resp = co_await http_client.fetch(ctx, url);
+  co_return resp;
+};
+auto r = co_await sf.run("schema:inventory", fn);
+// 并发的其它 run("schema:inventory", ...) 挂起共享这一次；r 是同一份 shared_ptr
+```
+
+**语义边界**：
+- **合并 in-flight，不是缓存**:flight 落地即忘，下一次 run 会重新执行。TTL/失效请在之上再叠 map。
+- leader 失败（返回 error):followers 收到**同一个错误**，同样不缓存。
+- **leader 夭亡**（协程帧被销毁/异常）:followers 收到 `EOWNERDEAD`（不会挂死）；重试即成为新 leader。
+- follower 夭亡：静默脱链，不影响 flight。
+- K/V 为模板参数，结果统一 `shared_ptr<V>`：每个调用者的副本独立管理生命周期。
+
+典型用途：DNS 答案、上游 schema/config 拉取、连接池的"同 authority 建立中"去重、thundering herd 防护。
+
+`sf.in_flight()` 返回当前正在合并的 flight 数（测试/观测用）。
