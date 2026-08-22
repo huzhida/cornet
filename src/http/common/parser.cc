@@ -178,6 +178,29 @@ struct parser_callbacks_t {
     s->chunked_ = s->headers_->contains_token(field_t::TransferEncoding, "chunked");
     s->expects_continue_ = s->headers_->contains_token(field_t::Expect, "100-continue");
 
+    // ── request-only validations ──
+    if (s->type_ == parser_t::type_t::Request) {
+      // RFC 7230 §5.4: HTTP/1.1 requests must carry a Host header.
+      if (s->version_ == version_t::Http11 && !s->headers_->has(field_t::Host)) {
+        s->error_ = http_error(http_error_t::BadHeader);
+        return -1;
+      }
+
+      // Multiple Host headers are a protocol error (RFC 7230 §3.2).
+      // Count occurrences by scanning the entry array.
+      if (s->headers_->has(field_t::Host)) {
+        uint32_t host_count = 0;
+        for (uint32_t i = 0; i < s->headers_->size(); ++i) {
+          const auto& h = s->headers_->at(i);
+          if (!h.trailer && h.field == field_t::Host) ++host_count;
+        }
+        if (host_count > 1) {
+          s->error_ = http_error(http_error_t::BadHeader);
+          return -1;
+        }
+      }
+    }
+
     if (s->has_content_length_ && s->content_length_ > s->limits_.max_body_bytes) {
       s->error_ = http_error(http_error_t::BodyTooLarge);
       return -1;

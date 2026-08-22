@@ -220,23 +220,25 @@ bool iequals(std::string_view a, std::string_view b);
  * the base are conditions this module detects itself.
  */
 inline constexpr int kProtocolErrorBase = 1000;
+inline constexpr int kProtocolClientErrorBase = 2000;
 
 enum class http_error_t : int {
-  HeaderTooLarge   = kProtocolErrorBase + 1,   // exceeds max_header_bytes
-  TooManyHeaders   = kProtocolErrorBase + 2,
-  BodyTooLarge     = kProtocolErrorBase + 3,   // exceeds max_body_bytes
-  BadContentLength = kProtocolErrorBase + 4,
-  UnsupportedVersion = kProtocolErrorBase + 5,
-  OutputOverflow   = kProtocolErrorBase + 6,   // response exceeded its buffer
-  InvalidState     = kProtocolErrorBase + 7,   // API misuse, e.g. body after finish
-  BadUpgrade       = kProtocolErrorBase + 8,
+  HeaderTooLarge = kProtocolErrorBase + 1, // exceeds max_header_bytes
+  TooManyHeaders = kProtocolErrorBase + 2,
+  BodyTooLarge = kProtocolErrorBase + 3,     // exceeds max_body_bytes
+  BadContentLength = kProtocolErrorBase + 4, // invalid Content-Length value
+  BadHeader = kProtocolErrorBase + 5,       // missing/multiple Host, etc.
+  UnsupportedVersion = kProtocolErrorBase + 6,
+  OutputOverflow = kProtocolErrorBase + 7, // response exceeded its buffer
+  InvalidState = kProtocolErrorBase + 8,   // API misuse, e.g. body after finish
+  BadUpgrade = kProtocolErrorBase + 9,
   // ── client side ──
-  BadUrl             = kProtocolErrorBase + 9,   // unparseable request url
-  UnsupportedScheme  = kProtocolErrorBase + 10,  // a scheme this build cannot speak
-  TooManyRedirects   = kProtocolErrorBase + 11,
-  PoolExhausted      = kProtocolErrorBase + 12,  // no connection available in time
-  ResponseIncomplete = kProtocolErrorBase + 13,  // peer closed mid-message
-  InvalidHeader      = kProtocolErrorBase + 14,  // CR/LF in a header name or value
+  BadUrl = kProtocolClientErrorBase + 1,             // unparseable request url
+  UnsupportedScheme = kProtocolClientErrorBase + 2, // a scheme this build cannot speak
+  TooManyRedirects = kProtocolClientErrorBase + 3,
+  PoolExhausted = kProtocolClientErrorBase + 4,      // no connection available in time
+  ResponseIncomplete = kProtocolClientErrorBase + 5, // peer closed mid-message
+  InvalidHeader = kProtocolClientErrorBase + 6,      // CR/LF in a header name or value
 };
 
 /**
