@@ -311,7 +311,7 @@ server.get("/events", [](auto&, http::response_t& resp) -> coro_t<void> {
 
 ## 超时
 
-三个 deadline 全部走**每 context 一个**的时间轮（`timer_tick` 默认 500ms），不用 per-op link_timeout：后者会让 SQE/CQE 翻倍，而无论多少连接，整个 context 只需要一个 timeout SQE。
+三个 deadline 全部走**每 context 一个**的时间轮（`timer_tick` 默认 500ms），不用 per-op link_timeout：后者会让 SQE/CQE 翻倍，而无论多少连接，整个 context 只需要一个 timeout SQE。轮子由 context 按 tick 分发（`ctx.wheel_for(tick)`）并共享：同一个 context 上的 server、若干 client、websocket session 只要 tick 相同就是同一个轮子。空闲即回收——没有 armed 节点时 runner 退出，最后一个持有者走了轮子也释放；谁都不负责启停它。
 
 | 选项 | 覆盖阶段 |
 |---|---|

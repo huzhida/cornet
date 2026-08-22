@@ -30,26 +30,18 @@ bool redirect_becomes_get(uint16_t code) {
 
 client_t::client_t(context_t& ctx, client_options_t opt)
   : ctx_(ctx), opt_(std::move(opt)), bufs_(buffer_pool_t::local()),
-    wheel_(ctx, opt_.timer_tick), dns_(ctx, opt_, metrics_),
-    pool_(ctx, opt_, bufs_, wheel_, metrics_, dns_) {
+    wheel_(ctx.wheel_for(opt_.timer_tick)), dns_(ctx, opt_, metrics_),
+    pool_(ctx, opt_, bufs_, *wheel_, metrics_, dns_) {
   opt_.load(ctx.config());
 }
 
 client_t::~client_t() { close(); }
 
 void client_t::close() {
+  // Clearing the pool is what unlinks this client's nodes from the shared wheel;
+  // the wheel itself belongs to the context and keeps serving the other tenants.
   pool_.clear();
   dns_.clear();
-  wheel_.stop();
-}
-
-void client_t::ensure_wheel() {
-  if (wheel_started_) return;
-  wheel_started_ = true;
-  // Spawned on first use rather than in the constructor: a client that is built and
-  // never used should not put a tick into the ring. One timeout SQE covers every
-  // deadline this client has, however many connections there are.
-  ctx_.spawn(wheel_.run());
 }
 
 std::chrono::milliseconds client_t::remaining(uint64_t deadline_ns) const {
@@ -161,7 +153,6 @@ bool client_t::follow(client_request_t& req, const client_response_t& resp) {
 
 coro_t<expected<client_response_t>> client_t::send(client_request_t& req) {
   if (req.failed()) co_return unexpected(req.error());
-  ensure_wheel();
 
   auto total = req.has_timeout_ ? req.timeout_ : opt_.total_timeout;
   uint64_t deadline = total.count() > 0
@@ -260,7 +251,6 @@ coro_t<expected<client_stream_t>> client_t::stream(method_t m, std::string_view 
 
 coro_t<expected<client_stream_t>> client_t::stream(client_request_t& req) {
   if (req.failed()) co_return unexpected(req.error());
-  ensure_wheel();
 
   auto total = req.has_timeout_ ? req.timeout_ : opt_.total_timeout;
   uint64_t deadline = total.count() > 0
@@ -300,7 +290,6 @@ coro_t<expected<client_upload_t>> client_t::upload(method_t m, std::string_view 
 
 coro_t<expected<client_upload_t>> client_t::upload(client_request_t& req) {
   if (req.failed()) co_return unexpected(req.error());
-  ensure_wheel();
 
   auto total = req.has_timeout_ ? req.timeout_ : opt_.total_timeout;
   uint64_t deadline = total.count() > 0

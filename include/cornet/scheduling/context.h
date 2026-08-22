@@ -2,8 +2,11 @@
 #define CORNET_CONTEXT_H
 
 #include "cornet/base/defines.h"
+#include <chrono>
 #include <functional>
 #include <memory>
+#include <utility>
+#include <vector>
 
 #include <spdlog/spdlog.h>
 
@@ -456,10 +459,36 @@ struct context_t {
   }
 
   /**
-   * @brief the context-wide timing wheel backing coroutine-level deadlines
-   * (with_timeout on ccoro_t). Created and started lazily on first use: a
-   * context that never times out a coroutine never pays a tick SQE. Deadlines
-   * are quantized to the wheel's tick — see timer_wheel_t.
+   * @brief this context's timing wheel for the given tick, created on first ask.
+   *
+   * Wheels are shared by tick, which is the point of routing them through the
+   * context: a server, however many http clients and a pile of websocket sessions
+   * all want a coarse wheel, and one wheel serving all of them costs one timeout
+   * SQE instead of one each. Callers that want different ticks get different
+   * wheels — a 500ms protocol timeout has no business dragging a 5ms tick along,
+   * and a 5ms coroutine deadline cannot be served by a 500ms one.
+   *
+   * @return a share of the wheel. Hold it for as long as you might arm a timer on
+   *         it (and for as long as anything you handed a `timer_wheel_t&` to might):
+   *         the context only keeps a weak reference, so a wheel whose last tenant
+   *         is gone and whose timers have all run is destroyed rather than kept
+   *         around empty. Asking again after that simply builds a new one.
+   *
+   * Nobody but the context stops these wheels; an idle one winds itself down
+   * anyway. Must be called from the context's owner thread.
+   */
+  CORNET_NODISCARD std::shared_ptr<timer_wheel_t> wheel_for(std::chrono::milliseconds tick);
+
+  /**
+   * @brief the wheel backing coroutine-level deadlines (with_timeout on ccoro_t).
+   * Created lazily on first use: a context that never times out a coroutine never
+   * pays a tick SQE. Deadlines are quantized to the wheel's tick — see
+   * timer_wheel_t.
+   *
+   * Unlike wheel_for(), the context keeps this one alive itself, so the reference
+   * is stable and safe to store. with_timeout fires in bursts (one per TLS
+   * handshake, say) and rebuilding a wheel between bursts would trade 4KB for a
+   * malloc on a hot path.
    */
   CORNET_NODISCARD timer_wheel_t& timeout_wheel();
 
@@ -636,9 +665,12 @@ private:
   alignas(CORNET_CACHE_LINE) std::atomic<state_t> state_{state_t::Terminated};
   // context scheduler (direct member, policy switchable at runtime)
   scheduler_t scheduler_;
-  // shared timing wheel for coroutine-level deadlines; nullptr until first use
-  // (unique_ptr keeps the header free of the wheel definition)
-  std::unique_ptr<timer_wheel_t> timeout_wheel_;
+  // timing wheels handed out by wheel_for(), keyed by tick; one or two of them in
+  // practice, so a flat vector beats a map. weak, so that a wheel with no tenants
+  // and no armed timer is reclaimed instead of sitting on 4KB of slots forever
+  std::vector<std::pair<std::chrono::milliseconds, std::weak_ptr<timer_wheel_t>>> wheels_;
+  // the coroutine-deadline wheel, pinned (see timeout_wheel())
+  std::shared_ptr<timer_wheel_t> deadline_wheel_;
   // per-signal handler callbacks
   std::unordered_map<int, std::function<void(int)>> signal_handlers_;
   // keep-alive flag: prevents auto-exit when user tasks are idle
@@ -662,6 +694,8 @@ private:
   // Sole point where the io_uring cancellation API is used; when a non-io_uring
   // backend is added this moves with uring_ and slots_.
   coro_t<void> cancel_sweep();
+  // internal: stop every live wheel (see wheel_for)
+  void stop_wheels();
 
   // utask_t adjusts the user-io ownership count at prepare/complete/destroy
   friend struct utask_t;

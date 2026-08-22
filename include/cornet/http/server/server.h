@@ -117,7 +117,10 @@ class server_t {
   context_t&        ctx_;
   server_options_t  opt_;
   router_t          router_;
-  timer_wheel_t     wheel_;
+  // the context's wheel for this tick, shared with every other tenant that wants
+  // the same one. Held by share, not by reference: that share is this server's vote
+  // for keeping the wheel around, and what its connections borrow
+  std::shared_ptr<timer_wheel_t> wheel_;
   buffer_pool_t&    pool_;
   connection_metrics_t metrics_{};
 

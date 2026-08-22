@@ -212,18 +212,18 @@ struct conn_env_t {
   cornet::http::client_options_t opt{};
   cornet::http::client_metrics_t metrics{};
   cornet::http::buffer_pool_t&   pool{cornet::http::buffer_pool_t::local()};
-  cornet::timer_wheel_t    wheel{ctx, 20ms};
+  // a short tick, so the timeout tests do not wait half a second. The share is what
+  // keeps the wheel alive across the gaps where nothing is armed.
+  std::shared_ptr<cornet::timer_wheel_t> wheel_share{ctx.wheel_for(20ms)};
+  cornet::timer_wheel_t&         wheel{*wheel_share};
 
   conn_env_t() {
-    // a short tick, so the timeout tests do not wait half a second
     opt.timer_tick = 20ms;
-    ctx.spawn(wheel.run());
   }
 
   void run(cornet::coro_t<void> task) {
     ctx.spawn(std::move(task));
     ctx.run();
-    wheel.stop();
   }
 };
 

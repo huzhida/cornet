@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <string_view>
 
 #include "cornet/http/client/connection.h"
@@ -224,7 +225,6 @@ private:
     bool                 reused{false};
   };
 
-  void ensure_wheel();
   CORNET_NODISCARD coro_t<expected<lease_t>> borrow(const url_t& url);
   void give_back(client_connection_t* conn, bool reusable);
 
@@ -244,10 +244,12 @@ private:
   client_options_t opt_;
   buffer_pool_t&   bufs_;
   client_metrics_t metrics_{};
-  timer_wheel_t    wheel_;
+  // the context's wheel for this tick, shared with every other tenant that wants
+  // the same one. Held by share, not by reference: that share is this client's vote
+  // for keeping the wheel around, and what the pool and its connections borrow
+  std::shared_ptr<timer_wheel_t> wheel_;
   dns_cache_t      dns_;
   client_pool_t    pool_;
-  bool             wheel_started_{false};
 };
 
 } // namespace cornet::http
