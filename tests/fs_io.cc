@@ -82,7 +82,7 @@ TEST_F(fs_io, splice_pipe) {
     EXPECT_EQ(*n, 6);
 
     char buf[16] = {};
-    ::read(pipe2[0], buf, sizeof(buf));
+    EXPECT_GE(::read(pipe2[0], buf, sizeof(buf)), 0);
     EXPECT_STREQ(buf, "splice");
 
     ::close(pipe1[0]); ::close(pipe1[1]);

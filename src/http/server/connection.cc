@@ -918,6 +918,9 @@ void connection_t::reset_round() {
   hdr_out_.clear();
   body_out_.clear();
   stream_out_.clear();
+  // body_ is still needed when mid-body (NeedMore path); release only after
+  // the entire body has been consumed and the handler finished.
+  if (!in_body_) body_.release();
   streaming_write_ = false;
   iov_n_ = 0;
   iov_head_ = 0;
@@ -1264,8 +1267,10 @@ coro_t<void> connection_t::run(const router_t& router) {
             break;
           }
 
-          parser_.reset();
+          // body_ is no longer needed once the handler has consumed the body;
+          // release it here so it returns to the pool before the next request.
           body_.release();
+          parser_.reset();
           if (++pipelined >= opt_.max_pipelined) {
             round_done = true;
             break;
