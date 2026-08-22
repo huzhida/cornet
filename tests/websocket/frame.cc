@@ -87,9 +87,16 @@ TEST(ws_frame, masking_policy_by_role) {
 }
 
 TEST(ws_frame, structural_violations) {
-  auto with_first_byte = [](uint8_t b0, uint8_t b1) {
-    const char bytes[] = {char(b0), char(b1), '\0', '\0', '\0', '\0', '\0', '\0'};
-    return std::string_view(bytes, sizeof(bytes));
+  // Pre-allocated buffer: the lambda below returns a string_view into this
+  // so the data outlives each call (the old version stored the array inside
+  // the lambda body, yielding a dangling string_view – only visible under
+  // -O3 where the stack is reused between calls).
+  char buf[8]{};
+  auto with_first_byte = [&](uint8_t b0, uint8_t b1) {
+    buf[0] = char(b0);
+    buf[1] = char(b1);
+    std::memset(buf + 2, 0, 6);
+    return std::string_view(buf, sizeof(buf));
   };
   // RSV1 must be clear when no extension was negotiated
   EXPECT_EQ(parse_err(websocket::role_t::Client, with_first_byte(0xC1, 0x0)),
