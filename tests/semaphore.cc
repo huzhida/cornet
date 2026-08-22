@@ -63,11 +63,13 @@ TEST_F(semaphore_test, weighted_requests_block_fifo) {
   semaphore_t sem(*ctx, 0);
 
   auto big = [&]() -> coro_t<void> {
-    co_await sem.acquire(3);
+    auto _ = co_await sem.acquire(3);
+    (void)_;
     order.push_back('A');
   };
   auto small = [&]() -> coro_t<void> {
-    co_await sem.acquire(1);
+    auto _ = co_await sem.acquire(1);
+    (void)_;
     order.push_back('B');
     EXPECT_EQ(sem.value(), 0u) << "B consumed the last permit after A drained the pool";
   };

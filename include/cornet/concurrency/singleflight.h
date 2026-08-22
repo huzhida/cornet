@@ -4,7 +4,6 @@
 #include <coroutine>
 #include <memory>
 #include <unordered_map>
-#include <utility>
 
 #include "cornet/base/defines.h"
 #include "cornet/base/expected.h"

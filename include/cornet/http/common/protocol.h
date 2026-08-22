@@ -5,7 +5,6 @@
 #include <cstring>
 #include <string_view>
 
-#include "cornet/base/defines.h"
 #include "cornet/base/expected.h"
 
 namespace cornet::http {

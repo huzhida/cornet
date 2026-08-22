@@ -4,7 +4,6 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
-#include <utility>
 
 #include "cornet/coroutine/coro.h"
 

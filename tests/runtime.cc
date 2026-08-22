@@ -164,7 +164,8 @@ TEST_F(runtime_test, submit_coroutine_void) {
   rt.start([](size_t, context_t&) {});
 
   auto f = rt.submit([&counter](context_t& ctx) -> coro_t<void> {
-    co_await nop_awaiter(ctx);
+    auto _ = co_await nop_awaiter(ctx);
+    (void)_;
     counter.fetch_add(1);
     co_return;
   });
@@ -266,7 +267,8 @@ TEST_F(runtime_test, spawn_fire_and_forget) {
   rt.start([](size_t, context_t&) {});
 
   rt.spawn([&counter, &ran](context_t& ctx) -> coro_t<void> {
-    co_await nop_awaiter(ctx);
+    auto _ = co_await nop_awaiter(ctx);
+    (void)_;
     counter.fetch_add(1);
     ran.count_down();
     co_return;
@@ -310,7 +312,8 @@ TEST_F(runtime_test, round_robin_distribution) {
   // Submit 4 tasks; each one picks a different context due to round-robin
   for (int i = 0; i < 4; i++) {
     auto f = rt.submit([](context_t& ctx) -> coro_t<int> {
-      co_await nop_awaiter(ctx);
+      auto _ = co_await nop_awaiter(ctx);
+      (void)_;
       co_return 1;
     });
     EXPECT_EQ(f.get(), 1);

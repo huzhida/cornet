@@ -62,7 +62,8 @@ TEST_F(fs_io, openat_read_close) {
     EXPECT_EQ(*n, 5);
     EXPECT_STREQ(buf, "hello");
 
-    co_await close_awaiter(ctx, afd);
+    auto _ = co_await close_awaiter(ctx, afd);
+    (void)_;
     ::unlink(path);
     co_return;
   };
