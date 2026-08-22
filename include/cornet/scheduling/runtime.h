@@ -13,6 +13,7 @@
 #include <chrono>
 
 #include "cornet/scheduling/context.h"
+#include <bits/types/sigset_t.h>
 
 namespace cornet {
 
@@ -303,6 +304,12 @@ public:
   void shutdown_and_join(std::chrono::nanoseconds timeout = std::chrono::seconds(5));
 
   /**
+   * @brief block wait until signal (SIGTERM / SIGINT) coming 
+   * @param shutdown whether shutdown when signal coming 
+   */
+  void wait_signal(bool shutdown = true);
+
+  /**
    * @brief forcefully stop all contexts.
    */
   void stop();
@@ -485,6 +492,7 @@ private:
   std::vector<std::thread> workers_;
   std::vector<std::unique_ptr<context_t>> contexts_;
   std::atomic<bool> stopped_{false};
+  sigset_t mask_;
   mutable std::mutex mutex_;
 };
 

@@ -83,7 +83,7 @@ int main(int argc, char* argv[]) {
   };
 
   std::vector<bench_entry> benches = {
-    {"Cornet",[&config](const scenario_t& s) { return run_cornet(s,config); }},
+    {"Cornet/Raw",[&config](const scenario_t& s) { return run_cornet(s,config); }},
     {"Asio/Callback", [](const scenario_t& s) { return run_asio_callback(s); }},
     {"Asio/Coroutine", [](const scenario_t& s) { return run_asio_coro(s); }},
 #ifdef CORNET_BENCH_HTTP
