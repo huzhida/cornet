@@ -10,6 +10,7 @@ add_executable(unit EXCLUDE_FROM_ALL
     generic_io.cc
     async.cc
     combinators.cc
+    timer_wheel.cc
     runtime.cc
     fs_io.cc
     frame_pool.cc

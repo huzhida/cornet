@@ -34,7 +34,7 @@ bool fd_exhausted(int err) {
 } // namespace
 
 server_t::server_t(context_t& ctx, server_options_t opt)
-  : ctx_(ctx), opt_(std::move(opt)), wheel_(ctx, opt_.timer_tick),
+  : ctx_(ctx), opt_(std::move(opt)), wheel_(ctx.wheel_for(opt_.timer_tick)),
     pool_(buffer_pool_t::local()) {
   opt_.load(ctx.config());
 }
@@ -76,9 +76,6 @@ coro_t<void> server_t::serve() {
   scope_ = std::make_unique<scope_t>(ctx_);
   CORNET_HTTP_TRACE_LOG("serve: start, listener fd={}", listener_->native_fd());
 
-  // One timeout SQE for the whole context, whatever the connection count.
-  ctx_.spawn(wheel_.run());
-
   co_await accept_loop();
   CORNET_HTTP_TRACE_LOG("serve: accept loop exited, {} connection(s) still open", conns_);
 
@@ -88,7 +85,6 @@ coro_t<void> server_t::serve() {
     auto joined = co_await scope_join_awaiter{*scope_};
     (void)joined;
   }
-  wheel_.stop();
   state_ = state_t::Stopped;
   CORNET_HTTP_TRACE_LOG("serve: stopped (requests={} responses={})",
                         metrics_.requests, metrics_.responses);
@@ -158,7 +154,7 @@ coro_t<void> server_t::serve_connection(tcp::socket_t sock) {
     CORNET_HTTP_TRACE_LOG("conn fd={}: tls {} {}", transport.native_fd(),
                           transport.tls_version(), transport.tls_cipher());
   }
-  connection_t conn(ctx_, std::move(transport), opt_, pool_, wheel_, metrics_);
+  connection_t conn(ctx_, std::move(transport), opt_, pool_, *wheel_, metrics_);
   ++conns_;
   active_.push_back(&conn);
   CORNET_HTTP_TRACE_LOG("conn fd={}: begin", conn.native_fd());
@@ -197,7 +193,8 @@ void server_t::stop() {
   drain();
   state_ = state_t::Stopped;
   if (scope_) scope_->cancel();
-  wheel_.stop();
+  // The wheel is the context's, shared with whatever else runs here: this server's
+  // timers left with its connections, and stopping it would strand the others.
 }
 
 // ─────────────────────────── multi-threaded ───────────────────────────

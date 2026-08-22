@@ -58,9 +58,9 @@ context_t::context_t(config_t* config)
 }
 
 context_t::~context_t() {
-  // Stop the wheel before teardown: its run() coroutine loops on ctx state,
-  // and the cancel sweep has already reaped its tick SQE by now.
-  if (timeout_wheel_) timeout_wheel_->stop();
+  // Stop the wheels before teardown: their runners loop on ctx state, and the
+  // cancel sweep has already reaped any tick SQE by now.
+  stop_wheels();
   if (signal_fd_ >= 0) {
     ::close(signal_fd_);
     signal_fd_ = -1;
@@ -71,15 +71,46 @@ context_t::~context_t() {
   }
 }
 
+std::shared_ptr<timer_wheel_t> context_t::wheel_for(std::chrono::milliseconds tick) {
+  // The wheel falls back to its default tick for a nonsensical one; key on that
+  // same value, or two callers asking for 0ms would get two wheels that tick
+  // identically.
+  if (tick.count() <= 0) tick = timer_wheel_t::kDefaultTick;
+  // Reclaimed entries are reused rather than piling up: the vector is only as long
+  // as the set of distinct ticks ever asked for.
+  std::pair<std::chrono::milliseconds, std::weak_ptr<timer_wheel_t>>* free_slot = nullptr;
+  for (auto& entry : wheels_) {
+    if (auto wheel = entry.second.lock()) {
+      if (entry.first == tick) return wheel;
+    } else if (!free_slot) {
+      free_slot = &entry;
+    }
+  }
+  // No runner is spawned here: the wheel starts ticking on its first arm(), so a
+  // wheel that gets created and never used is a few kilobytes and nothing else.
+  auto wheel = timer_wheel_t::make(*this, tick);
+  if (free_slot) {
+    *free_slot = {tick, wheel};
+  } else {
+    wheels_.emplace_back(tick, wheel);
+  }
+  return wheel;
+}
+
 timer_wheel_t& context_t::timeout_wheel() {
-  if (!timeout_wheel_) {
+  if (!deadline_wheel_) {
     // 5ms tick: coarse enough that an idle wheel is noise on the ring (~200
     // wakeups/s), fine enough that coroutine-level deadlines quantize to at
     // most one small scheduler quantum late.
-    timeout_wheel_ = std::make_unique<timer_wheel_t>(*this, std::chrono::milliseconds(5));
-    spawn(timeout_wheel_->run());
+    deadline_wheel_ = wheel_for(std::chrono::milliseconds(5));
   }
-  return *timeout_wheel_;
+  return *deadline_wheel_;
+}
+
+void context_t::stop_wheels() {
+  for (auto& [tick, weak] : wheels_) {
+    if (auto wheel = weak.lock()) wheel->stop();
+  }
 }
 
 void context_t::run() {
@@ -98,12 +129,11 @@ void context_t::run() {
 
     if (state_.load(std::memory_order_acquire) == state_t::Canceling
         && !cancel_inflight_) {
-      // latched: one sweep at a time, re-armable. Stop the shared timeout
-      // wheel here: its runner may be parked (no SQE in flight for the sweep
-      // to cancel) and must be kicked so it exits while this loop is still
-      // going — the wheel itself is freed right after run() returns.
+      // latched: one sweep at a time, re-armable. Stop the wheels here so a
+      // re-arm on the way out cannot start another runner behind the sweep's
+      // back. Tenants (an http server, a client) never stop a wheel they share.
       cancel_inflight_ = true;
-      if (timeout_wheel_) timeout_wheel_->stop();
+      stop_wheels();
       spawn(cancel_sweep());
     }
 

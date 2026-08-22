@@ -5,8 +5,8 @@
 
 namespace cornet {
 
-timer_wheel_t::timer_wheel_t(context_t& ctx, std::chrono::milliseconds tick)
-  : ctx_(ctx), tick_(tick.count() > 0 ? tick : std::chrono::milliseconds(500)) {}
+timer_wheel_t::timer_wheel_t(private_tag_t, context_t& ctx, std::chrono::milliseconds tick)
+  : ctx_(ctx), tick_(tick.count() > 0 ? tick : kDefaultTick) {}
 
 timer_wheel_t::~timer_wheel_t() {
   // Unlink everything so a node outliving the wheel cannot be walked.
@@ -56,19 +56,20 @@ void timer_wheel_t::arm(timer_node_t& node, std::chrono::milliseconds delay) {
   node.rounds = uint32_t((ticks - 1) / kSlots);
   auto slot = uint32_t((cursor_ + ticks) % kSlots);
   link(node, slot);
-  // The run() coroutine parks when the wheel is empty; the first arm wakes it.
-  kick();
+  // Nothing ticks until something is armed, and the runner leaves as soon as
+  // nothing is: every arm on an idle wheel starts a new one.
+  ensure_runner();
 }
 
 void timer_wheel_t::cancel(timer_node_t& node) {
   unlink(node);
 }
 
-void timer_wheel_t::kick() {
-  if (parked_runner_) {
-    auto h = std::exchange(parked_runner_, nullptr);
-    ctx_.spawn(h);
-  }
+void timer_wheel_t::ensure_runner() {
+  if (runner_live_ || !running_) return;
+  runner_live_ = true;
+  // shared_from_this rather than a raw this: see run().
+  ctx_.spawn(run(shared_from_this()));
 }
 
 void timer_wheel_t::advance() {
@@ -90,25 +91,28 @@ void timer_wheel_t::advance() {
   }
 }
 
-coro_t<void> timer_wheel_t::run() {
-  while (running_ && ctx_.is_running()) {
-    // Nothing to do: park instead of keeping a tick SQE in flight. arm() and
-    // stop() kick the handle stashed by park_awaiter; while parked the wheel
-    // shows up as nothing at all to the context (no io, no ready task), which
-    // is exactly right — an idle wheel should not hold the loop open.
-    while (running_ && ctx_.is_running() && armed_ == 0) {
-      co_await park_awaiter{*this};
-      parked_runner_ = nullptr;  // the kick that resumed us is consumed
-    }
-    if (!running_ || !ctx_.is_running()) break;
+coro_t<void> timer_wheel_t::run(std::shared_ptr<timer_wheel_t> self) {
+  // The reference is held by the frame, not by the caller: the owner may drop its
+  // shared_ptr at any suspension point below (a client_t living in a coroutine
+  // frame does exactly that when the frame dies), and every member touched after a
+  // resume — running_, armed_, the slots — would otherwise be freed memory.
+  auto& wheel = *self;
+  auto& ctx = wheel.ctx_;
+  // An empty wheel has nothing to count down, so the loop ends rather than parking:
+  // the frame goes back to the pool, and if this was the last reference the wheel
+  // goes with it. The next arm() starts a fresh runner.
+  while (wheel.armed_ > 0 && wheel.running_ && ctx.is_running()) {
     // as_system: the tick must not count as user work, or a context with an
     // armed wheel could never reach user_idle() and graceful shutdown would
     // never start draining.
-    auto ok = co_await as_system(sleep(ctx_, tick_));
+    auto ok = co_await as_system(sleep(ctx, wheel.tick_));
     if (!ok) break;
-    if (!running_) break;
-    advance();
+    if (!wheel.running_) break;
+    // May fire callbacks that arm more timers; the loop condition sees those, so
+    // no runner is spawned on top of this one.
+    wheel.advance();
   }
+  wheel.runner_live_ = false;
   co_return;
 }
 

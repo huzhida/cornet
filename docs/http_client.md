@@ -2,10 +2,10 @@
 
 ## 概述
 
-`http::client_t` 是绑定在单个 `context_t` 上的 HTTP/1.1 客户端：连接池、DNS 缓存、时间轮、选项都由它持有，一次请求就是几块池化缓冲加一个协程。
+`http::client_t` 是绑定在单个 `context_t` 上的 HTTP/1.1 客户端：连接池、DNS 缓存、选项都由它持有（时间轮借用 context 的），一次请求就是几块池化缓冲加一个协程。
 
 ```
-        client_t                 门面：选项 + 连接池 + DNS 缓存 + 时间轮
+        client_t                 门面：选项 + 连接池 + DNS 缓存（+ context 的时间轮）
            │  request() / get() / post() / stream() / upload()
            ▼
      client_request_t            出向请求：暂存 head/hdr/body，send() 拿响应
@@ -190,7 +190,7 @@ cli.pool().clear();        // 关掉所有连接
 
 ## 超时
 
-全部走共享时间轮，**不用 per-op link_timeout**：后者会让 SQE/CQE 数量翻倍，而整个 client 只需要一个 tick SQE，无论多少连接。
+全部走共享时间轮，**不用 per-op link_timeout**：后者会让 SQE/CQE 数量翻倍，而一个 tick SQE 就够整个 context 用，无论多少连接、多少 client。
 
 | 选项 | 覆盖阶段 |
 |---|---|
@@ -449,7 +449,7 @@ cmake --build --preset debug --target unit
 - `client_t` 不可跨线程共享，一个 context 一个；`runtime_t` 下每个 worker 各建一个。
 - 请求还在飞的时候销毁 `client_t` 是调用方错误：`close()` 与析构会关掉池里所有连接。
 - `client_response_t` / `client_stream_t` / `client_upload_t` 都只可移动。`client_stream_t` 与 `client_upload_t` 持有连接期间会占用池里一个名额。
-- 时间轮在第一次用到 client 时才 spawn，一个 client 一个 tick SQE。server 与 client 同进程时各有一个，暂不合并（合并会让核心依赖 http 模块的类型）。
+- 时间轮由 context 按 tick 分发（`ctx.wheel_for(timer_tick)` 返回一份 `shared_ptr`）：同 context 上的 server、多个 client 只要 tick 相同就用同一个轮子，一个 tick SQE。空闲时两级都不留：没有 armed 节点时 runner 直接退出（下次 `arm()` 再拉起来），而 registry 只持 weak，最后一个持有者走了轮子本身（4KB 槽位）也一起回收。启停不用调用方管，client 只在 `close()` 里摘掉自己的节点。
 - 窗口回绕在 server 侧也已用上（`src/http/server/connection.cc`），两端的 body 读取路径行为一致。
 
 ## URL 解析缓存（parse cache）
