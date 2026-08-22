@@ -28,12 +28,11 @@ void runtime_t::start(std::function<void(size_t, context_t&)> init_fn, bool keep
   // used to cover just the calling thread, so e.g. SIGINT hitting the main
   // thread of a multi-thread runtime still killed the process. SIGPIPE must
   // never fire at all: a send racing a peer close would otherwise kill us.
-  sigset_t mask;
-  sigemptyset(&mask);
-  sigaddset(&mask, SIGINT);
-  sigaddset(&mask, SIGTERM);
-  sigaddset(&mask, SIGPIPE);
-  pthread_sigmask(SIG_BLOCK, &mask, nullptr);
+  sigemptyset(&mask_);
+  sigaddset(&mask_, SIGINT);
+  sigaddset(&mask_, SIGTERM);
+  sigaddset(&mask_, SIGPIPE);
+  pthread_sigmask(SIG_BLOCK, &mask_, nullptr);
 
   std::latch init_done(thread_nr_);
 
@@ -83,6 +82,14 @@ void runtime_t::stop_and_join() {
 void runtime_t::join() {
   for (auto& w : workers_) {
     if (w.joinable()) w.join();
+  }
+}
+
+void runtime_t::wait_signal(bool shutdown) {
+  int signal;
+  sigwait(&mask_, &signal);
+  if(shutdown) {
+    runtime_t::shutdown();
   }
 }
 
