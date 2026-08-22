@@ -466,6 +466,9 @@ struct generator_t : task_t {
   std::default_sentinel_t end() { return {}; }
 };
 
+template<typename V>
+using gen_t = generator_t<V>;
+
 } // cornet
 
 #endif //CORNET_CORO_H

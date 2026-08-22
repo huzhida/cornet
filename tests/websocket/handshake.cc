@@ -80,7 +80,6 @@ TEST(ws_handshake, base64_vectors) {
   EXPECT_EQ(enc("fooba"), "Zm9vYmE=");
   EXPECT_EQ(enc("foobar"), "Zm9vYmFy");
 
-  const std::string raw = "<<?!??!>>";
   char small[2];
   EXPECT_FALSE(websocket::base64_decode("Zm9vYmFy", small, sizeof(small)));
 }

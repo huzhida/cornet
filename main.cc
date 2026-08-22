@@ -1,7 +1,5 @@
-#include "cornet/http/server/message.h"
 #include "cornet/net/socket.h"
-#include "cornet/concurrency/combinators.h"
-#include "cornet/http.h"
+#include "cornet/scheduling/context.h"
 
 using namespace cornet;
 
@@ -61,7 +59,7 @@ int main(int argc, char* argv[]) {
   ctx.spawn(server(ctx));
   ctx.spawn(client(ctx));
 
-  
+
   ctx.run();
 
   return 0;
