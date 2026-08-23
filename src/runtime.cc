@@ -1,4 +1,5 @@
 #include "cornet/scheduling/runtime.h"
+#include <chrono>
 #include <latch>
 #include <csignal>
 #include <pthread.h>
@@ -86,10 +87,13 @@ void runtime_t::join() {
 }
 
 void runtime_t::wait_signal(bool shutdown) {
+  sigemptyset(&mask_);
+  sigaddset(&mask_, SIGINT);
+  sigaddset(&mask_, SIGTERM);
   int signal;
   sigwait(&mask_, &signal);
   if(shutdown) {
-    runtime_t::shutdown();
+    runtime_t::shutdown(std::chrono::seconds(1));
   }
 }
 
