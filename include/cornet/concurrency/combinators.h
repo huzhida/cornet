@@ -172,10 +172,6 @@ coro_cancellable_awaiter<V> with_cancel(context_t& ctx, cancelable_coro_t<V> cor
  */
 
 namespace detail {
-  template<typename T> struct is_expected : std::false_type {};
-  template<typename T> struct is_expected<expected<T>> : std::true_type {};
-  template<> struct is_expected<expected<void>> : std::true_type {};
-
   /**
    * @brief shared machinery of the coroutine timeout awaiter (both void and
    * value flavours). Lives in the awaiting coroutine's frame.
@@ -290,7 +286,7 @@ struct coro_timeout_awaiter<void> : detail::coro_timeout_awaiter_base<void> {
 
 template<typename V, typename Rep, typename Period>
 coro_timeout_awaiter<V> with_timeout(context_t& ctx, cancelable_coro_t<V> coro, std::chrono::duration<Rep, Period> duration) {
-  static_assert(std::is_void_v<V> || detail::is_expected<V>::value,
+  static_assert(std::is_void_v<V> || detail::is_expected_v<V>,
                 "coroutine-level with_timeout requires ccoro_t<expected<T>> or ccoro_t<void>");
   return coro_timeout_awaiter<V>{ctx, std::move(coro), duration};
 }
@@ -337,7 +333,7 @@ void chain_to(std::coroutine_handle<> self, std::coroutine_handle<> parent) {
  */
 template<typename... Ts>
 struct when_all_state {
-  std::tuple<expected<Ts>...> results;
+  std::tuple<result_slot_t<Ts>...> results;
   int remaining{int(sizeof...(Ts))};
   int refs{int(sizeof...(Ts)) + 1};
   std::coroutine_handle<> continuation{nullptr};
@@ -345,7 +341,7 @@ struct when_all_state {
 
 template<typename... Ts>
 struct when_any_state {
-  std::tuple<expected<Ts>...> results;
+  std::tuple<result_slot_t<Ts>...> results;
   bool done{false};
   int completed_index{-1};
   int refs{int(sizeof...(Ts)) + 1};
@@ -444,10 +440,12 @@ void launch_any_impl(context_t& ctx, State* state, Tuple& coros, std::index_sequ
 
 /**
  * @brief when_all result type
+ * Each slot is expected<T>; a coroutine already returning expected<U>
+ * flattens into a single expected<U> (see result_slot_t).
  */
 template<typename... Ts>
 struct when_all_result {
-  std::tuple<expected<Ts>...> results;
+  std::tuple<detail::result_slot_t<Ts>...> results;
 
   template<size_t I>
   auto& get() { return std::get<I>(results); }
@@ -458,10 +456,12 @@ struct when_all_result {
 
 /**
  * @brief when_any result type
+ * Each slot is expected<T>; a coroutine already returning expected<U>
+ * flattens into a single expected<U> (see result_slot_t).
  */
 template<typename... Ts>
 struct when_any_result {
-  std::tuple<expected<Ts>...> results;
+  std::tuple<detail::result_slot_t<Ts>...> results;
   int index{-1};
 
   template<size_t I>

@@ -78,12 +78,34 @@ if (a) {
 
 ```cpp
 when_all_result<Ts...> {
-    std::tuple<expected<Ts>...> results;
+    std::tuple<expected<Ts>...> results;   // 见下方“拍平规则”
 
     template<size_t I> auto& get();        // 按索引访问
     template<size_t I> const auto& get() const;
 };
 ```
+
+### 拍平规则
+
+由于全库错误类型统一为 `error_t`，嵌套的 expected 不携带额外信息。因此当协程
+本身返回 `expected<U>` 时，结果槽位会**拍平**为单层 `expected<U>`，而不是
+`expected<expected<U>>`：
+
+```cpp
+auto result = co_await when_all(ctx,
+    cli.get(url_a),   // coro_t<expected<response_t>>
+    cli.get(url_b)    // coro_t<expected<response_t>>
+);
+
+auto& a = result.get<0>();  // expected<response_t>，单层
+if (a) {
+    use(a->body());
+}
+```
+
+拍平后框架错误（子协程抛出未捕获异常）与业务错误共用同一槽位，通过
+`error.domain == error_domain::Exception` 区分。`when_any` 与
+`task_scope` 的 `spawn(task, expected_out)` 遵循同样的拍平规则。
 
 ### 错误处理
 
@@ -124,7 +146,7 @@ auto& data = result.get<0>();       // 仅 winner 对应的 expected 有效
 
 ```cpp
 when_any_result<Ts...> {
-    std::tuple<expected<Ts>...> results;
+    std::tuple<expected<Ts>...> results;   // 同样遵循拍平规则
     int index{-1};  // 第一个完成的协程索引
 
     template<size_t I> auto& get();
@@ -472,6 +494,9 @@ co_await task_scope(ctx, [&](scope_t& scope) -> coro_t<void> {
 if (r1) { use(*r1); }
 if (!r2) { log_error(r2.error()); }
 ```
+
+若协程本身返回 `expected<U>`，`out` 直接就是 `expected<U>`（拍平，见
+when_all 的“拍平规则”）；此重载也取代了 `spawn(task, U&)` 原始结果重载。
 
 ### scope 内取消
 

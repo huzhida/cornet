@@ -3,6 +3,8 @@
 
 #include <gtest/gtest.h>
 
+#include <type_traits>
+
 #include "ephemeral_port.h"
 
 using namespace cornet;
@@ -142,6 +144,109 @@ TEST_F(combinators, when_any_basic) {
     auto& winner = result.get<0>();
     EXPECT_TRUE(winner.has_value());
     EXPECT_EQ(winner.value(), 1);
+    co_return;
+  };
+  ctx->spawn(test(*ctx));
+  ctx->run();
+}
+
+TEST_F(combinators, when_all_flattens_expected_results) {
+  auto test = [](context_t& ctx) -> coro_t<void> {
+    auto plain = []() -> coro_t<int> {
+      co_return 1;
+    };
+    auto ok = []() -> coro_t<expected<int>> {
+      co_return 42;
+    };
+    auto fail = []() -> coro_t<expected<int>> {
+      co_return unexpected(EIO);
+    };
+
+    auto result = co_await when_all(ctx, plain(), ok(), fail());
+    // expected-returning coroutines flatten into a single expected slot
+    static_assert(std::is_same_v<decltype(result.get<1>()), expected<int>&>);
+    static_assert(std::is_same_v<decltype(result.get<2>()), expected<int>&>);
+    EXPECT_EQ(result.get<0>().value(), 1);
+    EXPECT_TRUE(result.get<1>().has_value());
+    EXPECT_EQ(result.get<1>().value(), 42);
+    EXPECT_FALSE(result.get<2>().has_value());
+    EXPECT_EQ(result.get<2>().error().code, EIO);
+    co_return;
+  };
+  ctx->spawn(test(*ctx));
+  ctx->run();
+}
+
+TEST_F(combinators, when_all_flattens_thrown_exception) {
+  auto test = [](context_t& ctx) -> coro_t<void> {
+    auto boom = []() -> coro_t<expected<int>> {
+      throw std::runtime_error("boom");
+      co_return 0;
+    };
+
+    auto result = co_await when_all(ctx, boom());
+    // framework-level error shares the flattened slot, tagged by its domain
+    EXPECT_FALSE(result.get<0>().has_value());
+    EXPECT_EQ(result.get<0>().error().domain, error_domain::Exception);
+    co_return;
+  };
+  ctx->spawn(test(*ctx));
+  ctx->run();
+}
+
+TEST_F(combinators, when_any_flattens_expected_results) {
+  auto test = [](context_t& ctx) -> coro_t<void> {
+    auto fast = [&ctx]() -> coro_t<expected<int>> {
+      co_await sleep(ctx, std::chrono::milliseconds(1));
+      co_return 7;
+    };
+    auto slow = [&ctx]() -> coro_t<expected<int>> {
+      co_await sleep(ctx, std::chrono::milliseconds(10));
+      co_return unexpected(EIO);
+    };
+
+    auto result = co_await when_any(ctx, fast(), slow());
+    static_assert(std::is_same_v<decltype(result.get<0>()), expected<int>&>);
+    EXPECT_EQ(result.index, 0);
+    EXPECT_TRUE(result.get<0>().has_value());
+    EXPECT_EQ(result.get<0>().value(), 7);
+    co_return;
+  };
+  ctx->spawn(test(*ctx));
+  ctx->run();
+}
+
+TEST_F(combinators, task_scope_spawn_flattens_expected_results) {
+  auto test = [](context_t& ctx) -> coro_t<void> {
+    expected<int> r1, r2, r3;
+
+    auto ok = [&ctx]() -> coro_t<expected<int>> {
+      co_await sleep(ctx, std::chrono::milliseconds(1));
+      co_return 100;
+    };
+    auto fail = [&ctx]() -> coro_t<expected<int>> {
+      co_await sleep(ctx, std::chrono::milliseconds(1));
+      co_return unexpected(EACCES);
+    };
+    auto boom = [&ctx]() -> coro_t<expected<int>> {
+      co_await sleep(ctx, std::chrono::milliseconds(1));
+      throw std::runtime_error("deliberate failure");
+      co_return 0;
+    };
+
+    co_await task_scope(ctx, [&](scope_t& scope) -> coro_t<void> {
+      scope.spawn(ok(), r1);    // flattened: expected<int>, not expected<expected<int>>
+      scope.spawn(fail(), r2);
+      scope.spawn(boom(), r3);
+      co_return;
+    });
+
+    EXPECT_TRUE(r1.has_value());
+    EXPECT_EQ(r1.value(), 100);
+    EXPECT_FALSE(r2.has_value());
+    EXPECT_EQ(r2.error().code, EACCES);
+    EXPECT_FALSE(r3.has_value());
+    EXPECT_EQ(r3.error().domain, error_domain::Exception);
     co_return;
   };
   ctx->spawn(test(*ctx));

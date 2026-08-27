@@ -3,6 +3,7 @@
 
 #include <cstring>
 #include <netdb.h>
+#include <type_traits>
 #include <utility>
 
 namespace cornet {
@@ -204,6 +205,29 @@ class expected<void> {
   error_t err_;
   bool ok_;
 };
+
+namespace detail {
+
+template<typename T> struct is_expected : std::false_type {};
+template<typename T> struct is_expected<expected<T>> : std::true_type {};
+template<typename T>
+inline constexpr bool is_expected_v = is_expected<T>::value;
+
+/**
+ * @brief result slot type used by the when_* combinators and task_scope.
+ *
+ * error_t is one global error type, so a nested expected carries no extra
+ * information: a coroutine that already returns expected<U> collapses into
+ * expected<U> instead of expected<expected<U>>. Framework-level errors
+ * (exceptions caught by the combinator) land in the same slot and stay
+ * distinguishable from coroutine-level errors via
+ * error.domain == error_domain::Exception.
+ */
+template<typename T> struct result_slot { using type = expected<T>; };
+template<typename U> struct result_slot<expected<U>> { using type = expected<U>; };
+template<typename T> using result_slot_t = typename result_slot<T>::type;
+
+} // namespace detail
 
 } // namespace cornet
 
