@@ -99,11 +99,15 @@ public:
   /**
    * @brief spawn a coroutine and store its result in the provided reference.
    * Safe because the scope guarantees the child completes before scope exits.
-   * @tparam T coroutine return type (non-void)
+   * Not available for expected-returning coroutines: use the expected<T>&
+   * overload below, whose slot flattens into exactly the coroutine's own
+   * expected type.
+   * @tparam T coroutine return type (non-void, non-expected)
    * @param task the coroutine to run
    * @param out reference to store the result (populated on success)
    */
   template<typename T>
+    requires (!detail::is_expected_v<T>)
   void spawn(coro_t<T> task, T& out) {
     active_count_++;
     ctx_.spawn(scoped_runner_with_result(std::move(task), out, *this));
@@ -112,12 +116,14 @@ public:
   /**
    * @brief spawn a coroutine and store its result as expected<T>.
    * Captures both success and error cases without propagating exceptions.
+   * A coroutine already returning expected<U> flattens into expected<U>&
+   * rather than expected<expected<U>>& (see result_slot_t).
    * @tparam T coroutine return type (non-void)
    * @param task the coroutine to run
    * @param out reference to expected<T> that receives the result or error
    */
   template<typename T>
-  void spawn(coro_t<T> task, expected<T>& out) {
+  void spawn(coro_t<T> task, detail::result_slot_t<T>& out) {
     active_count_++;
     ctx_.spawn(scoped_runner_with_expected(std::move(task), out, *this));
   }
@@ -225,10 +231,10 @@ private:
   }
 
   /**
-   * @brief runner for coro_t<T> with result stored as expected<T>
+   * @brief runner for coro_t<T> with result stored as expected<T> (flattened)
    */
   template<typename T, typename Scope>
-  static coro_t<void> scoped_runner_with_expected(coro_t<T> task, expected<T>& out, Scope& s) {
+  static coro_t<void> scoped_runner_with_expected(coro_t<T> task, detail::result_slot_t<T>& out, Scope& s) {
     try {
       out = co_await task;
     } catch (const std::exception& e) {
