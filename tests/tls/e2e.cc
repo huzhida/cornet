@@ -45,7 +45,8 @@ namespace {
 void run_tls_e2e_test(const std::function<void(server_t&)>& setup,
                       const std::function<client_options_t()>& client_opts,
                       const std::function<coro_t<void>(client_t&, uint16_t)>& body,
-                      server_t** published = nullptr) {
+                      connection_metrics_t* metrics = nullptr
+                    ) {
   context_t server_ctx;
   std::atomic<uint16_t> server_port{0};
   std::atomic<bool> server_ready{false};
@@ -68,7 +69,6 @@ void run_tls_e2e_test(const std::function<void(server_t&)>& setup,
         .address = "127.0.0.1",
         .tls = *tls_ctx,
     });
-    if (published) *published = &server;
     setup(server);
 
     if (auto ok = server.listen(); !ok) {
@@ -80,6 +80,7 @@ void run_tls_e2e_test(const std::function<void(server_t&)>& setup,
     server_ctx.spawn(server.serve());
     server_ready.store(true, std::memory_order_release);
     server_ctx.run();
+    if (metrics) *metrics = server.metrics();
   });
 
   while (!server_ready.load(std::memory_order_acquire) &&
@@ -219,7 +220,7 @@ TEST(tls_e2e, wrong_ca_is_refused_with_verify_error) {
 // Plain HTTP spoken to a TLS port must fail predictably, and the server must
 // shrug it off: the next real TLS client is served like nothing happened.
 TEST(tls_e2e, plain_http_to_tls_port_is_rejected) {
-  server_t* published = nullptr;
+  connection_metrics_t metrics;
   expected<client_response_t> plain = http_unexpected(http_error_t::InvalidState);
   expected<client_response_t> after = http_unexpected(http_error_t::InvalidState);
 
@@ -234,11 +235,10 @@ TEST(tls_e2e, plain_http_to_tls_port_is_rejected) {
         plain = co_await tls_cli.get("http://127.0.0.1:" + std::to_string(port) + "/x");
         after = co_await tls_cli.get(url_for(port, "/x"));
       },
-      &published);
+      &metrics);
 
   EXPECT_FALSE(plain.has_value());
-  ASSERT_TRUE(published != nullptr);
-  EXPECT_GE(published->metrics().tls_handshake_errors, 1u);
+  EXPECT_GE(metrics.tls_handshake_errors, 1u);
   ASSERT_TRUE(after.has_value()) << "the server must survive a garbage handshake";
   EXPECT_EQ(after->body(), "x");
 }

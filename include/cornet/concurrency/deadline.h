@@ -94,6 +94,7 @@ class deadline_t {
    * only way to unlatch.
    */
   void set_budget(std::chrono::milliseconds d) {
+    if (fired_) return;
     budget_ns_ = d.count() > 0
                      ? ctx_.coarse_now_ns() + uint64_t(d.count()) * 1'000'000ull
                      : 0;
@@ -109,6 +110,7 @@ class deadline_t {
    * capped op fails now rather than running one more phase for free.
    */
   void cap(std::chrono::milliseconds d) {
+    if (fired_) return;
     if (budget_ns_ != 0) {
       auto now = ctx_.coarse_now_ns();
       if (now >= budget_ns_) {
