@@ -27,16 +27,14 @@ scheduler_t::~scheduler_t() {
   executor_.terminate();
 }
 
-void scheduler_t::resume_ready(context_t& ctx) {
+void scheduler_t::resume_ready(context_t& ctx, bool need_adapt) {
   if (ready_tasks_.empty()) return;
-  auto t0 = std::chrono::steady_clock::now();
+  scoped_timer_t runtime_timer(stats.task_runtime_ns, need_adapt);
   while (!ready_tasks_.empty() && stats.tasks_resumed < cpu_batch_) {
     resume_task();
     stats.tasks_resumed++;
     CORNET_METRICS_ADD(ctx.metrics().tasks_resumed);
   }
-  stats.task_runtime_ns +=
-    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
 }
 
 void scheduler_t::resume_task() {
@@ -81,50 +79,45 @@ void scheduler_t::sched(context_t& ctx) {
   CORNET_METRICS_SCOPE_TIMER(ctx.metrics().sched_latency);
   CORNET_METRICS_ADD(ctx.metrics().sched_cycles);
   auto& uring = ctx.io_uring();
-  uint32_t cqes = 0;
+  bool need_adapt = (++adapt_phase_ >= kAdaptInterval);
   stats.reset();
-  auto start = std::chrono::steady_clock::now();
-  // harvest remote queue handles
-  harvest_remote();
-  // harvest async completed handles
-  harvest_async();
-  resume_ready(ctx);
-  // Reap completions from earlier submissions before touching the SQ:
-  // peeking costs no syscall, and anything reaped here resumes in this
-  // same cycle rather than the next one.
-  if (uring.running_task_nr() > 0) {
-    cqes = uring.peek_cqes(ctx);
-  }
-  resume_ready(ctx);
-  if (!ready_tasks_.empty()) {
-    // busy: flush this cycle's SQEs and keep rolling; their completions are
-    // reaped on a following cycle
-    uring.submit();
-  } else {
-    // park token + re-check on both producer queues: Dekker handshake with
-    // wakeup(), never blocks with remote work pending
-    context_t::park_scope park(ctx);
-    if (harvest_remote() == 0 && harvest_async() == 0) {
-      // One io_uring_enter both flushes pending SQEs and waits: an
-      // independent submit() in front of the wait would be a second syscall
-      // buying nothing on this edge path.
-      cqes += uring.submit_and_wait_cqes(ctx, 1, io_wait_);
-    } else {
-      uring.submit();
+  {
+    scoped_timer_t loop_timer(stats.loop_runtime_ns, need_adapt);
+    // harvest remote queue handles
+    harvest_remote();
+    // harvest async completed handles
+    harvest_async();
+    resume_ready(ctx, need_adapt);
+    // Reap completions from earlier submissions before touching the SQ:
+    // peeking costs no syscall, and anything reaped here resumes in this
+    // same cycle rather than the next one.
+    if (uring.running_task_nr() > 0) {
+      stats.cqes_ready = uring.peek_cqes(ctx);
     }
+    resume_ready(ctx, need_adapt);
+    if (!ready_tasks_.empty()) {
+      // busy: flush this cycle's SQEs and keep rolling; their completions are
+      // reaped on a following cycle
+      uring.submit();
+    } else {
+      // park token + re-check on both producer queues: Dekker handshake with
+      // wakeup(), never blocks with remote work pending
+      context_t::park_scope park(ctx);
+      if (harvest_remote() == 0 && harvest_async() == 0) {
+        // One io_uring_enter both flushes pending SQEs and waits: an
+        // independent submit() in front of the wait would be a second syscall
+        // buying nothing on this edge path.
+        stats.cqes_ready += uring.submit_and_wait_cqes(ctx, 1, io_wait_);
+      } else {
+        uring.submit();
+      }
+    }
+    // Completions reaped above, and remote/async work admitted while parking,
+    // also run in this same cycle.
+    resume_ready(ctx, need_adapt);
+    stats.inflight = uring.running_task_nr();
   }
-  // Completions reaped above, and remote/async work admitted while parking,
-  // also run in this same cycle.
-  resume_ready(ctx);
-
-  stats.cqes_ready = cqes;
-  stats.inflight = uring.running_task_nr();
-  stats.loop_runtime_ns +=
-    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
-  // Sample-and-hold: adapt() reads only the current cycle's stats, so calling
-  // it every cycle buys nothing a slower EWMA can't absorb — throttle to one
-  // in kAdaptInterval and skip the control work on the rest.
-  if (++adapt_phase_ >= kAdaptInterval) {
+  if (need_adapt) {
     adapt_phase_ = 0;
     adapt();
   }

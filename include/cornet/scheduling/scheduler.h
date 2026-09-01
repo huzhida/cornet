@@ -75,6 +75,23 @@ struct scheduler_t {
   using queue_t = ring_queue_t;
 
   /**
+   * @brief scoped timer 
+   */
+  struct scoped_timer_t {
+    uint64_t& elapsed_ns_;
+    std::chrono::steady_clock::time_point start;
+
+    scoped_timer_t(uint64_t& elapsed_ns, bool enabled = true)
+    : elapsed_ns_(elapsed_ns), start(enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}) {}
+
+    ~scoped_timer_t() {
+      if (start != std::chrono::steady_clock::time_point{}) {
+        elapsed_ns_ += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
+      }
+    }
+  };
+
+  /**
    * @brief statistics collected during a single sched() cycle.
    * Used by adapt() to tune cpu_batch and io_wait based on
    * I/O completion pressure and CPU saturation.
@@ -171,7 +188,7 @@ private:
   // every-cycle cadence, so skipping 7/8 calls stretches the time constant
   // ~8x; that is fine (cycles run at 10K+/sec under load) and saves the 4
   // steady_clock reads + EWMA divides on the skipped cycles.
-  static constexpr uint32_t kAdaptInterval = 8;
+  static constexpr uint32_t kAdaptInterval = 1;
   uint32_t adapt_phase_{0};
   // min batch
   static constexpr size_t min_batch_ = 32;
@@ -185,7 +202,7 @@ private:
   // resume one task from the ready queue
   void resume_task();
   // resume ready tasks up to cpu_batch_, measuring time into stats
-  void resume_ready(context_t& ctx);
+  void resume_ready(context_t& ctx, bool need_adapt);
   // collect completed executor tasks into ready queue, returns how many moved
   size_t harvest_async();
   // drain the cross-thread queue into the ready queue, returns how many moved
