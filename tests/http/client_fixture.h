@@ -237,7 +237,8 @@ dial(conn_env_t& env, uint16_t port) {
   auto c = co_await sock.connect(env.ctx, "127.0.0.1", port);
   if (!c) co_return cornet::unexpected(c.error());
   co_return cornet::http::client_connection_t::adopt(env.ctx, std::move(sock), env.opt, env.pool,
-                                                     env.wheel, env.metrics, "127.0.0.1", port);
+                                                     env.wheel_share, env.metrics, "127.0.0.1",
+                                                     port);
 }
 
 } // namespace cornet_test

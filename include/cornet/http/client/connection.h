@@ -14,6 +14,7 @@
 #include "cornet/http/common/parser.h"
 #include "cornet/http/common/protocol.h"
 #include "cornet/http/common/serializer.h"
+#include "cornet/concurrency/deadline.h"
 #include "cornet/concurrency/timer_wheel.h"
 #include "cornet/http/common/url.h"
 #include "cornet/tls/transport.h"
@@ -151,8 +152,8 @@ void frame_request_head(out_buffer_t& out, const client_request_t& req,
 class client_connection_t {
  public:
   client_connection_t(context_t& ctx, tls::transport_t transport, const client_options_t& opt,
-                      buffer_pool_t& pool, timer_wheel_t& wheel, client_metrics_t& metrics,
-                      std::string host, uint16_t port);
+                      buffer_pool_t& pool, std::shared_ptr<timer_wheel_t> wheel,
+                      client_metrics_t& metrics, std::string host, uint16_t port);
   ~client_connection_t();
 
   client_connection_t(const client_connection_t&) = delete;
@@ -163,9 +164,9 @@ class client_connection_t {
    * @param pre a pre-resolved address, e.g. from the client's dns cache
    */
   CORNET_NODISCARD static coro_t<expected<std::unique_ptr<client_connection_t>>> open(
-      context_t& ctx, const client_options_t& opt, buffer_pool_t& pool, timer_wheel_t& wheel,
-      client_metrics_t& metrics, std::string_view host, uint16_t port, scheme_t scheme,
-      const resolved_address* pre = nullptr);
+      context_t& ctx, const client_options_t& opt, buffer_pool_t& pool,
+      std::shared_ptr<timer_wheel_t> wheel, client_metrics_t& metrics, std::string_view host,
+      uint16_t port, scheme_t scheme, const resolved_address* pre = nullptr);
 
   /**
    * @brief adopt an already connected socket. For tests and for callers that did
@@ -173,7 +174,8 @@ class client_connection_t {
    */
   CORNET_NODISCARD static expected<std::unique_ptr<client_connection_t>> adopt(
       context_t& ctx, tcp::socket_t sock, const client_options_t& opt, buffer_pool_t& pool,
-      timer_wheel_t& wheel, client_metrics_t& metrics, std::string host, uint16_t port);
+      std::shared_ptr<timer_wheel_t> wheel, client_metrics_t& metrics, std::string host,
+      uint16_t port);
 
   /** @brief whether this connection speaks TLS. */
   CORNET_NODISCARD bool is_tls() const { return scheme_ == scheme_t::Https; }
@@ -245,7 +247,7 @@ class client_connection_t {
    * @brief whether this connection can serve another request.
    */
   CORNET_NODISCARD bool reusable() const {
-    return !broken_ && !timed_out_ && keep_alive_ && body_complete_;
+    return !broken_ && !deadline_.fired() && keep_alive_ && body_complete_;
   }
 
   /**
@@ -269,7 +271,7 @@ class client_connection_t {
   /**
    * @brief set the deadline for the whole exchange. Zero clears it.
    */
-  void set_deadline(std::chrono::milliseconds total);
+  void set_deadline(std::chrono::milliseconds total) { deadline_.set_budget(total); }
 
   /**
    * @brief ask the current operation to stop; the connection is not reusable after.
@@ -285,7 +287,7 @@ class client_connection_t {
   CORNET_NODISCARD std::string_view host() const { return host_; }
   CORNET_NODISCARD uint16_t port() const { return port_; }
   CORNET_NODISCARD uint32_t exchanges() const { return exchanges_; }
-  CORNET_NODISCARD bool timed_out() const { return timed_out_; }
+  CORNET_NODISCARD bool timed_out() const { return deadline_.fired(); }
 
   // ── the headers of a response still being streamed ──
 
@@ -314,7 +316,6 @@ class client_connection_t {
   void frame_head(client_request_t& req, bool chunked_upload);
   void stage_request(client_request_t& req, bool head_only);
   CORNET_NODISCARD coro_t<expected<void>> write_staged();
-  void advance_iovecs(uint32_t written);
 
   /**
    * @brief write the request and read until the final response headers are in.
@@ -343,16 +344,16 @@ class client_connection_t {
   CORNET_NODISCARD coro_t<expected<uint32_t>> refill_body();
   CORNET_NODISCARD expected<void> append_body(std::string_view run);
 
-  void arm_phase(std::chrono::milliseconds phase);
-
   context_t&               ctx_;
   tls::transport_t         tr_;
   const client_options_t&  opt_;
   buffer_pool_t&           pool_;
   timer_wheel_t&           wheel_;
   client_metrics_t&        metrics_;
-  canceler_t               canceler_;
-  timer_node_t             timer_{};
+  // the write/response/body phase deadlines of the exchange in flight; its
+  // canceler IS the kill switch for exchange io: abort() is terminal anyway,
+  // so no scope survives that would need shielding from a root latch
+   deadline_t               deadline_;
   timer_node_t             idle_timer_{};
 
   parser_t   parser_{parser_t::type_t::Response};
@@ -382,7 +383,6 @@ class client_connection_t {
   // is rewound and refilled for every read, which is what lets a body be larger
   // than the buffer
   uint32_t body_window_{0};
-  uint64_t deadline_ns_{0};
   uint32_t exchanges_{0};
 
   bool headers_done_{false};
@@ -390,7 +390,6 @@ class client_connection_t {
   bool keep_alive_{false};
   bool responded_{false};
   bool broken_{false};
-  bool timed_out_{false};
   bool streaming_{false};
   bool chunked_upload_{false};
 };

@@ -225,8 +225,9 @@ keep-alive 池必然存在「取出的连接其实已被对端关掉」的竞态
 
 ## DNS
 
-复用 `cornet::resolve()`（getaddrinfo 卸载到线程池），在其上加一层 per-client 缓存：
+复用 `cornet::resolve()`（数字 IP 同步返回，仅域名走 getaddrinfo 线程池），在其上加一层 per-client 缓存：
 
+- 数字 IP 字面量在缓存之前就短路——没有值得缓存的东西，也不计入 `dns_lookups`；
 - 按 **host** 缓存（地址与端口无关），出手时把端口补进副本，所以查表可以直接用 `string_view`，不用拼 key；
 - TTL `dns_cache_ttl`，容量 `dns_cache_entries`，满了先清过期项；
 - 命中就省掉一次线程池往返——这是每请求延迟里最容易被忽视的一块。

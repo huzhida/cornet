@@ -109,7 +109,7 @@ namespace {
 // wire — response splitting for server code, request smuggling for a client
 // that forwards tainted input. Nothing else in the line grammar protects this,
 // because put() appends bytes verbatim.
-CORNET_MAYBE_UNUSED bool has_crlf(std::string_view s) {
+bool has_crlf(std::string_view s) {
   return s.find('\r') != std::string_view::npos || s.find('\n') != std::string_view::npos;
 }
 

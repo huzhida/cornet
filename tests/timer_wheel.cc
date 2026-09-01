@@ -43,7 +43,7 @@ TEST_F(timer_wheel, fires_after_delay) {
   auto test = [](context_t& ctx, flag_t& f) -> coro_t<void> {
     auto wheel = ctx.wheel_for(5ms);
     wheel->arm(f.node, 10ms);
-    co_await sleep(ctx, 100ms);
+    co_await sleep(ctx, 30ms);
     EXPECT_TRUE(f.fired);
     EXPECT_EQ(wheel->armed_count(), 0u);
   };
@@ -72,7 +72,7 @@ TEST_F(timer_wheel, shared_per_tick) {
 TEST_F(timer_wheel, unarmed_wheel_never_ticks) {
   auto wheel = ctx->wheel_for(5ms);
   auto test = [](context_t& ctx) -> coro_t<void> {
-    co_await sleep(ctx, 50ms);
+    co_await sleep(ctx, 20ms);
   };
   ctx->spawn(test(*ctx));
   ctx->run();
@@ -88,15 +88,15 @@ TEST_F(timer_wheel, runner_comes_and_goes) {
   auto test = [](context_t& ctx, flag_t& first, flag_t& second) -> coro_t<void> {
     auto wheel = ctx.wheel_for(5ms);
     wheel->arm(first.node, 10ms);
-    co_await sleep(ctx, 60ms);
+    co_await sleep(ctx, 30ms);
     EXPECT_TRUE(first.fired);
     auto ticked = wheel->ticks();
     // nothing armed for a while: the runner is gone, so the wheel stands still
-    co_await sleep(ctx, 60ms);
+    co_await sleep(ctx, 30ms);
     EXPECT_EQ(wheel->ticks(), ticked);
     // and comes back for the next timer
     wheel->arm(second.node, 10ms);
-    co_await sleep(ctx, 60ms);
+    co_await sleep(ctx, 30ms);
     EXPECT_TRUE(second.fired);
     EXPECT_GT(wheel->ticks(), ticked);
   };
@@ -116,7 +116,7 @@ TEST_F(timer_wheel, reclaimed_when_last_tenant_leaves) {
     weak = wheel;
     auto test = [](context_t& ctx, timer_wheel_t& wheel, flag_t& f) -> coro_t<void> {
       wheel.arm(f.node, 10ms);
-      co_await sleep(ctx, 60ms);
+      co_await sleep(ctx, 30ms);
     };
     ctx->spawn(test(*ctx, *wheel, f));
     ctx->run();

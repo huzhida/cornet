@@ -5,6 +5,8 @@
 #include <spdlog/spdlog.h>
 
 #include "cornet/concurrency/combinators.h"
+#include "cornet/concurrency/deadline.h"
+#include "cornet/tls/dial.h"
 #include "cornet/http/common/parser.h"
 #include "cornet/http/common/serializer.h"
 #include "cornet/http/common/url.h"
@@ -36,27 +38,15 @@ struct handshake_result_t {
 /**
  * @brief write the request, read and parse the response.
  *
- * Cancelable so with_timeout can own the whole budget: the write and the
- * read are both windows a stuck peer could hold forever.
+ * Cancelable so the caller's phase deadline can own the budget: the write and
+ * the read are both windows a stuck peer could hold forever.
  */
 ccoro_t<expected<handshake_result_t>> http_upgrade_exchange(
     context_t& ctx, tls::transport_t& tr, std::string_view request,
     http::buffer_pool_t& pool) {
   // ── write the request (single gather-write, short-write safe) ──
   struct iovec iov{const_cast<char*>(request.data()), request.size()};
-  while (iov.iov_len > 0) {
-    expected<size_t> w;
-    if (!tr.is_tls()) {
-      auto r = co_await tr.plain_writev(ctx, &iov, 1);
-      w = r ? expected<size_t>(static_cast<size_t>(*r)) : unexpected(r.error());
-    } else {
-      w = co_await tr.writev(ctx, &iov, 1);
-    }
-    if (!w) co_return unexpected(w.error());
-    if (*w == 0) co_return unexpected(ECONNRESET);
-    iov.iov_base = static_cast<char*>(iov.iov_base) + *w;
-    iov.iov_len -= *w;
-  }
+  if (auto w = co_await tr.writev_all(ctx, &iov, 1); !w) co_return unexpected(w.error());
 
   // ── read until the parser flags the upgrade (or a full response) ──
   http::head_buffer_t in;
@@ -83,13 +73,7 @@ ccoro_t<expected<handshake_result_t>> http_upgrade_exchange(
     if (w.empty()) {
       co_return http_unexpected(http::http_error_t::HeaderTooLarge);
     }
-    expected<size_t> n;
-    if (!tr.is_tls()) {
-      auto r = co_await tr.plain_recv(ctx, w.data(), w.size());
-      n = r ? expected<size_t>(static_cast<size_t>(*r)) : unexpected(r.error());
-    } else {
-      n = co_await tr.recv(ctx, w.data(), w.size());
-    }
+    auto n = co_await tr.recv(ctx, w.data(), w.size());
     if (!n) co_return unexpected(n.error());
     if (*n == 0) co_return unexpected(ECONNRESET);
     in.commit(uint32_t(*n));
@@ -169,22 +153,6 @@ expected<std::string_view> validate_handshake_response(
   return websocket_unexpected(websocket_error_t::HandshakeFailed);
 }
 
-/**
- * @brief a connected-family socket wrapped in its transport.
- * The family is known only after resolve, so construction cannot be a
- * declaration at the top of connect().
- */
-tls::transport_t make_transport(sa_family_t family, int& fd) {
-  if (family == AF_INET6) {
-    tcp::v6::socket_t sock;
-    fd = sock.native_fd();
-    return tls::transport_t(std::move(sock));
-  }
-  tcp::v4::socket_t sock;
-  fd = sock.native_fd();
-  return tls::transport_t(std::move(sock));
-}
-
 } // namespace
 
 coro_t<expected<std::unique_ptr<session_t>>> connect(context_t& ctx,
@@ -215,29 +183,26 @@ coro_t<expected<std::unique_ptr<session_t>>> connect(context_t& ctx,
     co_return tls_unexpected(tls::tls_error_t::Disabled);
   }
 
-  // ── resolve + connect, all inside the handshake budget ──
+  // ── resolve, then dial (connect + TLS) inside one shared budget ──
   auto resolved = co_await cornet::resolve(ctx, u->host(), u->port());
   if (!resolved) co_return unexpected(resolved.error());
 
-  int fd = -1;
-  tls::transport_t tr = make_transport(resolved->addr.ss_family, fd);
-  if (fd < 0) co_return unexpected(errno);
+  // dial's phases and the upgrade below all draw against this one budget;
+  // the self-contained deadline builds its canceler and shares a coarse wheel itself
+  deadline_t deadline{ctx, std::chrono::milliseconds(50), opt.handshake_timeout};
 
-  auto c = co_await with_timeout(ctx, tr.connect(ctx, *resolved), opt.handshake_timeout);
-  if (!c) {
-    tr.abandon(ctx);
-    co_return unexpected(c.error());
-  }
-
-  if (secure) {
-    auto hs = co_await with_timeout(
-        ctx, tr.start_tls(ctx, opt.tls, tls::engine_mode_t::Client, u->host()),
-        opt.handshake_timeout);
-    if (!hs) {
-      tr.abandon(ctx);
-      co_return unexpected(hs.error());
-    }
-  }
+  std::string_view sni = opt.tls_server_name.empty()
+                             ? u->host()
+                             : std::string_view(opt.tls_server_name);
+  tls::dial_options_t dopt{
+      .connect_timeout = opt.handshake_timeout,
+      .handshake_timeout = opt.handshake_timeout,
+      .tls_cx = secure ? opt.tls : nullptr,
+      .server_name = secure ? sni : std::string_view{},
+      .tcp_nodelay = true,
+  };
+  auto tr = co_await tls::dial(ctx, deadline, *resolved, dopt);
+  if (!tr) co_return unexpected(tr.error());
 
   // ── frame and exchange the upgrade request, same budget ──
   char key[kKeyLen];
@@ -257,27 +222,30 @@ coro_t<expected<std::unique_ptr<session_t>>> connect(context_t& ctx,
   frame_handshake_request(out, u->authority(), u->path(), u->query(),
                           std::string_view(key, kKeyLen), offered);
   if (out.failed()) {
-    tr.abandon(ctx);
+    tr->abandon(ctx);
     co_return unexpected(out.error());
   }
 
-  auto exch = co_await with_timeout(
-      ctx, http_upgrade_exchange(ctx, tr, out.view(), pool), opt.handshake_timeout);
+  deadline.cap(opt.handshake_timeout);   // per-phase cap over the shared budget
+  auto exch = co_await with_deadline(
+      ctx, http_upgrade_exchange(ctx, *tr, out.view(), pool), deadline);
   if (!exch) {
-    tr.abandon(ctx);
-    co_return unexpected(exch.error());
+    tr->abandon(ctx);
+    co_return unexpected(deadline.map(exch.error()));
   }
 
   auto proto = validate_handshake_response(*exch, std::string_view(key, kKeyLen),
                                            opt.subprotocols);
   if (!proto) {
-    tr.abandon(ctx);
+    tr->abandon(ctx);
     co_return unexpected(proto.error());
   }
 
-  auto ws = std::make_unique<session_t>(ctx, std::move(tr), role_t::Client, pool,
-                                        ctx.timeout_wheel(), opt.session,
-                                        exch->leftover, nullptr);
+  auto ws = std::make_unique<session_t>(
+      ctx, std::move(*tr), role_t::Client, pool,
+      ctx.wheel_for(std::chrono::milliseconds(opt.session.timer_tick)), opt.session,
+      exch->leftover, nullptr);
+  // the shared_ptr overload keeps the coarse wheel alive for the session's life
   if (!proto->empty()) ws->set_subprotocol(*proto);
   SPDLOG_DEBUG("ws: connected to {}{}", u->authority(),
                u->path().empty() ? "/" : u->path());

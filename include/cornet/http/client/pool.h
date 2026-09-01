@@ -32,6 +32,9 @@ class dns_cache_t {
 
   /**
    * @brief resolve, from cache when possible.
+   * Numeric IP literals short-circuit before the cache lookup: cornet::resolve()
+   * already returns them without a thread-pool hop, so there is nothing worth
+   * caching (and the lookup metrics stay honest about real DNS work).
    */
   CORNET_NODISCARD coro_t<expected<resolved_address>> resolve(std::string_view host,
                                                              uint16_t port);
@@ -72,7 +75,8 @@ class dns_cache_t {
 class client_pool_t {
  public:
   client_pool_t(context_t& ctx, const client_options_t& opt, buffer_pool_t& bufs,
-                timer_wheel_t& wheel, client_metrics_t& metrics, dns_cache_t& dns);
+                std::shared_ptr<timer_wheel_t> wheel, client_metrics_t& metrics,
+                dns_cache_t& dns);
   ~client_pool_t();
 
   client_pool_t(const client_pool_t&) = delete;
@@ -159,7 +163,8 @@ class client_pool_t {
   context_t&              ctx_;
   const client_options_t& opt_;
   buffer_pool_t&          bufs_;
-  timer_wheel_t&          wheel_;
+  // co-owned with client_t: both outlive every connection it lends
+  std::shared_ptr<timer_wheel_t> wheel_;
   client_metrics_t&       metrics_;
   dns_cache_t&            dns_;
 

@@ -8,6 +8,8 @@
 
 #include "cornet/base/defines.h"
 #include "cornet/base/expected.h"
+#include "cornet/concurrency/deadline.h"
+#include "cornet/coroutine/cancel.h"
 #include "cornet/coroutine/coro.h"
 #include "cornet/net/socket.h"
 #include "cornet/tls/context.h"
@@ -51,18 +53,41 @@ class transport_t {
                                                     size_t iov_len);
 
   /**
-   * @brief plain-mode fast paths: return the socket's leaf awaiter without
-   * wrapping it in a ccoro_t, so the caller pays zero frame allocation.
-   *
-   * Only valid when !is_tls(); use the recv()/writev() forms when the
-   * transport mode is not known statically. TLS forces a coroutine because
-   * the record layer's read/write is a pump of several socket ops.
+   * @brief half-close, then a bounded drain.
+   * Half-closing first lets queued writes flush so the peer sees a clean FIN;
+   * a short read window then mops up our receive buffer so the close() that
+   * follows cannot turn into an RST that would eat already-sent bytes (the
+   * peer may discard them once reset). Protocol-agnostic courtesy: the http
+   * server calls it with a dedicated drain canceler, websocket with its read
+   * canceler — the helper neither knows nor cares.
    */
-  CORNET_NODISCARD socket_t::recv_awaiter plain_recv(context_t& ctx, void* buf,
-                                                     size_t len) const;
-  CORNET_NODISCARD socket_t::writev_awaiter plain_writev(context_t& ctx,
-                                                         const struct iovec* iov,
-                                                         size_t iov_len) const;
+  CORNET_NODISCARD coro_t<void> close_gracefully(
+      context_t& ctx, deadline_t& deadline, canceler_t& canceler,
+      std::chrono::milliseconds window = std::chrono::milliseconds(200),
+      uint32_t max_reads = 4);
+
+  /**
+   * @brief per-syscall counters of one writev_all() call, when the caller
+   * reports transport io metrics of its own.
+   */
+  struct writev_stat_t {
+    uint32_t calls{0};    // writev syscalls issued
+    uint32_t partial{0};  // syscalls that left bytes unsent
+  };
+
+  /**
+   * @brief write a whole iovec span, looping over short writes.
+   * The single place the plain/TLS dispatch and the advance loop live: callers
+   * used to hand-copy both, and the copies drifted (partial counters counted
+   * three different things; one advance helper was dead code). The plain
+   * branch awaits the socket's leaf awaiter inside this frame — zero extra
+   * frames per iteration, the same cost the old hand-copied loops paid.
+   * The iovec array is advanced in place; a zero-byte write is ECONNRESET.
+   * Cancellation composes the usual way — wrap in with_cancel().
+   */
+  CORNET_NODISCARD ccoro_t<expected<void>> writev_all(context_t& ctx, struct iovec* iov,
+                                                      size_t iov_len,
+                                                      writev_stat_t* stat = nullptr);
 
   /**
    * @brief upgrade the connection to TLS and run the handshake.

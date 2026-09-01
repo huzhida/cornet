@@ -4,12 +4,14 @@
 #include "cornet/coroutine/coro.h"
 #include "cornet/coroutine/cancel.h"
 #include "cornet/scheduling/context.h"
+#include "cornet/concurrency/deadline.h"
 #include "cornet/concurrency/scope.h"
 #include "cornet/concurrency/timer_wheel.h"
 
 #include <tuple>
 #include <memory>
 #include <optional>
+#include <utility>
 
 namespace cornet {
 
@@ -160,9 +162,63 @@ coro_cancellable_awaiter<V> with_cancel(context_t& ctx, cancelable_coro_t<V> cor
 }
 
 /**
+ * @brief Go-context-style WithDeadline over a caller-owned deadline_t: run
+ * one op under the deadline's canceler, leave the deadline consistent on the
+ * way out. Works for both with_cancel flavours (leaf utask ops and whole
+ * ccoro_t's).
+ *
+ * The deadline owns every arm boundary — with a budget armed, ops simply
+ * draw against the absolute end in sequence (an optional cap(d) before one
+ * op tightens just that op's window):
+ *
+ *   deadline_t deadline{ctx, 50ms, 10s};
+ *   auto c  = co_await with_deadline(ctx, tr.connect(ctx, addr), deadline);
+ *   auto hs = co_await with_deadline(ctx, tr.start_tls(...), deadline);
+ *
+ * A fire keeps its latch: deadline.map(err) still reads ETIMEDOUT, and
+ * later ops die instantly on the latched canceler — the expired-context
+ * semantics, with reset() as the explicit way back. Lifecycle calls
+ * (set_budget / cap / reset) go BETWEEN ops, never inside one.
+ *
+ * Multi-op windows (arm once, kill N awaits) and ops bound to CHILD scopes
+ * stay manual: with_deadline only ever binds deadline.canceler() itself.
+ */
+template<typename Awaitable>
+struct deadline_bound_awaiter {
+  decltype(with_cancel(std::declval<context_t&>(), std::declval<Awaitable&&>(),
+                       std::declval<canceler_t&>())) inner_;
+  deadline_t* deadline_;
+
+  bool await_ready() { return inner_.await_ready(); }
+
+  auto await_suspend(std::coroutine_handle<> h) { return inner_.await_suspend(h); }
+
+  decltype(auto) await_resume() {
+    deadline_->restore_after_op();
+    return inner_.await_resume();
+  }
+};
+
+template<typename Awaitable>
+deadline_bound_awaiter<Awaitable> with_deadline(context_t& ctx, Awaitable op,
+                                                deadline_t& deadline) {
+  return {with_cancel(ctx, std::move(op), deadline.canceler()), &deadline};
+}
+
+/**
  * @brief coroutine-level with_timeout. Races a cancelable coroutine against a
  * deadline on the context's shared timing wheel: if the deadline fires first,
  * the canceler injected into the coro's promise cancels its inflight IO.
+ *
+ * Division of labour among the deadline tools in cornet:
+ * - op-level with_timeout (above): ONE leaf op, sub-tick precision, +1 SQE
+ * - coroutine-level with_timeout (this): bound a whole user coroutine from
+ *   outside; one heap canceler per call
+ * - deadline_t (concurrency/deadline.h): a long-lived object's repeated
+ *   protocol phases (connect/handshake/read/close); zero allocation, fires
+ *   into the owner's own cancelers; with_deadline (above) is its one-op form.
+ *   The http/ws modules standardize on it — new protocol code should not mix
+ *   in the other two.
  *
  * Cost per call: one canceler_t allocation and one O(1) wheel arm. No wrapper
  * coroutines, no timer SQE, no cancel SQE on the success path — the target is

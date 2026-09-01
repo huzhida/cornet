@@ -44,6 +44,15 @@ expected<socklen_t> to_address(std::string_view path, sockaddr_storage& addr) {
 }
 
 coro_t<expected<resolved_address>> resolve(context_t& ctx, std::string_view host, uint16_t port, int family, int type) {
+  // fast path: numeric IP literal — nothing to resolve, skip the thread pool
+  // entirely. A family mismatch falls through to getaddrinfo so the caller gets
+  // the same Resolve error the DNS path would have reported.
+  if (auto fast = try_resolve_numeric(host, port)) {
+    if (family == AF_UNSPEC || fast->addr.ss_family == family) {
+      co_return *fast;
+    }
+  }
+
   std::string host_str(host);
   std::string port_str = std::to_string(port);
 
@@ -260,15 +269,7 @@ cornet::shutdown_awaiter socket_t::shutdown(context_t& ctx, int how) const {
   return shutdown_awaiter{ctx, fd, how};
 }
 ccoro_t<expected<void>> socket_t::connect(context_t& ctx, std::string_view host, uint16_t port) const {
-  // fast path: numeric IP address, no DNS needed
-  resolved_address fast{};
-  auto socklen = to_address(host, port, fast.addr, domain, type, AI_NUMERICHOST);
-  if (socklen) {
-    fast.socklen = socklen.value();
-    co_return co_await connect(ctx, fast);
-  }
-
-  // slow path: hostname, async DNS resolve via thread pool
+  // resolve() handles numeric IPs without touching the thread pool
   auto resolved = co_await resolve(ctx, host, port, domain, type);
   if (!resolved) {
     co_return unexpected(resolved.error());
@@ -277,15 +278,7 @@ ccoro_t<expected<void>> socket_t::connect(context_t& ctx, std::string_view host,
 }
 
 coro_t<expected<void>> socket_t::connect(context_t& ctx, std::string_view host, uint16_t port, canceler_t& canceler) const {
-  // fast path: numeric IP address, no DNS needed
-  resolved_address fast{};
-  auto socklen = to_address(host, port, fast.addr, domain, type, AI_NUMERICHOST);
-  if (socklen) {
-    fast.socklen = socklen.value();
-    co_return co_await with_cancel(ctx, connect(ctx, fast), canceler);
-  }
-
-  // slow path: hostname, async DNS resolve via thread pool
+  // resolve() handles numeric IPs without touching the thread pool
   auto resolved = co_await resolve(ctx, host, port, domain, type);
   if (!resolved) {
     co_return unexpected(resolved.error());

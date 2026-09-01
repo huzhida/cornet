@@ -11,6 +11,7 @@ add_executable(unit EXCLUDE_FROM_ALL
     async.cc
     combinators.cc
     timer_wheel.cc
+    deadline.cc
     runtime.cc
     fs_io.cc
     frame_pool.cc

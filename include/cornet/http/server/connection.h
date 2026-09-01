@@ -16,6 +16,7 @@
 #include "cornet/http/common/parser.h"
 #include "cornet/http/server/router.h"
 #include "cornet/http/common/serializer.h"
+#include "cornet/concurrency/deadline.h"
 #include "cornet/concurrency/timer_wheel.h"
 #include "cornet/tls/transport.h"
 #include "cornet/websocket/session.h"
@@ -121,7 +122,8 @@ struct connection_metrics_t {
 class connection_t {
  public:
   connection_t(context_t& ctx, tls::transport_t transport, const server_options_t& opt,
-               buffer_pool_t& pool, timer_wheel_t& wheel, connection_metrics_t& metrics);
+               buffer_pool_t& pool, std::shared_ptr<timer_wheel_t> wheel,
+               connection_metrics_t& metrics);
   ~connection_t();
 
   connection_t(const connection_t&) = delete;
@@ -238,7 +240,6 @@ class connection_t {
   CORNET_NODISCARD coro_t<expected<void>> writev_span(struct iovec* iov, uint32_t n);
 
   uint32_t build_iovecs(uint32_t begin, uint32_t end);
-  void     advance_iovecs(uint32_t written);
   void     reset_round();
 
   // A streaming response whose route ended without finish(). Either it can
@@ -253,18 +254,18 @@ class connection_t {
   tls::transport_t         tr_;
   const server_options_t&  opt_;
   buffer_pool_t&           pool_;
-  timer_wheel_t&           wheel_;
+  std::shared_ptr<timer_wheel_t> wheel_;
   connection_metrics_t&    metrics_;
-  // Two scopes, matching the two timeout semantics. read_canceler_ is what the
-  // idle/header/body deadlines and request_close() interrupt; writes are never
-  // cancelled (a write in flight must either complete or fail on its own, or
-  // the response gets truncated mid-bytes), so nothing wraps them. drain_canceler_
-  // serves only shutdown_gracefully()'s drain window: it must not be pre-latched
-  // by an earlier request_close(), or the "wait for the peer to read" window
-  // collapses to zero.
-  canceler_t               read_canceler_;
-  canceler_t               drain_canceler_;
-  timer_node_t             timer_{};
+  // the idle/header/body/close-wait deadlines; fires its single internal
+  // canceler, cascading into both scopes below
+   deadline_t               deadline_;
+  // The two kill scopes, children of deadline_'s canceler. A deadline fire
+  // cascades into both; request_close() latches read_scope_ ONLY — so writes
+  // (never wrapped at all, a truncated response is worse than a late timeout)
+  // and the drain window (drain_scope_) survive until their own moments.
+  // Declared after deadline_: their ctors take its canceler as parent.
+  canceler_t               read_scope_;
+  canceler_t               drain_scope_;
   // file bodies: per-connection pipe + TLS staging, both lazy
   int                       splice_pipe_[2]{-1, -1};
   std::unique_ptr<char[]>   file_scratch_;
@@ -316,7 +317,6 @@ class connection_t {
 
   bool close_after_flush_{false};
   bool closing_{false};
-  bool timed_out_{false};
   // set once run_websocket() took the transport: run()'s tail skips the
   // graceful shutdown and the abandon — the session owns both now
   bool upgraded_{false};
