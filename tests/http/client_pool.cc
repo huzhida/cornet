@@ -136,6 +136,39 @@ TEST(http_client_pool, connection_close_is_not_pooled) {
   EXPECT_EQ(env.client().pool().total_count(), 0u);
 }
 
+// A fully drained stream hands a healthy connection back, but nothing on that path
+// disarmed the phase timer: the leftover deadline fired while the connection sat
+// idle in the pool and poisoned it, so the next checkout died with a fake ETIMEDOUT.
+TEST(http_client_pool, a_drained_stream_does_not_poison_the_pooled_connection) {
+  origin_t origin(answer("hi", 2));
+
+  pool_env_t env;
+  // Phase deadlines far below the idle reaper, so the bug (if present) fires first.
+  env.opt.response_timeout = 40ms;
+  env.opt.body_timeout = 40ms;
+  env.opt.idle_timeout = 5s;
+  auto& cli = env.client();
+
+  env.run([&]() -> coro_t<void> {
+    {
+      auto st = co_await cli.stream(method_t::Get, origin.url("/a"));
+      EXPECT_TRUE(st);
+      if (st) EXPECT_TRUE(co_await st->drain());
+    }   // stream dropped here: the connection went back to the pool
+
+    // Outlast any leftover phase deadline, then reuse the pooled connection.
+    co_await sleep(env.ctx, 80ms);
+
+    auto resp = co_await cli.get(origin.url("/b"));
+    EXPECT_TRUE(resp);
+    if (resp) EXPECT_EQ(resp->body(), std::string_view("hi"));
+  }());
+
+  EXPECT_EQ(cli.metrics().conn_created, 1u);
+  EXPECT_EQ(cli.metrics().conn_reused, 1u);
+  EXPECT_EQ(cli.metrics().timeouts, 0u);
+}
+
 // ──────────────────────── the idle-close race ────────────────────────
 
 // The peer closed while the connection sat in the pool. The non-blocking peek on reuse

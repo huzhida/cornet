@@ -11,6 +11,7 @@
 #include "cornet/http/common/trace.h"
 #include "cornet/io_uring/awaiters.h"
 #include "cornet/scheduling/context.h"
+#include "cornet/tls/dial.h"
 
 namespace cornet::http {
 
@@ -102,10 +103,12 @@ void client_options_t::load(config_t* config) {
 
 client_connection_t::client_connection_t(context_t& ctx, tls::transport_t transport,
                                          const client_options_t& opt, buffer_pool_t& pool,
-                                         timer_wheel_t& wheel, client_metrics_t& metrics,
+                                         std::shared_ptr<timer_wheel_t> wheel,
+                                         client_metrics_t& metrics,
                                          std::string host, uint16_t port)
-  : ctx_(ctx), tr_(std::move(transport)), opt_(opt), pool_(pool), wheel_(wheel), metrics_(metrics),
-    canceler_(ctx), host_(std::move(host)), port_(port) {
+  : ctx_(ctx), tr_(std::move(transport)), opt_(opt), pool_(pool), wheel_(*wheel), metrics_(metrics),
+    deadline_(ctx, std::move(wheel), std::chrono::milliseconds{0}, &metrics_.timeouts),
+    host_(std::move(host)), port_(port) {
   if (opt_.tcp_nodelay) {
     int on = 1;
     ::setsockopt(tr_.native_fd(), IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
@@ -118,17 +121,6 @@ client_connection_t::client_connection_t(context_t& ctx, tls::transport_t transp
     .lenient_chunked_length = opt_.lenient_chunked_length,
     .lenient_keep_alive = opt_.lenient_keep_alive,
   });
-
-  timer_.owner = this;
-  timer_.on_expire = [](void* owner) {
-    auto* self = static_cast<client_connection_t*>(owner);
-    self->timed_out_ = true;
-    self->broken_ = true;
-    ++self->metrics_.timeouts;
-    // Only this connection's inflight operation is cancelled. A context-wide sweep
-    // would also reap other connections' writes.
-    self->canceler_.cancel();
-  };
 }
 
 client_connection_t::~client_connection_t() { close(); }
@@ -152,7 +144,6 @@ expected<void> client_connection_t::ensure_node() {
 }
 
 void client_connection_t::close() {
-  wheel_.cancel(timer_);
   wheel_.cancel(idle_timer_);
   if (node_) {
     node_->destroy();
@@ -172,20 +163,22 @@ void client_connection_t::close() {
 
 void client_connection_t::abort() {
   broken_ = true;
-  canceler_.cancel();
+  deadline_.canceler().cancel();
 }
 
 // ───────────────────────────── opening ─────────────────────────────
 
 coro_t<expected<std::unique_ptr<client_connection_t>>> client_connection_t::open(
-    context_t& ctx, const client_options_t& opt, buffer_pool_t& pool, timer_wheel_t& wheel,
-    client_metrics_t& metrics, std::string_view host, uint16_t port, scheme_t scheme,
-    const resolved_address* pre) {
+    context_t& ctx, const client_options_t& opt, buffer_pool_t& pool,
+    std::shared_ptr<timer_wheel_t> wheel, client_metrics_t& metrics, std::string_view host,
+    uint16_t port, scheme_t scheme, const resolved_address* pre) {
   resolved_address addr{};
   if (pre && *pre) {
     addr = *pre;
   } else {
-    ++metrics.dns_lookups;
+    // gate: numeric literals resolve synchronously inside cornet::resolve()
+    // without touching the resolver, so they must not read as a lookup either
+    if (!try_resolve_numeric(host, port)) ++metrics.dns_lookups;
     auto r = co_await cornet::resolve(ctx, host, port);
     if (!r) {
       ++metrics.connect_errors;
@@ -194,66 +187,45 @@ coro_t<expected<std::unique_ptr<client_connection_t>>> client_connection_t::open
     addr = *r;
   }
 
-  std::unique_ptr<client_connection_t> conn;
-  if (addr.addr.ss_family == AF_INET6) {
-    tcp::v6::socket_t sock;
-    if (sock.native_fd() < 0) {
-      ++metrics.connect_errors;
-      co_return unexpected(errno);
-    }
-    conn = std::make_unique<client_connection_t>(ctx, tls::transport_t(std::move(sock)), opt,
-                                                 pool, wheel, metrics, std::string(host), port);
-  } else {
-    tcp::v4::socket_t sock;
-    if (sock.native_fd() < 0) {
-      ++metrics.connect_errors;
-      co_return unexpected(errno);
-    }
-    conn = std::make_unique<client_connection_t>(ctx, tls::transport_t(std::move(sock)), opt,
-                                                 pool, wheel, metrics, std::string(host), port);
-  }
-  conn->scheme_ = scheme;
-
-  if (auto ok = conn->attach(); !ok) co_return unexpected(ok.error());
-
-  conn->arm_phase(opt.connect_timeout);
-  auto c = co_await with_cancel(ctx, conn->tr_.connect(ctx, addr), conn->canceler_);
-  wheel.cancel(conn->timer_);
-  if (!c) {
+  // a self-contained deadline guards the dial phases (no overall budget yet:
+  // set_deadline() only starts owning one once requests fly)
+  deadline_t deadline(ctx, opt.timer_tick, std::chrono::milliseconds{0});
+  std::string_view sni =
+      opt.tls_server_name.empty() ? host : std::string_view(opt.tls_server_name);
+  tls::dial_options_t dopt{
+      .connect_timeout = opt.connect_timeout,
+      .handshake_timeout = opt.handshake_timeout,
+      .tls_cx = scheme == scheme_t::Https ? opt.tls : nullptr,
+      .server_name = scheme == scheme_t::Https ? sni : std::string_view{},
+      .tcp_nodelay = opt.tcp_nodelay,
+  };
+  auto tr = co_await tls::dial(ctx, deadline, addr, dopt);
+  if (!tr) {
     ++metrics.connect_errors;
-    CORNET_HTTP_TRACE_LOG("client: connect to {}:{} failed ({})", host, port,
-                          c.error().message());
-    co_return unexpected(conn->timed_out_ ? error_t{ETIMEDOUT, error_domain::System} : c.error());
+    CORNET_HTTP_TRACE_LOG("client: dial to {}:{} failed ({})", host, port,
+                          tr.error().message());
+    co_return unexpected(tr.error());
   }
 
-  if (scheme == scheme_t::Https) {
-    conn->arm_phase(opt.handshake_timeout);
-    std::string_view sni =
-        opt.tls_server_name.empty() ? std::string_view(host) : std::string_view(opt.tls_server_name);
-    auto hs = co_await with_cancel(
-        ctx, conn->tr_.start_tls(ctx, opt.tls, tls::engine_mode_t::Client, sni), conn->canceler_);
-    wheel.cancel(conn->timer_);
-    if (!hs) {
-      ++metrics.connect_errors;
-      SPDLOG_DEBUG("http client: tls handshake to {}:{} failed ({})", host, port,
-                   hs.error().message());
-      co_return unexpected(conn->timed_out_ ? error_t{ETIMEDOUT, error_domain::System}
-                                            : hs.error());
-    }
-    CORNET_HTTP_TRACE_LOG("client: connected fd={} to {}:{} ({} {})",
-                          conn->native_fd(), host, port,
-                          conn->tr_.tls_version(), conn->tr_.tls_cipher());
-  }
+  auto conn = std::make_unique<client_connection_t>(ctx, std::move(*tr), opt, pool, wheel,
+                                                    metrics, std::string(host), port);
+  conn->scheme_ = scheme;
+  if (auto ok = conn->attach(); !ok) co_return unexpected(ok.error());
 
   ++metrics.conn_created;
   conn->keep_alive_ = true;
   CORNET_HTTP_TRACE_LOG("client: connected fd={} to {}:{}", conn->native_fd(), host, port);
+  if (scheme == scheme_t::Https) {
+    CORNET_HTTP_TRACE_LOG("client: tls established fd={} ({} {})", conn->native_fd(),
+                          conn->tr_.tls_version(), conn->tr_.tls_cipher());
+  }
   co_return std::move(conn);
 }
 
 expected<std::unique_ptr<client_connection_t>> client_connection_t::adopt(
     context_t& ctx, tcp::socket_t sock, const client_options_t& opt, buffer_pool_t& pool,
-    timer_wheel_t& wheel, client_metrics_t& metrics, std::string host, uint16_t port) {
+    std::shared_ptr<timer_wheel_t> wheel, client_metrics_t& metrics, std::string host,
+    uint16_t port) {
   auto conn = std::make_unique<client_connection_t>(ctx, tls::transport_t(std::move(sock)), opt,
                                                     pool, wheel, metrics, std::move(host), port);
   if (auto ok = conn->attach(); !ok) return unexpected(ok.error());
@@ -263,32 +235,6 @@ expected<std::unique_ptr<client_connection_t>> client_connection_t::adopt(
 }
 
 // ───────────────────────────── deadlines ─────────────────────────────
-
-void client_connection_t::set_deadline(std::chrono::milliseconds total) {
-  deadline_ns_ = total.count() > 0
-                     ? ctx_.coarse_now_ns() + uint64_t(total.count()) * 1'000'000ull
-                     : 0;
-}
-
-void client_connection_t::arm_phase(std::chrono::milliseconds phase) {
-  auto use = phase;
-  if (deadline_ns_ != 0) {
-    auto now = ctx_.coarse_now_ns();
-    if (now >= deadline_ns_) {
-      // Already past the overall deadline: fire immediately rather than arming a
-      // timer that would let this phase run for free.
-      timed_out_ = true;
-      broken_ = true;
-      ++metrics_.timeouts;
-      canceler_.cancel();
-      return;
-    }
-    auto left = std::chrono::milliseconds((deadline_ns_ - now) / 1'000'000ull + 1);
-    if (left < use) use = left;
-  }
-  if (use.count() <= 0) use = std::chrono::milliseconds(1);
-  wheel_.arm(timer_, use);
-}
 
 // ───────────────────────────── writing ─────────────────────────────
 
@@ -358,50 +304,18 @@ void client_connection_t::stage_request(client_request_t& req, bool head_only) {
   }
 }
 
-void client_connection_t::advance_iovecs(uint32_t written) {
-  uint32_t left = written;
-  while (left > 0 && iov_head_ < iov_n_) {
-    auto& v = iov_[iov_head_];
-    if (left >= v.iov_len) {
-      left -= uint32_t(v.iov_len);
-      v.iov_len = 0;
-      ++iov_head_;
-    } else {
-      v.iov_base = static_cast<char*>(v.iov_base) + left;
-      v.iov_len -= left;
-      left = 0;
-    }
-  }
-}
-
 coro_t<expected<void>> client_connection_t::write_staged() {
-  while (iov_head_ < iov_n_) {
-    ++metrics_.writev_calls;
-    // Plain TCP takes the socket's leaf awaiter directly (no extra coroutine
-    // frame per write); TLS keeps its pump through transport_t::writev.
-    // is_tls() is settled at connection setup, so the branch predicts.
-    expected<size_t> n;
-    if (!tr_.is_tls()) {
-      auto r = co_await with_cancel(
-          ctx_, tr_.plain_writev(ctx_, iov_ + iov_head_, iov_n_ - iov_head_), canceler_);
-      n = r ? expected<size_t>(static_cast<size_t>(*r)) : unexpected(r.error());
-    } else {
-      n = co_await with_cancel(
-          ctx_, tr_.writev(ctx_, iov_ + iov_head_, iov_n_ - iov_head_), canceler_);
-    }
-    if (!n) {
-      broken_ = true;
-      if (timed_out_) co_return unexpected(ETIMEDOUT);
-      co_return unexpected(n.error());
-    }
-    if (*n == 0) {
-      broken_ = true;
-      co_return unexpected(ECONNRESET);
-    }
-    auto before = iov_head_;
-    advance_iovecs(uint32_t(*n));
-    if (iov_head_ == before) ++metrics_.writev_partial;
+  tls::transport_t::writev_stat_t stat;
+  auto w = co_await with_cancel(
+      ctx_, tr_.writev_all(ctx_, iov_ + iov_head_, iov_n_ - iov_head_, &stat),
+      deadline_.canceler());
+  metrics_.writev_calls += stat.calls;
+  metrics_.writev_partial += stat.partial;
+  if (!w) {
+    broken_ = true;
+    co_return unexpected(deadline_.map(w.error()));
   }
+  iov_head_ = iov_n_;
   co_return expected<void>{};
 }
 
@@ -415,17 +329,9 @@ coro_t<expected<uint32_t>> client_connection_t::fill() {
     // that does not fit.
     co_return http_unexpected(http_error_t::HeaderTooLarge);
   }
-  expected<size_t> n;
-  if (!tr_.is_tls()) {
-    auto r = co_await with_cancel(ctx_, tr_.plain_recv(ctx_, w.data(), w.size()), canceler_);
-    n = r ? expected<size_t>(static_cast<size_t>(*r)) : unexpected(r.error());
-  } else {
-    n = co_await with_cancel(ctx_, tr_.recv(ctx_, w.data(), w.size()), canceler_);
-  }
-  if (!n) {
-    if (timed_out_) co_return unexpected(ETIMEDOUT);
-    co_return unexpected(n.error());
-  }
+  auto n = co_await with_cancel(ctx_, tr_.recv(ctx_, w.data(), w.size()),
+                                deadline_.canceler());
+  if (!n) co_return unexpected(deadline_.map(n.error()));
   if (*n == 0) co_return uint32_t(0);
   node_->head.commit(uint32_t(*n));
   responded_ = true;
@@ -435,7 +341,9 @@ coro_t<expected<uint32_t>> client_connection_t::fill() {
 void client_connection_t::record_headers() {
   node_->status = status_t(parser_.status_code());
   node_->version = parser_.version();
-  node_->keep_alive = parser_.keep_alive();
+  // keep_alive deliberately NOT recorded here: downgrades after the headers
+  // would leave a stale value on the node; the response is stamped at the
+  // take_response() handoff from the single working copy below
   node_->chunked = parser_.chunked();
   node_->has_content_length = parser_.has_content_length();
   node_->content_length = parser_.content_length();
@@ -445,6 +353,11 @@ void client_connection_t::record_headers() {
 
 void client_connection_t::finish_message() {
   body_complete_ = true;
+  // No phase deadline outlives the full response. The streaming drain-then-drop
+  // path returns to the pool without passing take_response(), and nobody else
+  // touches this deadline while the connection is idle: left armed, it would
+  // still fire in the pool and mark the connection timed out for no reason.
+  deadline_.set_budget(std::chrono::milliseconds{0});
   if (parser_.has_pending_input()) {
     // This connection never pipelines, so nothing may follow a finished response.
     // Whatever is sitting there, the peer sent something we did not ask for: the
@@ -462,7 +375,7 @@ coro_t<expected<bool>> client_connection_t::read_headers(method_t m, bool stop_a
   for (;;) {
     parser_t::result_t r;
     if (need_fill) {
-      arm_phase(opt_.response_timeout);
+      deadline_.cap(opt_.response_timeout);
       auto got = co_await fill();
       if (!got) {
         broken_ = true;
@@ -506,7 +419,7 @@ coro_t<expected<bool>> client_connection_t::read_headers(method_t m, bool stop_a
         if (r == parser_t::result_t::MessageReady) finish_message();
         CORNET_HTTP_TRACE_LOG("client: fd={} {} (cl={} chunked={} keep_alive={})", native_fd(),
                               uint16_t(node_->status), node_->content_length, node_->chunked,
-                              node_->keep_alive);
+                              keep_alive_);
         co_return false;
       }
 
@@ -585,7 +498,7 @@ coro_t<expected<uint32_t>> client_connection_t::refill_body() {
   CORNET_ASSERT(!parser_.mid_header(),
                 "rewinding under a half-accumulated header would splice its bytes");
   node_->head.rewind_to(body_window_);
-  arm_phase(opt_.body_timeout);
+  deadline_.cap(opt_.body_timeout);
   auto got = co_await fill();
   if (!got) co_return unexpected(got.error());
   co_return *got;
@@ -737,7 +650,12 @@ expected<client_response_t> client_connection_t::take_response() {
   if (!node_ || !headers_done_ || !body_complete_) {
     return http_unexpected(http_error_t::InvalidState);
   }
-  wheel_.cancel(timer_);
+  deadline_.set_budget(std::chrono::milliseconds{0});
+  // handoff stamp: the headers' first keep_alive answer may have been
+  // downgraded since (framing error, Connection: close override); the
+  // response must report the final value, so it is taken from the working
+  // copy at the moment ownership moves
+  node_->keep_alive = keep_alive_;
   auto* node = node_;
   node_ = nullptr;
   headers_done_ = false;
@@ -792,7 +710,7 @@ coro_t<expected<void>> client_connection_t::send_and_read_headers(client_request
   // With Expect: 100-continue the head goes out alone; the body waits for the peer's
   // permission, which is the only thing that makes the header worth sending.
   stage_request(req, expect_continue);
-  arm_phase(opt_.write_timeout);
+  deadline_.cap(opt_.write_timeout);
   if (auto ok = co_await write_staged(); !ok) co_return unexpected(ok.error());
 
   if (expect_continue) {
@@ -806,7 +724,7 @@ coro_t<expected<void>> client_connection_t::send_and_read_headers(client_request
       if (!body.empty()) {
         iov_[iov_n_++] = {const_cast<char*>(body.data()), body.size()};
       }
-      arm_phase(opt_.write_timeout);
+      deadline_.cap(opt_.write_timeout);
       if (auto ok = co_await write_staged(); !ok) co_return unexpected(ok.error());
     } else {
       // A final response instead: the peer refused the body, so it never went out.
@@ -850,7 +768,7 @@ coro_t<expected<void>> client_connection_t::begin_chunked(client_request_t& req)
   }
 
   stage_request(req, true);
-  arm_phase(opt_.write_timeout);
+  deadline_.cap(opt_.write_timeout);
   co_return co_await write_staged();
 }
 
@@ -874,7 +792,7 @@ coro_t<expected<void>> client_connection_t::write_chunk(std::string_view data) {
   iov_[iov_n_++] = {const_cast<char*>(data.data()), data.size()};
   iov_[iov_n_++] = {const_cast<char*>(kCrlf), 2};
 
-  arm_phase(opt_.write_timeout);
+  deadline_.cap(opt_.write_timeout);
   co_return co_await write_staged();
 }
 
@@ -884,7 +802,7 @@ coro_t<expected<void>> client_connection_t::finish_chunks() {
   iov_n_ = 0;
   iov_head_ = 0;
   iov_[iov_n_++] = {const_cast<char*>(kLastChunk), sizeof(kLastChunk)};
-  arm_phase(opt_.write_timeout);
+  deadline_.cap(opt_.write_timeout);
   co_return co_await write_staged();
 }
 

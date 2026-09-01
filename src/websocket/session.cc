@@ -33,6 +33,7 @@ void session_options_t::load(config_t* config, const char* prefix) {
   };
   duration("idle_timeout", idle_timeout);
   duration("close_timeout", close_timeout);
+  duration("timer_tick", timer_tick);
 }
 
 // ───────────────────────────── message_t ─────────────────────────────
@@ -51,11 +52,12 @@ std::string_view message_t::close_reason() const {
 // ───────────────────────────── session_t ─────────────────────────────
 
 session_t::session_t(context_t& ctx, tls::transport_t tr, role_t role,
-                     http::buffer_pool_t& pool, timer_wheel_t& wheel,
+                     http::buffer_pool_t& pool, std::shared_ptr<timer_wheel_t> wheel,
                      const session_options_t& opt, std::string_view leftover,
                      http::connection_metrics_t* metrics)
-  : ctx_(ctx), tr_(std::move(tr)), role_(role), pool_(pool), wheel_(wheel),
-    opt_(opt), metrics_(metrics), decoder_(role), read_canceler_(ctx) {
+  : ctx_(ctx), tr_(std::move(tr)), role_(role), pool_(pool),
+    opt_(opt), metrics_(metrics), decoder_(role),
+    deadline_(ctx, std::move(wheel)) {
   // The leftover must fit: it arrived in the handshake buffer, which the
   // receive window normally exceeds — but nothing forces that, so size for it.
   auto lease = pool_.acquire(
@@ -65,16 +67,6 @@ session_t::session_t(context_t& ctx, tls::transport_t tr, role_t role,
     std::memcpy(in_.writable().data(), leftover.data(), leftover.size());
     in_.commit(uint32_t(leftover.size()));
   }
-
-  timer_.owner = this;
-  timer_.on_expire = [](void* owner) {
-    auto* self = static_cast<session_t*>(owner);
-    self->timed_out_ = true;
-    // reads only, the same discipline as the http connection: an interrupted
-    // writev is a truncated frame, and a truncated frame desynchronizes the
-    // stream far worse than a late timeout
-    self->read_canceler_.cancel();
-  };
 
   if (role_ == role_t::Client) {
     // xorshift seeds the frame masks; zero is a degenerate state the generator
@@ -87,7 +79,6 @@ session_t::session_t(context_t& ctx, tls::transport_t tr, role_t role,
 }
 
 session_t::~session_t() {
-  wheel_.cancel(timer_);
   // finish() closes politely; reaching the destructor unfinished means the
   // frame was destroyed mid-flight, where ceremony no longer matters
   if (!finished_ && tr_.native_fd() >= 0) tr_.abandon(ctx_);
@@ -99,7 +90,7 @@ bool session_t::is_open() const {
 
 void session_t::request_close() {
   closing_ = true;
-  read_canceler_.cancel();
+  deadline_.canceler().cancel();
 }
 
 // ─────────────────────────────── io helpers ───────────────────────────────
@@ -115,51 +106,27 @@ coro_t<expected<uint32_t>> session_t::fill() {
     w = in_.writable();
     if (w.empty()) co_return unexpected(E2BIG);  // unreachable; the window is never pinned
   }
-  if (!close_wait_ && opt_.idle_timeout.count() > 0 && !timed_out_) {
-    // the wheel owns the deadline — one SQE per read, not two
-    wheel_.arm(timer_, opt_.idle_timeout);
+  if (!close_wait_ && opt_.idle_timeout.count() > 0 && !deadline_.fired()) {
+    // the wheel owns the deadline — one SQE per read, not two; rolling idle:
+    // every fill opens a fresh era for this read and the gap after it
+    deadline_.set_budget(opt_.idle_timeout);
   }
-  expected<size_t> n;
-  if (!tr_.is_tls()) {
-    auto r = co_await with_cancel(ctx_, tr_.plain_recv(ctx_, w.data(), w.size()),
-                                  read_canceler_);
-    n = r ? expected<size_t>(static_cast<size_t>(*r)) : unexpected(r.error());
-  } else {
-    n = co_await with_cancel(ctx_, tr_.recv(ctx_, w.data(), w.size()), read_canceler_);
-  }
-  if (!n) {
-    if (timed_out_) co_return unexpected(ETIMEDOUT);
-    co_return unexpected(n.error());
-  }
+  auto n = co_await with_deadline(ctx_, tr_.recv(ctx_, w.data(), w.size()), deadline_);
+  if (!n) co_return unexpected(deadline_.map(n.error()));
   in_.commit(uint32_t(*n));
   co_return uint32_t(*n);
 }
 
 coro_t<expected<void>> session_t::writev_span(struct iovec* iov, uint32_t n) {
-  uint32_t done = 0;
-  while (done < n) {
-    if (metrics_) ++metrics_->writev_calls;
-    // no cancellation on the write path: a partial frame on the wire is a
-    // desynchronized stream (see the timer comment)
-    expected<size_t> w;
-    if (!tr_.is_tls()) {
-      auto r = co_await tr_.plain_writev(ctx_, iov + done, n - done);
-      w = r ? expected<size_t>(static_cast<size_t>(*r)) : unexpected(r.error());
-    } else {
-      w = co_await tr_.writev(ctx_, iov + done, n - done);
-    }
-    if (!w) co_return unexpected(w.error());
-    if (*w == 0) co_return unexpected(ECONNRESET);
-    uint32_t remaining = uint32_t(*w);
-    for (size_t i = done; i < n && remaining > 0; ++i) {
-      uint32_t take = remaining < iov[i].iov_len ? remaining : iov[i].iov_len;
-      iov[i].iov_base = static_cast<char*>(iov[i].iov_base) + take;
-      iov[i].iov_len -= take;
-      remaining -= take;
-    }
-    while (done < n && iov[done].iov_len == 0) ++done;
-    if (done < n && metrics_) ++metrics_->writev_partial;
+  // no cancellation on the write path: a partial frame on the wire is a
+  // desynchronized stream (see the timer comment)
+  tls::transport_t::writev_stat_t stat;
+  auto w = co_await tr_.writev_all(ctx_, iov, n, &stat);
+  if (metrics_) {
+    metrics_->writev_calls += stat.calls;
+    metrics_->writev_partial += stat.partial;
   }
+  if (!w) co_return unexpected(w.error());
   co_return expected<void>{};
 }
 
@@ -264,7 +231,7 @@ coro_t<expected<message_t>> session_t::fail_protocol(websocket_error_t err,
   if (metrics_) ++metrics_->protocol_errors;
   SPDLOG_DEBUG("ws: protocol violation ({}), closing with {}",
                websocket_error_name(int(err)), uint16_t(code));
-  if (state_ == state_t::Open && !timed_out_) {
+  if (state_ == state_t::Open && !deadline_.fired()) {
     co_await close(code);
     // the peer knows it erred now; nothing further will be read
   }
@@ -485,7 +452,7 @@ coro_t<void> session_t::finish() {
   }
 
   // 1. get our Close out unless the transport already failed us
-  if (state_ == state_t::Open && !timed_out_) {
+  if (state_ == state_t::Open && !deadline_.fired()) {
     auto code = closing_ ? close_code_t::GoingAway : close_code_t::Normal;
     auto ok = co_await close(code);
     (void)ok;  // a failed close write still ends here; the peer is already gone
@@ -494,40 +461,24 @@ coro_t<void> session_t::finish() {
   // 2. wait out the peer's Close, bounded; a peer that never answers must not
   //    hold the connection slot (idle_timeout stays out of the way: this
   //    window has its own budget, marked by close_wait_)
-  if (state_ != state_t::CloseReceived && !timed_out_) {
+  if (state_ != state_t::CloseReceived && !deadline_.fired()) {
     close_wait_ = true;
-    timed_out_ = false;
-    wheel_.arm(timer_, opt_.close_timeout);
-    while (state_ != state_t::CloseReceived && !timed_out_) {
+    deadline_.set_budget(opt_.close_timeout);
+    while (state_ != state_t::CloseReceived && !deadline_.fired()) {
       auto msg = co_await step(false);
       if (!msg) break;   // transport, timeout or protocol error: stop waiting
     }
     close_wait_ = false;
-    wheel_.cancel(timer_);
+    // keep the latch: a fire in the wait above also cancels the drain below
+    deadline_.set_budget(std::chrono::milliseconds{0});
   }
 
-  // 3. half-close and drain briefly. An outright close can surface as RST at
-  //    the peer and eat the Close we just sent; a few short reads give the
-  //    peer's FIN time to arrive (the http connection's shutdown_gracefully
-  //    makes the same trade).
-  if (!timed_out_) {
-    auto sd = co_await tr_.shutdown_write(ctx_);
-    (void)sd;
-    char scratch[512];
-    wheel_.arm(timer_, std::chrono::milliseconds(200));
-    for (int i = 0; i < 4 && !timed_out_; ++i) {
-      expected<size_t> n;
-      if (!tr_.is_tls()) {
-        auto r = co_await with_cancel(ctx_, tr_.plain_recv(ctx_, scratch, sizeof(scratch)),
-                                      read_canceler_);
-        n = r ? expected<size_t>(static_cast<size_t>(*r)) : unexpected(r.error());
-      } else {
-        n = co_await with_cancel(ctx_, tr_.recv(ctx_, scratch, sizeof(scratch)),
-                                 read_canceler_);
-      }
-      if (!n || *n == 0) break;
-    }
-    wheel_.cancel(timer_);
+  // 3. half-close and drain briefly: an outright close can surface as RST at
+  //    the peer and eat the Close we just sent. The ritual lives in the
+  //    transport now — the same one the http connection's graceful shutdown
+  //    uses; our state machine above only gates whether we get here at all.
+  if (!deadline_.fired()) {
+    co_await tr_.close_gracefully(ctx_, deadline_, deadline_.canceler());
   }
 
   tr_.abandon(ctx_);

@@ -161,14 +161,14 @@ auto m = co_await sock.recvmsg(ctx, &msg, 0);
 ### 自动解析（connect 内置）
 
 ```cpp
-// IP 地址走快速路径（同步 getaddrinfo），域名走线程池异步解析
+// IP 字面量走快速路径（inet_pton 同步解析，零线程池往返），域名走线程池异步解析
 auto ret = co_await sock.connect(ctx, "example.com", 443);
 ```
 
 ### 手动解析（复用地址）
 
 ```cpp
-// 异步解析（通过线程池，不阻塞事件循环）
+// resolve() 内部统一处理：数字 IP 同步返回，域名通过线程池异步解析（不阻塞事件循环）
 auto resolved = co_await cornet::resolve(ctx, "example.com", 443);
 if (!resolved) {
     // resolved.error() — 解析错误

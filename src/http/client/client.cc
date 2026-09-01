@@ -31,7 +31,7 @@ bool redirect_becomes_get(uint16_t code) {
 client_t::client_t(context_t& ctx, client_options_t opt)
   : ctx_(ctx), opt_(std::move(opt)), bufs_(buffer_pool_t::local()),
     wheel_(ctx.wheel_for(opt_.timer_tick)), dns_(ctx, opt_, metrics_),
-    pool_(ctx, opt_, bufs_, *wheel_, metrics_, dns_) {
+    pool_(ctx, opt_, bufs_, wheel_, metrics_, dns_) {
   opt_.load(ctx.config());
 }
 

@@ -28,6 +28,8 @@ struct client_options_t {
   std::shared_ptr<tls::tls_context_t> tls{};
   // covers connect, the TLS handshake and the HTTP upgrade exchange together
   std::chrono::milliseconds handshake_timeout{10000};
+  // SNI and certificate verification name override; empty uses the url host
+  std::string tls_server_name{};
   // subprotocols to offer, in preference order; the wire joins them with ", "
   std::vector<std::string> subprotocols{};
   // session budgets once the handshake succeeds

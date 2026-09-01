@@ -9,6 +9,7 @@ add_library(cornet_tls STATIC
     engine.cc
     stream.cc
     transport.cc
+    dial.cc
 )
 add_library(cornet::tls ALIAS cornet_tls)
 target_link_libraries(cornet_tls PUBLIC cornet)

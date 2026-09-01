@@ -48,6 +48,10 @@ struct opening_guard_t {
 } // namespace
 
 coro_t<expected<resolved_address>> dns_cache_t::resolve(std::string_view host, uint16_t port) {
+  // numeric literal: nothing worth caching, resolve() returns it without a
+  // thread-pool hop and without touching the lookup counters.
+  if (auto fast = try_resolve_numeric(host, port)) co_return *fast;
+
   auto now = ctx_.coarse_now_ns();
 
   // ── cache lookup ──
@@ -92,8 +96,9 @@ void dns_cache_t::store(std::string_view host, const resolved_address& addr) {
 // ─────────────────────────────── client_pool_t ───────────────────────────────
 
 client_pool_t::client_pool_t(context_t& ctx, const client_options_t& opt, buffer_pool_t& bufs,
-                             timer_wheel_t& wheel, client_metrics_t& metrics, dns_cache_t& dns)
-  : ctx_(ctx), opt_(opt), bufs_(bufs), wheel_(wheel), metrics_(metrics), dns_(dns) {}
+                             std::shared_ptr<timer_wheel_t> wheel, client_metrics_t& metrics,
+                             dns_cache_t& dns)
+  : ctx_(ctx), opt_(opt), bufs_(bufs), wheel_(std::move(wheel)), metrics_(metrics), dns_(dns) {}
 
 client_pool_t::~client_pool_t() { clear(); }
 
@@ -130,7 +135,7 @@ void client_pool_t::arm_idle(bucket_t& bucket, client_connection_t& conn) {
   auto& node = conn.idle_timer();
   node.owner = &conn;
   node.on_expire = &client_pool_t::on_idle_expired;
-  if (opt_.idle_timeout.count() > 0) wheel_.arm(node, opt_.idle_timeout);
+  if (opt_.idle_timeout.count() > 0) wheel_->arm(node, opt_.idle_timeout);
 }
 
 void client_pool_t::on_idle_expired(void* owner) {
@@ -162,7 +167,7 @@ void client_pool_t::grant_or_park(bucket_t& bucket, conn_ptr conn) {
       // A slot rather than a connection: the waiter opens a fresh one.
       auto* waiter = bucket.waiters.front();
       bucket.waiters.erase(bucket.waiters.begin());
-      wheel_.cancel(waiter->timer);
+      wheel_->cancel(waiter->timer);
       waiter->granted = nullptr;
       if (waiter->handle) ctx_.spawn(waiter->handle);
       return;
@@ -170,7 +175,7 @@ void client_pool_t::grant_or_park(bucket_t& bucket, conn_ptr conn) {
 
     auto* waiter = bucket.waiters.front();
     bucket.waiters.erase(bucket.waiters.begin());
-    wheel_.cancel(waiter->timer);
+    wheel_->cancel(waiter->timer);
     waiter->granted = conn.get();
     bucket.busy.push_back(std::move(conn));
     ++metrics_.conn_reused;
@@ -202,7 +207,7 @@ client_pool_t::wait_awaiter::~wait_awaiter() {
   // pull out of both queues — grant_or_park and the wheel must never walk a
   // waiter embedded in a freed coroutine frame. Both removals are address-based
   // no-ops once the grant/expire path has already dequeued us.
-  pool->wheel_.cancel(waiter.timer);
+  pool->wheel_->cancel(waiter.timer);
   if (waiter.bucket) {
     auto& q = static_cast<bucket_t*>(waiter.bucket)->waiters;
     q.erase(std::remove(q.begin(), q.end(), &waiter), q.end());
@@ -220,12 +225,12 @@ void client_pool_t::wait_awaiter::await_suspend(std::coroutine_handle<> h) {
   waiter.timer.on_expire = &client_pool_t::on_wait_expired;
   bucket->waiters.push_back(&waiter);
   if (pool->opt_.pool_wait_timeout.count() > 0) {
-    pool->wheel_.arm(waiter.timer, pool->opt_.pool_wait_timeout);
+    pool->wheel_->arm(waiter.timer, pool->opt_.pool_wait_timeout);
   }
 }
 
 expected<client_connection_t*> client_pool_t::wait_awaiter::await_resume() {
-  pool->wheel_.cancel(waiter.timer);
+  pool->wheel_->cancel(waiter.timer);
   waiter.work.release();
   if (waiter.expired) return http_unexpected(http_error_t::PoolExhausted);
   // nullptr is not a failure: it means a slot freed up rather than a connection, and
@@ -244,11 +249,12 @@ coro_t<expected<client_connection_t*>> client_pool_t::acquire(std::string_view h
     while (!bucket.idle.empty()) {
       auto conn = std::move(bucket.idle.back());
       bucket.idle.pop_back();
-      wheel_.cancel(conn->idle_timer());
+      wheel_->cancel(conn->idle_timer());
 
-      if (!conn->alive_hint()) {
-        // The peer closed it while it sat here, or sent something we never asked
-        // for. Either way it cannot serve a request.
+      if (!conn->reusable() || !conn->alive_hint()) {
+        // reusable() catching anything here means the connection went bad while it
+        // sat in the pool, and no request should learn about it on the wire. The
+        // peer may also have closed it, or sent something we never asked for.
         ++metrics_.stale_discarded;
         CORNET_HTTP_TRACE_LOG("client: fd={} was stale, discarding", conn->native_fd());
         conn->close();
@@ -268,21 +274,7 @@ coro_t<expected<client_connection_t*>> client_pool_t::acquire(std::string_view h
         total_ < opt_.max_total_conns) {
       opening_guard_t opening{bucket.opening};
 
-      // Fast path: numeric IP — skip the DNS cache coroutine entirely.
-      auto addr_or = try_resolve_numeric(host, port);
-      if (addr_or) {
-        auto opened = co_await client_connection_t::open(ctx_, opt_, bufs_, wheel_, metrics_, host,
-                                                         port, scheme, &*addr_or);
-        if (!opened) co_return unexpected(opened.error());
-
-        (*opened)->set_pool(this);
-        auto* raw = opened->get();
-        bucket.busy.push_back(std::move(*opened));
-        ++total_;
-        co_return raw;
-      }
-
-      // Slow path: DNS resolution through cache.
+      // dns_.resolve() short-circuits numeric literals before the cache.
       auto addr = co_await dns_.resolve(host, port);
       if (!addr) {
         co_return unexpected(addr.error());
@@ -324,7 +316,7 @@ void client_pool_t::release(client_connection_t* conn, bool reusable) {
     if (!bucket.waiters.empty()) {
       auto* waiter = bucket.waiters.front();
       bucket.waiters.erase(bucket.waiters.begin());
-      wheel_.cancel(waiter->timer);
+      wheel_->cancel(waiter->timer);
       waiter->granted = nullptr;
       if (waiter->handle) ctx_.spawn(waiter->handle);
     }
@@ -338,14 +330,14 @@ void client_pool_t::clear() {
   for (auto& [host, ports] : origins_) {
     for (auto& [port, bucket] : ports) {
       for (auto* waiter : bucket.waiters) {
-        wheel_.cancel(waiter->timer);
+        wheel_->cancel(waiter->timer);
         waiter->expired = true;
         if (waiter->handle) ctx_.spawn(waiter->handle);
       }
       bucket.waiters.clear();
 
       for (auto& conn : bucket.idle) {
-        wheel_.cancel(conn->idle_timer());
+        wheel_->cancel(conn->idle_timer());
         conn->close();
       }
       bucket.idle.clear();

@@ -98,10 +98,14 @@ void server_options_t::load(config_t* config) {
 
 connection_t::connection_t(context_t& ctx, tls::transport_t transport,
                            const server_options_t& opt,
-                           buffer_pool_t& pool, timer_wheel_t& wheel,
+                           buffer_pool_t& pool, std::shared_ptr<timer_wheel_t> wheel,
                            connection_metrics_t& metrics)
-  : ctx_(ctx), tr_(std::move(transport)), opt_(opt), pool_(pool), wheel_(wheel),
-    metrics_(metrics), read_canceler_(ctx), drain_canceler_(ctx),
+  : ctx_(ctx), tr_(std::move(transport)), opt_(opt), pool_(pool),
+    wheel_(std::move(wheel)),
+    metrics_(metrics),
+    deadline_(ctx, wheel_, std::chrono::milliseconds{0}, &metrics_.timeouts),
+    read_scope_(ctx, deadline_.canceler()),
+    drain_scope_(ctx, deadline_.canceler()),
     parser_(parser_t::type_t::Request), reader_(*this) {
   if (opt_.tcp_nodelay) {
     int on = 1;
@@ -119,25 +123,9 @@ connection_t::connection_t(context_t& ctx, tls::transport_t transport,
   req_.bind(parser_, headers_, params_);
   resp_.bind(hdr_out_, body_out_);
   resp_.bind(*this);
-
-  timer_.owner = this;
-  timer_.on_expire = [](void* owner) {
-    auto* self = static_cast<connection_t*>(owner);
-    self->timed_out_ = true;
-    ++self->metrics_.timeouts;
-    // A read deadline interrupts reads only. Writes are deliberately out of
-    // scope: cancelling a writev that is already mid-response truncates the
-    // reply on the wire, and latching the canceler would silently drop every
-    // response queued after it.
-    self->read_canceler_.cancel();
-    self->drain_canceler_.cancel();
-  };
 }
 
-connection_t::~connection_t() {
-  wheel_.cancel(timer_);
-  release_buffers();
-}
+connection_t::~connection_t() { release_buffers(); }
 
 expected<void> connection_t::attach_buffers() {
   auto head = pool_.acquire(opt_.max_header_bytes);
@@ -181,8 +169,8 @@ void connection_t::request_close() {
   closing_ = true;
   // Only the read side is cancelled; anything already queued for write still
   // goes out, which is what keeps a graceful drain from truncating responses.
-  // drain_canceler_ is left alone so shutdown_gracefully() keeps its window.
-  read_canceler_.cancel();
+  // drain_scope_ is left alone so shutdown_gracefully() keeps its window.
+  read_scope_.cancel();
   // An upgraded connection parks in the session's recv, not ours: the drain
   // reaches it the same way, and the session winds down with GoingAway.
   if (ws_active_) ws_active_->request_close();
@@ -199,22 +187,13 @@ coro_t<expected<uint32_t>> connection_t::fill() {
     co_return http_unexpected(http_error_t::HeaderTooLarge);
   }
   CORNET_HTTP_TRACE_LOG("fd={}: recv armed, window={}", tr_.native_fd(), w.size());
-  // Plain TCP takes the socket's leaf awaiter directly — no transport
-  // coroutine frame per read. TLS goes through transport_t::recv (the record
-  // layer's pump genuinely needs a coroutine). is_tls() is stable after
-  // connection setup, so this branch predicts perfectly.
-  expected<size_t> n;
-  if (!tr_.is_tls()) {
-    auto r = co_await with_cancel(ctx_, tr_.plain_recv(ctx_, w.data(), w.size()), read_canceler_);
-    n = r ? expected<size_t>(static_cast<size_t>(*r)) : unexpected(r.error());
-  } else {
-    n = co_await with_cancel(ctx_, tr_.recv(ctx_, w.data(), w.size()), read_canceler_);
-  }
+  // transport_t::recv dispatches plain/TLS internally; the canceler finds the
+  // right op through the promise either way.
+  auto n = co_await with_cancel(ctx_, tr_.recv(ctx_, w.data(), w.size()), read_scope_);
   if (!n) {
     CORNET_HTTP_TRACE_LOG("fd={}: recv failed ({}), timed_out={}",
-                          tr_.native_fd(), n.error().message(), timed_out_);
-    if (timed_out_) co_return unexpected(ETIMEDOUT);
-    co_return unexpected(n.error());
+                          tr_.native_fd(), n.error().message(), deadline_.fired());
+    co_return unexpected(deadline_.map(n.error()));
   }
   CORNET_HTTP_TRACE_LOG("fd={}: recv {} bytes", tr_.native_fd(), *n);
   if (*n == 0) co_return uint32_t(0);
@@ -317,7 +296,7 @@ coro_t<expected<std::string_view>> connection_t::read_body_chunk() {
         CORNET_ASSERT(!parser_.mid_header(),
                       "rewinding under a half-accumulated header would splice its bytes");
         in_.rewind_to(body_window_);
-        wheel_.arm(timer_, opt_.body_timeout);
+        deadline_.set_budget(opt_.body_timeout);
         auto got = co_await fill();
         if (!got) co_return unexpected(got.error());
         if (*got == 0) co_return unexpected(ECONNRESET);
@@ -459,11 +438,6 @@ CORNET_NODISCARD coro_t<expected<void>> connection_t::flush_stream() {
   bool first_flush = headers_staged_;
   if (first_flush) headers_staged_ = false;
 
-  uint32_t total_len = stream_out_.size();
-  if (first_flush) {
-    total_len += head_out_.size() + resp_.hdr_length();
-  }
-
   // 3 iovec segments max: head + hdr + chunk-data
   struct iovec iov[3];
   uint32_t iov_n = 0;
@@ -477,36 +451,15 @@ CORNET_NODISCARD coro_t<expected<void>> connection_t::flush_stream() {
     iov[iov_n++] = {stream_out_.data(), stream_out_.size()};
   }
 
-  uint32_t written_total = 0;
-  while (written_total < total_len) {
-    ++metrics_.writev_calls;
-    // no cancellation on the write path: an interrupted writev is a truncated
-    // response (see the comment on the cancelers in connection.h). Plain TCP
-    // skips the transport coroutine frame; TLS keeps it (record layer pump).
-    expected<size_t> n;
-    if (!tr_.is_tls()) {
-      auto r = co_await tr_.plain_writev(ctx_, iov, iov_n);
-      n = r ? expected<size_t>(static_cast<size_t>(*r)) : unexpected(r.error());
-    } else {
-      n = co_await tr_.writev(ctx_, iov, iov_n);
-    }
-    if (!n) {
-      CORNET_HTTP_TRACE_LOG("fd={}: writev failed ({})", tr_.native_fd(), n.error().message());
-      co_return unexpected(n.error());
-    }
-    CORNET_HTTP_TRACE_LOG("fd={}: writev wrote {} bytes", tr_.native_fd(), *n);
-    if (*n == 0) co_return unexpected(ECONNRESET);
-
-    // Advance through iovecs until we've accounted for *n bytes
-    uint32_t remaining = uint32_t(*n);
-    for (uint32_t i = 0; i < iov_n && remaining > 0; ++i) {
-      auto& v = iov[i];
-      uint32_t take = remaining < v.iov_len ? remaining : v.iov_len;
-      v.iov_base = static_cast<char*>(v.iov_base) + take;
-      v.iov_len -= take;
-      remaining -= take;
-    }
-    written_total += uint32_t(*n);
+  // no cancellation on the write path: an interrupted writev is a truncated
+  // response (see the comment on the cancelers in connection.h).
+  tls::transport_t::writev_stat_t stat;
+  auto w = co_await tr_.writev_all(ctx_, iov, iov_n, &stat);
+  metrics_.writev_calls += stat.calls;
+  metrics_.writev_partial += stat.partial;
+  if (!w) {
+    CORNET_HTTP_TRACE_LOG("fd={}: writev failed ({})", tr_.native_fd(), w.error().message());
+    co_return unexpected(w.error());
   }
 
   stream_out_.clear();
@@ -514,27 +467,17 @@ CORNET_NODISCARD coro_t<expected<void>> connection_t::flush_stream() {
 }
 
 coro_t<expected<void>> connection_t::write_direct(std::string_view data) {
-  const char* p = data.data();
-  size_t left = data.size();
-  while (left > 0) {
-    struct iovec iov{const_cast<char*>(p), left};
-    ++metrics_.writev_calls;
-    // no cancellation on the write path, same rationale as flush_stream()
-    expected<size_t> n;
-    if (!tr_.is_tls()) {
-      auto r = co_await tr_.plain_writev(ctx_, &iov, 1);
-      n = r ? expected<size_t>(static_cast<size_t>(*r)) : unexpected(r.error());
-    } else {
-      n = co_await tr_.writev(ctx_, &iov, 1);
-    }
-    if (!n) {
-      CORNET_HTTP_TRACE_LOG("fd={}: direct write failed ({})", tr_.native_fd(),
-                            n.error().message());
-      co_return unexpected(n.error());
-    }
-    if (*n == 0) co_return unexpected(ECONNRESET);
-    p += *n;
-    left -= *n;
+  if (data.empty()) co_return expected<void>{};
+  // no cancellation on the write path, same rationale as flush_stream()
+  struct iovec iov{const_cast<char*>(data.data()), data.size()};
+  tls::transport_t::writev_stat_t stat;
+  auto w = co_await tr_.writev_all(ctx_, &iov, 1, &stat);
+  metrics_.writev_calls += stat.calls;
+  metrics_.writev_partial += stat.partial;
+  if (!w) {
+    CORNET_HTTP_TRACE_LOG("fd={}: direct write failed ({})", tr_.native_fd(),
+                          w.error().message());
+    co_return unexpected(w.error());
   }
   co_return expected<void>{};
 }
@@ -741,51 +684,17 @@ uint32_t connection_t::build_iovecs(uint32_t begin, uint32_t end) {
   return iov_n_;
 }
 
-void connection_t::advance_iovecs(uint32_t written) {
-  while (written > 0 && iov_head_ < iov_n_) {
-    auto& v = iov_[iov_head_];
-    if (written >= v.iov_len) {
-      written -= uint32_t(v.iov_len);
-      ++iov_head_;
-    } else {
-      // Partial write: advance in place rather than rebuilding the list.
-      v.iov_base = static_cast<char*>(v.iov_base) + written;
-      v.iov_len -= written;
-      written = 0;
-    }
-  }
-}
-
-// Write one assembled iovec span to the socket, handling short writes.
-// Extracted verbatim from the old flush loop so pipelined responses and file
-// bodies share exactly the same write discipline.
+// Thin metric-recording adapter over transport_t::writev_all; the short-write
+// loop, dispatch and advance discipline live in the transport now.
 coro_t<expected<void>> connection_t::writev_span(struct iovec* iov, uint32_t n) {
-  uint32_t done = 0;
-  while (done < n) {
-    ++metrics_.writev_calls;
-    // no cancellation on the write path, same rationale as send_stream().
-    // Plain TCP takes the frame-free socket awaiter; TLS keeps its pump.
-    expected<size_t> w;
-    if (!tr_.is_tls()) {
-      auto r = co_await tr_.plain_writev(ctx_, iov + done, n - done);
-      w = r ? expected<size_t>(static_cast<size_t>(*r)) : unexpected(r.error());
-    } else {
-      w = co_await tr_.writev(ctx_, iov + done, n - done);
-    }
-    if (!w) {
-      CORNET_HTTP_TRACE_LOG("fd={}: writev failed ({})", tr_.native_fd(), w.error().message());
-      co_return unexpected(w.error());
-    }
-    if (*w == 0) co_return unexpected(ECONNRESET);
-    uint32_t remaining = uint32_t(*w);
-    for (size_t i = done; i < n && remaining > 0; ++i) {
-      uint32_t take = remaining < iov[i].iov_len ? remaining : iov[i].iov_len;
-      iov[i].iov_base = static_cast<char*>(iov[i].iov_base) + take;
-      iov[i].iov_len -= take;
-      remaining -= take;
-    }
-    while (done < n && iov[done].iov_len == 0) ++done;
-    if (done < n) ++metrics_.writev_partial;
+  // no cancellation on the write path, same rationale as send_stream().
+  tls::transport_t::writev_stat_t stat;
+  auto w = co_await tr_.writev_all(ctx_, iov, n, &stat);
+  metrics_.writev_calls += stat.calls;
+  metrics_.writev_partial += stat.partial;
+  if (!w) {
+    CORNET_HTTP_TRACE_LOG("fd={}: writev failed ({})", tr_.native_fd(), w.error().message());
+    co_return unexpected(w.error());
   }
   co_return expected<void>{};
 }
@@ -936,24 +845,7 @@ coro_t<void> connection_t::shutdown_gracefully() {
   // Half-close, then read briefly. Closing outright can make the peer see an RST
   // and discard a response we already wrote.
   CORNET_HTTP_TRACE_LOG("fd={}: half-close then drain", tr_.native_fd());
-  auto sd = co_await tr_.shutdown_write(ctx_);
-  (void)sd;
-
-  char scratch[512];
-  wheel_.arm(timer_, std::chrono::milliseconds(200));
-  for (int i = 0; i < 4; ++i) {
-    expected<size_t> n;
-    if (!tr_.is_tls()) {
-      auto r = co_await with_cancel(ctx_, tr_.plain_recv(ctx_, scratch, sizeof(scratch)),
-                                    drain_canceler_);
-      n = r ? expected<size_t>(static_cast<size_t>(*r)) : unexpected(r.error());
-    } else {
-      n = co_await with_cancel(ctx_, tr_.recv(ctx_, scratch, sizeof(scratch)),
-                               drain_canceler_);
-    }
-    if (!n || *n == 0) break;
-  }
-  wheel_.cancel(timer_);
+  co_await tr_.close_gracefully(ctx_, deadline_, drain_scope_);
   co_return;
 }
 
@@ -970,11 +862,10 @@ coro_t<void> connection_t::run(const router_t& router) {
   CORNET_HTTP_TRACE_LOG("fd={}: run start, header buffer {}B",
                         tr_.native_fd(), in_.capacity());
 
-  wheel_.arm(timer_, opt_.idle_timeout);
-  bool first_read = true;
+  deadline_.set_budget(opt_.idle_timeout);
   uint32_t pipelined = 0;
 
-  while (!closing_ && !timed_out_) {
+  while (!closing_ && !deadline_.fired()) {
     // ── 1. read (or reuse leftover pipelined bytes) and (re)start parsing.
     if (in_body_ && !parser_.has_pending_input()) {
       // Mid-body: the header section stays where it is and the tail region is reused.
@@ -1009,8 +900,7 @@ coro_t<void> connection_t::run(const router_t& router) {
         CORNET_HTTP_TRACE_LOG("fd={}: peer closed", tr_.native_fd());
         break;
       }
-      first_read = false;
-      wheel_.arm(timer_, in_body_ ? opt_.body_timeout : opt_.header_timeout);
+      deadline_.set_budget(in_body_ ? opt_.body_timeout : opt_.header_timeout);
 
       r = parser_.execute(in_.write_pos() - *got, *got);
     }
@@ -1308,17 +1198,17 @@ coro_t<void> connection_t::run(const router_t& router) {
       in_.compact();
     }
     pipelined = 0;
-    wheel_.arm(timer_, opt_.idle_timeout);
+    deadline_.set_budget(opt_.idle_timeout);
   }
 
-  (void)first_read;
   if (spill_.used() > 0) ++metrics_.spill_used;
 
   CORNET_HTTP_TRACE_LOG("fd={}: loop exit (closing={} timed_out={} requests={})",
-                        tr_.native_fd(), closing_, timed_out_, metrics_.requests);
+                        tr_.native_fd(), closing_, deadline_.fired(), metrics_.requests);
 
-  wheel_.cancel(timer_);
-  if (!timed_out_ && !upgraded_) {
+  // keep the latch for the shutdown decision below; only stop new fires
+  deadline_.set_budget(std::chrono::milliseconds{0});
+  if (!deadline_.fired() && !upgraded_) {
     // An upgraded connection had its close ceremony inside the session
     // already; a second half-close would be protocol noise.
     co_await shutdown_gracefully();

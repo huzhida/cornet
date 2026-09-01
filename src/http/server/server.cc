@@ -154,7 +154,7 @@ coro_t<void> server_t::serve_connection(tcp::socket_t sock) {
     CORNET_HTTP_TRACE_LOG("conn fd={}: tls {} {}", transport.native_fd(),
                           transport.tls_version(), transport.tls_cipher());
   }
-  connection_t conn(ctx_, std::move(transport), opt_, pool_, *wheel_, metrics_);
+  connection_t conn(ctx_, std::move(transport), opt_, pool_, wheel_, metrics_);
   ++conns_;
   active_.push_back(&conn);
   CORNET_HTTP_TRACE_LOG("conn fd={}: begin", conn.native_fd());

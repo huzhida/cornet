@@ -7,6 +7,7 @@
 #include <string_view>
 #include <sys/uio.h>
 
+#include "cornet/concurrency/deadline.h"
 #include "cornet/concurrency/timer_wheel.h"
 #include "cornet/coroutine/cancel.h"
 #include "cornet/coroutine/coro.h"
@@ -42,6 +43,11 @@ struct session_options_t {
   std::chrono::milliseconds idle_timeout{0};
   // how long finish() waits for the peer's Close before closing the transport
   std::chrono::milliseconds close_timeout{2000};
+  // timing-wheel tick for idle/close/drain deadlines. Wheel tenants are keyed
+  // by tick on the context, so the default shares one coarse wheel with
+  // whoever else picked 100ms — do NOT point these deadlines at the
+  // coroutine-deadline wheel (its 5ms tick means thousands of empty rounds).
+  std::chrono::milliseconds timer_tick{100};
   // receive window; a frame larger than this is aggregated from runs, so this
   // is a memory budget, not a wire limit
   uint32_t recv_buffer_bytes{64u << 10};
@@ -105,8 +111,14 @@ struct message_t {
  */
 class session_t {
  public:
+  /**
+   * @param wheel shared wheel ownership: a session co-owns its deadline wheel
+   * for its whole life, so the wheel cannot be reclaimed out from under an
+   * armed idle deadline (client sessions otherwise reference a wheel nobody
+   * keeps once the connect() frame is gone).
+   */
   session_t(context_t& ctx, tls::transport_t tr, role_t role, http::buffer_pool_t& pool,
-            timer_wheel_t& wheel, const session_options_t& opt,
+            std::shared_ptr<timer_wheel_t> wheel, const session_options_t& opt,
             std::string_view leftover = {}, http::connection_metrics_t* metrics = nullptr);
   ~session_t();
 
@@ -210,13 +222,13 @@ class session_t {
   tls::transport_t         tr_;
   role_t                   role_;
   http::buffer_pool_t&     pool_;
-  timer_wheel_t&           wheel_;
   session_options_t        opt_;
   http::connection_metrics_t* metrics_;
 
   frame_decoder_t decoder_;
-  canceler_t      read_canceler_;
-  timer_node_t    timer_{};
+  // idle/close-wait/drain deadlines; its canceler IS the read kill switch
+  // (no scope needs shielding here: once reads die the session is closing)
+   deadline_t deadline_;
 
   http::head_buffer_t in_;
   http::body_buffer_t msg_;   // aggregation for fragmented / window-spanning messages
@@ -232,7 +244,6 @@ class session_t {
 
   state_t   state_{state_t::Open};
   bool      closing_{false};    // request_close() latched; close reason GoingAway
-  bool      timed_out_{false};
   // marks finish()'s Close wait: fill() arms this window with close_timeout
   // instead of the idle deadline
   bool      close_wait_{false};

@@ -29,7 +29,11 @@ struct resolved_address {
 };
 
 /**
- * @brief async DNS resolve. Offloads getaddrinfo to thread pool to avoid blocking the event loop.
+ * @brief resolve a host to an address, synchronously for numeric IP literals.
+ * Numeric IPs (see try_resolve_numeric) are parsed inline and co_return-ed
+ * immediately — this is the single entry point every caller should use, so no
+ * call site needs its own numeric fast path. Only real hostnames offload
+ * getaddrinfo to the thread pool to avoid blocking the event loop.
  * @param host hostname or IP address
  * @param port port number
  * @param family address family (AF_INET, AF_INET6, AF_UNSPEC)

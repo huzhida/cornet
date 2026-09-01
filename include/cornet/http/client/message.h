@@ -44,6 +44,8 @@ struct inbound_t {
   status_t  status{status_t::Ok};
   version_t version{version_t::Unknown};
   uint64_t  content_length{0};
+  // stamped by the connection at handoff: the FINAL keep-alive decision,
+  // which may have been downgraded after the headers were parsed
   bool      keep_alive{false};
   bool      chunked{false};
   bool      has_content_length{false};
