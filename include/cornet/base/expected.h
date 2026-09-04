@@ -1,6 +1,8 @@
 #ifndef CORNET_EXPECTED_H
 #define CORNET_EXPECTED_H
 
+#include <atomic>
+#include <cstddef>
 #include <cstring>
 #include <netdb.h>
 #include <type_traits>
@@ -20,6 +22,11 @@ enum class error_domain : uint8_t {
   Http,       // HTTP protocol errors (llhttp errno), rendered via the resolver below
   Tls,        // tls module errors (tls_error_t), rendered via the resolver below
   Websocket,  // websocket module errors (websocket_error_t), rendered via the resolver below
+
+  // Values from here on are allocated by register_error_domain() to external
+  // modules (libraries living outside this repo); never name them here —
+  // an external module must not know or care which value it got.
+  External = 64,
 };
 
 /**
@@ -60,6 +67,51 @@ inline domain_message_fn& websocket_message_resolver() {
   return fn;
 }
 
+namespace detail {
+
+// capacity of the external-domain table, shared by register/lookup
+inline constexpr size_t kMaxExternalDomains = 256 - size_t(error_domain::External);
+
+inline std::atomic<domain_message_fn>& external_domain_slot(size_t idx) {
+  static std::atomic<domain_message_fn> table[kMaxExternalDomains] = {};
+  return table[idx];
+}
+
+} // namespace detail
+
+/**
+ * @brief allocate an error domain for a module outside this repo.
+ *
+ * The bundled domains (Http/Tls/Websocket) own one resolver slot each, which
+ * does not scale to third-party code: any number of external libraries may
+ * want their own domain. They call this once — typically lazily from a
+ * function-local static, so it is thread-safe — and keep the returned value.
+ *
+ * @param fn the module's code-to-message renderer
+ * @return the allocated domain; error_domain::External itself when the table
+ *         is full (192 slots — unreachable in practice)
+ */
+inline error_domain register_error_domain(domain_message_fn fn) {
+  static std::atomic<size_t> count{0};
+  const size_t idx = count.fetch_add(1, std::memory_order_relaxed);
+  if (idx >= detail::kMaxExternalDomains) {
+    return error_domain::External;  // exhausted: messages degrade to the fallback
+  }
+  detail::external_domain_slot(idx).store(fn, std::memory_order_release);
+  return error_domain(uint8_t(error_domain::External) + uint8_t(idx));
+}
+
+/**
+ * @brief the renderer registered for an External domain, or nullptr.
+ */
+inline domain_message_fn external_message_resolver(error_domain d) {
+  const size_t idx = size_t(uint8_t(d)) - size_t(error_domain::External);
+  if (uint8_t(d) < uint8_t(error_domain::External) || idx >= detail::kMaxExternalDomains) {
+    return nullptr;
+  }
+  return detail::external_domain_slot(idx).load(std::memory_order_acquire);
+}
+
 /**
  * @brief unified error type supporting multiple error domains
  */
@@ -90,7 +142,13 @@ struct error_t {
         auto fn = websocket_message_resolver();
         return fn ? fn(code) : "websocket error";
       }
-      default: return "no error";
+      default: {
+        if (uint8_t(domain) >= uint8_t(error_domain::External)) {
+          auto fn = external_message_resolver(domain);
+          return fn ? fn(code) : "external domain error";
+        }
+        return "no error";
+      }
     }
   }
 };
