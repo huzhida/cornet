@@ -29,6 +29,7 @@ option(CORNET_HTTP_TRACE "Log every http phase transition (accept/recv/parse/rou
 option(CORNET_HTTP_CLIENT "Build the http client submodule" ON)
 option(CORNET_ENABLE_BENCH "Build the benchmark target (requires asio)" OFF)
 option(CORNET_ENABLE_TESTS "Build the unit test target (requires GTest and asio)" OFF)
+option(CORNET_BUILD_EXAMPLES "Build examples and hello-cornet (not needed for library consumers)" OFF)
 option(CORNET_METRICS "Build with cornet metrics" OFF)
 if(CORNET_METRICS)
     add_compile_definitions(CORNET_METRICS)
@@ -43,8 +44,10 @@ pkg_check_modules(LIBURING REQUIRED IMPORTED_TARGET liburing)
 
 add_subdirectory(src)
 
-if(CORNET_WITH_HTTP)
-    add_subdirectory(examples)
+if(CORNET_BUILD_EXAMPLES)
+    if(CORNET_WITH_HTTP)
+        add_subdirectory(examples)
+    endif()
 endif()
 if(CORNET_ENABLE_BENCH)
     # 自定义二进制目录：子目录名 bench 会和输出在构建根的 bench 可执行文件冲突
@@ -56,10 +59,12 @@ if(CORNET_ENABLE_TESTS)
 endif()
 
 # ─── 主程序 ───
-add_executable(hello-cornet main.cc)
-target_link_libraries(hello-cornet PRIVATE cornet)
-if(CORNET_WITH_HTTP)
-    target_link_libraries(hello-cornet PRIVATE cornet_http)
+if(CORNET_BUILD_EXAMPLES)
+    add_executable(hello-cornet main.cc)
+    target_link_libraries(hello-cornet PRIVATE cornet)
+    if(CORNET_WITH_HTTP)
+        target_link_libraries(hello-cornet PRIVATE cornet_http)
+    endif()
 endif()
 
 # ─── 安装 ───
